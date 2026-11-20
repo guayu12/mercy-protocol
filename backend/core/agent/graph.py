@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+from collections import defaultdict
 from dotenv import load_dotenv
 
 # Load environment variables FIRST — before any module reads them
@@ -206,6 +207,8 @@ def build_user_message(query: str, image_base64: Optional[str] = None) -> HumanM
         {"type": "image_url", "image_url": {"url": url}},
     ])
 
+_thread_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
 async def _close_pending_tool_calls(graph, config):
     """If a previous run stopped between the agent and tools nodes (e.g. client
     disconnect), answer the dangling tool calls so OpenAI accepts the history."""
@@ -230,34 +233,36 @@ async def process_query(query: str, thread_id: str, image_base64: Optional[str] 
     {"type": "tool", "name": str, "status": "start"|"end"}
     {"type": "done", "reply": str} — final full reply
     """
-    graph = await init_graph()
-    config = {"configurable": {"thread_id": thread_id}}
-    await _close_pending_tool_calls(graph, config)
-    log_bus.emit("flow", "FLOW",
-                 f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_base64 else ''}")
+    # Serialize turns per thread so concurrent requests don't overwrite each other's checkpoints
+    async with _thread_locks[thread_id]:
+        graph = await init_graph()
+        config = {"configurable": {"thread_id": thread_id}}
+        await _close_pending_tool_calls(graph, config)
+        log_bus.emit("flow", "FLOW",
+                     f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_base64 else ''}")
 
-    async for event in graph.astream_events(
-        {"messages": [build_user_message(query, image_base64)], "context": ""},
-        config=config,
-        version="v2",
-    ):
-        kind = event["event"]
-        if kind == "on_chat_model_stream":
-            if event.get("metadata", {}).get("langgraph_node") != "agent":
-                continue
-            text = _text_of(event["data"]["chunk"].content)
-            if text:
-                yield {"type": "token", "content": text}
-        elif kind == "on_tool_start":
-            log_bus.emit("tool", "TOOL", f"► {event['name']}({str(event['data'].get('input', ''))[:80]})")
-            yield {"type": "tool", "name": event["name"], "status": "start"}
-        elif kind == "on_tool_end":
-            output = event["data"].get("output")
-            output = getattr(output, "content", output)
-            log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
-            yield {"type": "tool", "name": event["name"], "status": "end"}
+        async for event in graph.astream_events(
+            {"messages": [build_user_message(query, image_base64)], "context": ""},
+            config=config,
+            version="v2",
+        ):
+            kind = event["event"]
+            if kind == "on_chat_model_stream":
+                if event.get("metadata", {}).get("langgraph_node") != "agent":
+                    continue
+                text = _text_of(event["data"]["chunk"].content)
+                if text:
+                    yield {"type": "token", "content": text}
+            elif kind == "on_tool_start":
+                log_bus.emit("tool", "TOOL", f"► {event['name']}({str(event['data'].get('input', ''))[:80]})")
+                yield {"type": "tool", "name": event["name"], "status": "start"}
+            elif kind == "on_tool_end":
+                output = event["data"].get("output")
+                output = getattr(output, "content", output)
+                log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
+                yield {"type": "tool", "name": event["name"], "status": "end"}
 
-    state = await graph.aget_state(config)
-    reply = _text_of(state.values["messages"][-1].content)
-    log_bus.emit("flow", "FLOW", f"◈ reply ready → {len(reply)} chars")
-    yield {"type": "done", "reply": reply}
+        state = await graph.aget_state(config)
+        reply = _text_of(state.values["messages"][-1].content)
+        log_bus.emit("flow", "FLOW", f"◈ reply ready → {len(reply)} chars")
+        yield {"type": "done", "reply": reply}
