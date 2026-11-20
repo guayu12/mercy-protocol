@@ -8,7 +8,7 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 load_dotenv(os.path.join(BACKEND_DIR, ".env"))
 from typing import TypedDict, Annotated, AsyncIterator, Optional
 import aiosqlite
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
@@ -168,7 +168,8 @@ Always be concise, professional, and helpful.
 # 6. Build the Graph
 workflow = StateGraph(AgentState)
 workflow.add_node("agent", agent_node)
-workflow.add_node("tools", ToolNode(tools))
+# Tool exceptions become ToolMessages so the model sees the error (and the thread stays valid)
+workflow.add_node("tools", ToolNode(tools, handle_tool_errors=True))
 workflow.add_edge(START, "agent")
 workflow.add_conditional_edges("agent", tools_condition)
 workflow.add_edge("tools", "agent")
@@ -205,6 +206,24 @@ def build_user_message(query: str, image_base64: Optional[str] = None) -> HumanM
         {"type": "image_url", "image_url": {"url": url}},
     ])
 
+async def _close_pending_tool_calls(graph, config):
+    """If a previous run stopped between the agent and tools nodes (e.g. client
+    disconnect), answer the dangling tool calls so OpenAI accepts the history."""
+    state = await graph.aget_state(config)
+    messages = state.values.get("messages", []) if state.values else []
+    if not state.next or not messages or not isinstance(messages[-1], AIMessage):
+        return
+    pending = getattr(messages[-1], "tool_calls", None) or []
+    if not pending:
+        return
+    log_bus.emit("warn", "FLOW", f"closing {len(pending)} interrupted tool call(s) from previous run")
+    await graph.aupdate_state(
+        config,
+        {"messages": [ToolMessage(content="Tool call interrupted.", tool_call_id=tc["id"], name=tc["name"])
+                      for tc in pending]},
+        as_node="tools",
+    )
+
 async def process_query(query: str, thread_id: str, image_base64: Optional[str] = None) -> AsyncIterator[dict]:
     """Run the graph for one turn, yielding stream events:
     {"type": "token", "content": str} — incremental reply text
@@ -213,6 +232,7 @@ async def process_query(query: str, thread_id: str, image_base64: Optional[str] 
     """
     graph = await init_graph()
     config = {"configurable": {"thread_id": thread_id}}
+    await _close_pending_tool_calls(graph, config)
     log_bus.emit("flow", "FLOW",
                  f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_base64 else ''}")
 
