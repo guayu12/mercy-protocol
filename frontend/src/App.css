@@ -1,0 +1,435 @@
+@import "tailwindcss";
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   MERCY PROTOCOL — AI JUDICIAL INTERFACE v2.0
+   Dark holographic aesthetic inspired by Mercy (2026) AI Judge
+═══════════════════════════════════════════════════════════════════ */
+
+
+/* ─── Global Reset ─── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ─── CSS Custom Properties ─── */
+:root {
+  --cyan: #00e5ff;
+  --cyan-dim: #00b4cc;
+  --amber: #ffab00;
+  --red-alert: #ff3d5a;
+  --green-ok: #00ff88;
+  --bg-deep: #030810;
+  --bg-panel: rgba(4, 14, 30, 0.85);
+  --bg-panel-hover: rgba(0, 229, 255, 0.04);
+  --border-cyan: rgba(0, 229, 255, 0.25);
+  --border-amber: rgba(255, 171, 0, 0.3);
+  --font-mono: 'Share Tech Mono', 'Courier New', monospace;
+  --font-ui: 'Rajdhani', 'Exo 2', sans-serif;
+  --glow-cyan: 0 0 20px rgba(0, 229, 255, 0.4), 0 0 60px rgba(0, 229, 255, 0.1);
+  --glow-amber: 0 0 20px rgba(255, 171, 0, 0.4), 0 0 60px rgba(255, 171, 0, 0.1);
+  --glow-red: 0 0 20px rgba(255, 61, 90, 0.5), 0 0 60px rgba(255, 61, 90, 0.15);
+}
+
+/* ─── Scanline Overlay ─── */
+.scanlines::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(to bottom,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 0, 0, 0.08) 2px,
+      rgba(0, 0, 0, 0.08) 4px);
+  pointer-events: none;
+  z-index: 9999;
+  animation: scanline-drift 8s linear infinite;
+}
+
+@keyframes scanline-drift {
+  0% {
+    background-position: 0 0;
+  }
+
+  100% {
+    background-position: 0 200px;
+  }
+}
+
+/* ─── Vignette ─── */
+.vignette::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.8) 100%);
+  pointer-events: none;
+  z-index: 9998;
+}
+
+/* ─── Tactical Grid Background ─── */
+.tactical-grid {
+  background-color: var(--bg-deep);
+  background-image:
+    linear-gradient(rgba(0, 229, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 229, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(0, 229, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 229, 255, 0.015) 1px, transparent 1px);
+  background-size: 80px 80px, 80px 80px, 20px 20px, 20px 20px;
+}
+
+/* ─── Holographic Panel ─── */
+.holo-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-cyan);
+  backdrop-filter: blur(12px);
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.holo-panel:hover {
+  border-color: rgba(0, 229, 255, 0.5);
+  box-shadow: var(--glow-cyan), inset 0 0 30px rgba(0, 229, 255, 0.02);
+}
+
+.holo-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  opacity: 0.6;
+}
+
+/* Amber accent variant */
+.holo-panel-amber {
+  border-color: var(--border-amber);
+}
+
+.holo-panel-amber::before {
+  background: linear-gradient(90deg, transparent, var(--amber), transparent);
+}
+
+.holo-panel-amber:hover {
+  border-color: rgba(255, 171, 0, 0.6);
+  box-shadow: var(--glow-amber), inset 0 0 30px rgba(255, 171, 0, 0.02);
+}
+
+/* Corner slice decorations */
+.corner-cut {
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+}
+
+/* ─── Neon Text ─── */
+.neon-cyan {
+  color: var(--cyan);
+  text-shadow: 0 0 8px rgba(0, 229, 255, 0.8), 0 0 20px rgba(0, 229, 255, 0.4);
+}
+
+.neon-amber {
+  color: var(--amber);
+  text-shadow: 0 0 8px rgba(255, 171, 0, 0.8), 0 0 20px rgba(255, 171, 0, 0.4);
+}
+
+.neon-red {
+  color: var(--red-alert);
+  text-shadow: 0 0 8px rgba(255, 61, 90, 0.8), 0 0 20px rgba(255, 61, 90, 0.4);
+}
+
+.neon-green {
+  color: var(--green-ok);
+  text-shadow: 0 0 8px rgba(0, 255, 136, 0.8), 0 0 20px rgba(0, 255, 136, 0.4);
+}
+
+/* ─── Data Stream Animation ─── */
+@keyframes data-scroll {
+  from {
+    transform: translateY(0);
+  }
+
+  to {
+    transform: translateY(-50%);
+  }
+}
+
+.data-stream {
+  animation: data-scroll 12s linear infinite;
+}
+
+/* ─── Pulse Animations ─── */
+@keyframes ping-cyan {
+
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 229, 255, 0.7);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px rgba(0, 229, 255, 0);
+  }
+}
+
+.pulse-cyan {
+  animation: ping-cyan 2s ease-in-out infinite;
+}
+
+@keyframes flicker {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  92% {
+    opacity: 1;
+  }
+
+  93% {
+    opacity: 0.4;
+  }
+
+  94% {
+    opacity: 1;
+  }
+
+  96% {
+    opacity: 0.6;
+  }
+
+  97% {
+    opacity: 1;
+  }
+}
+
+.flicker {
+  animation: flicker 5s ease-in-out infinite;
+}
+
+/* ─── Scan Bar ─── */
+@keyframes scan-bar {
+  0% {
+    top: -4px;
+  }
+
+  100% {
+    top: 100%;
+  }
+}
+
+.scan-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  box-shadow: 0 0 12px 2px rgba(0, 229, 255, 0.6);
+  animation: scan-bar 4s linear infinite;
+  pointer-events: none;
+}
+
+/* ─── Waveform / Spectrum ─── */
+.waveform-bar {
+  display: inline-block;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--cyan);
+  animation: wave-bounce 0.8s ease-in-out infinite alternate;
+  box-shadow: 0 0 6px rgba(0, 229, 255, 0.5);
+}
+
+@keyframes wave-bounce {
+  from {
+    transform: scaleY(0.15);
+    opacity: 0.5;
+  }
+
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+/* ─── Custom Scrollbar ─── */
+.mercy-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.mercy-scroll::-webkit-scrollbar-track {
+  background: rgba(0, 229, 255, 0.05);
+}
+
+.mercy-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 229, 255, 0.3);
+  border-radius: 2px;
+}
+
+.mercy-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 229, 255, 0.6);
+}
+
+/* ─── Input Styling ─── */
+.mercy-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  caret-color: var(--cyan);
+}
+
+.mercy-input::placeholder {
+  color: rgba(0, 229, 255, 0.3);
+}
+
+/* ─── Button Hover Effects ─── */
+.btn-holo {
+  position: relative;
+  overflow: hidden;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.3);
+  color: var(--cyan);
+  transition: all 0.25s ease;
+}
+
+.btn-holo:hover {
+  background: rgba(0, 229, 255, 0.18);
+  border-color: var(--cyan);
+  box-shadow: var(--glow-cyan);
+  transform: scale(1.04);
+}
+
+.btn-holo:active {
+  transform: scale(0.97);
+}
+
+.btn-holo-amber {
+  background: rgba(255, 171, 0, 0.08);
+  border-color: rgba(255, 171, 0, 0.3);
+  color: var(--amber);
+}
+
+.btn-holo-amber:hover {
+  background: rgba(255, 171, 0, 0.18);
+  border-color: var(--amber);
+  box-shadow: var(--glow-amber);
+  transform: scale(1.04);
+}
+
+.btn-send {
+  background: linear-gradient(135deg, rgba(0, 229, 255, 0.2), rgba(0, 180, 200, 0.3));
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  box-shadow: var(--glow-cyan);
+  transition: all 0.25s ease;
+}
+
+.btn-send:hover {
+  background: linear-gradient(135deg, rgba(0, 229, 255, 0.35), rgba(0, 180, 200, 0.5));
+  box-shadow: 0 0 30px rgba(0, 229, 255, 0.6);
+  transform: scale(1.06);
+}
+
+.btn-send:disabled {
+  opacity: 0.35;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-mic-active {
+  background: rgba(255, 61, 90, 0.2) !important;
+  border-color: var(--red-alert) !important;
+  color: var(--red-alert) !important;
+  box-shadow: var(--glow-red) !important;
+}
+
+/* ─── Message Bubbles ─── */
+.msg-user {
+  background: linear-gradient(135deg, rgba(0, 180, 255, 0.15), rgba(0, 229, 255, 0.08));
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  color: #e0f7fa;
+}
+
+.msg-assistant {
+  background: rgba(4, 20, 40, 0.7);
+  border: 1px solid rgba(0, 229, 255, 0.2);
+  color: #b2ebf2;
+}
+
+.msg-system {
+  background: rgba(255, 171, 0, 0.06);
+  border: 1px solid rgba(255, 171, 0, 0.25);
+  color: rgba(255, 220, 120, 0.9);
+}
+
+/* ─── Avatar Frame ─── */
+.avatar-frame {
+  background: linear-gradient(180deg, rgba(0, 10, 25, 0.9) 0%, rgba(0, 5, 15, 0.95) 100%);
+  border: 1px solid rgba(0, 229, 255, 0.2);
+  box-shadow:
+    inset 0 0 60px rgba(0, 229, 255, 0.04),
+    0 0 40px rgba(0, 229, 255, 0.08);
+  overflow: hidden;
+}
+
+/* Corner decorations for avatar frame */
+.corner-tl,
+.corner-tr,
+.corner-bl,
+.corner-br {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  z-index: 10;
+}
+
+.corner-tl {
+  top: 8px;
+  left: 8px;
+  border-top: 2px solid var(--cyan);
+  border-left: 2px solid var(--cyan);
+}
+
+.corner-tr {
+  top: 8px;
+  right: 8px;
+  border-top: 2px solid var(--cyan);
+  border-right: 2px solid var(--cyan);
+}
+
+.corner-bl {
+  bottom: 8px;
+  left: 8px;
+  border-bottom: 2px solid var(--cyan);
+  border-left: 2px solid var(--cyan);
+}
+
+.corner-br {
+  bottom: 8px;
+  right: 8px;
+  border-bottom: 2px solid var(--cyan);
+  border-right: 2px solid var(--cyan);
+}
+
+/* ─── Top Bar ─── */
+.top-bar-line {
+  background: linear-gradient(90deg,
+      transparent 0%,
+      rgba(0, 229, 255, 0.5) 20%,
+      rgba(0, 229, 255, 0.8) 50%,
+      rgba(0, 229, 255, 0.5) 80%,
+      transparent 100%);
+  height: 1px;
+}

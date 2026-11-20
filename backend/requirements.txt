@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+langchain
+langchain-community
+langgraph
+langchain-openai
+chromadb
+sqlite-utils
+pydantic
+python-dotenv
+langgraph-checkpoint-sqlite
+edge-tts
+tavily-python
