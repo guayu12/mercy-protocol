@@ -7,8 +7,9 @@
 ## Features
 
 - **LangGraph agent** — multi-turn reasoning, autonomous tool calls, exponential-backoff retries
-- **Hybrid memory** — SQLite checkpointer (short-term) + ChromaDB vector store (long-term RAG)
-- **Multimodal vision** — attach images; a dedicated vision model analyzes them
+- **Hybrid memory** — async SQLite checkpointer (short-term) + ChromaDB vector store with OpenAI `text-embedding-3-small` (long-term RAG)
+- **Multimodal vision** — attached images go natively to the agent model as `image_url` content blocks
+- **Streaming replies** — `/api/chat` streams tokens over SSE; LLM, vision and embeddings all use the OpenAI API (no local inference)
 - **Live2D avatar** — WebGL rendering, hit-area interactions, audio-driven lip-sync
 - **Voice I/O** — browser speech recognition + `edge-tts` streaming TTS
 - **Live telemetry** — every backend step streamed to the UI over SSE (`/api/logs`)
@@ -84,5 +85,5 @@ npm run tauri dev           # or: native desktop window
 | :--- | :--- |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, Framer Motion, Pixi.js v6 + pixi-live2d-display |
 | Desktop | Tauri v2 (Rust) |
-| Backend | FastAPI, LangGraph, LangChain OpenAI, edge-tts, Tavily |
+| Backend | FastAPI, LangGraph, LangChain OpenAI, edge-tts, langchain-tavily |
 | Storage | SQLite (LangGraph checkpointer), ChromaDB |

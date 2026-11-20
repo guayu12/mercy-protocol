@@ -46,6 +46,7 @@ export function Live2DAvatar({ onLoaded, audioUrl, onAudioEnd }: Live2DAvatarPro
                 view: document.createElement("canvas"),
                 backgroundAlpha: 0,
                 autoStart: true,
+                powerPreference: "low-power",
                 resizeTo: container,
             });
 
