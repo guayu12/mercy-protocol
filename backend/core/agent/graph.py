@@ -1,17 +1,22 @@
 import os
 import time
+import asyncio
 from dotenv import load_dotenv
 
 # Load environment variables FIRST — before any module reads them
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv(os.path.join(BACKEND_DIR, ".env"))
-from typing import TypedDict, Annotated, Sequence, Union
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
+from typing import TypedDict, Annotated, AsyncIterator, Optional
+import aiosqlite
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
-from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.sqlite import SqliteSaver # using SQLite for production
-import operator
+from langchain_core.runnables import RunnableConfig
+from langchain_tavily import TavilySearch
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from core.memory.memory_manager import MemoryManager
 from core import log_bus  # ← real-time log broadcaster
@@ -21,10 +26,8 @@ memory_manager = MemoryManager(os.path.join(BACKEND_DIR, "data", "chroma_db"))
 
 # 2. Define the State
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+    messages: Annotated[list[AnyMessage], add_messages]
     context: str
-
-from langchain_community.tools.tavily_search import TavilySearchResults
 
 # 3. Mock & Real tools
 @tool
@@ -42,53 +45,17 @@ def get_current_time() -> str:
     return result
 
 @tool
-def save_memory(fact: str) -> str:
+async def save_memory(fact: str) -> str:
     """Save an important fact about the user or instructions to long-term memory. USE EXACTLY when user says 'remember' or explicitly tells you a preference."""
     log_bus.emit("tool", "TOOL", f"save_memory: {fact[:80]}")
-    memory_manager.add_memory(fact)
+    saved = await asyncio.to_thread(memory_manager.add_memory, fact)
+    if not saved:
+        log_bus.emit("tool", "TOOL", "save_memory skipped — near-duplicate already stored")
+        return f"Already in permanent memory (duplicate skipped): {fact}"
     return f"Saved to permanent memory: {fact}"
 
 # Web Search Tool (requires TAVILY_API_KEY in .env)
-web_search = TavilySearchResults(max_results=3, description="Search the web for current events, facts, or any information you do not know.")
-
-@tool
-def analyze_image(prompt: str, base64_image: str) -> str:
-    """USE THIS TOOL ONLY WHEN THE USER UPLOADS OR ASKS ABOUT AN IMAGE (base64 encoded). 
-    Pass the user's question as 'prompt' and the raw base64 string as 'base64_image'.
-    This tool forwards the image to the dedicated Vision Model (Dual-Endpoint Architecture) for analysis.
-    """
-    vision_model_name = os.environ.get("OPENAI_VISION_MODEL")
-    if not vision_model_name:
-        return "Error: Vision model endpoint not configured in .env"
-    
-    log_bus.emit("tool", "TOOL", f"analyze_image — forwarding to vision model: {vision_model_name}")
-
-    vision_llm = ChatOpenAI(
-        model=vision_model_name,
-        api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    )
-    
-    msg = HumanMessage(
-        content=[
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-        ]
-    )
-    
-    t0 = time.time()
-    try:
-        response = vision_llm.invoke([msg])
-        latency = round((time.time() - t0) * 1000)
-        usage = getattr(response, "usage_metadata", None)
-        log_bus.emit("llm", "LLM", f"vision_model response — {latency}ms",
-                     {"model": vision_model_name, "latency_ms": latency,
-                      "input_tokens": usage.get("input_tokens") if usage else "?",
-                      "output_tokens": usage.get("output_tokens") if usage else "?"})
-        return response.content
-    except Exception as e:
-        log_bus.emit("error", "ERROR", f"Vision model error: {str(e)[:120]}")
-        return f"Vision Model Error: {str(e)}"
+web_search = TavilySearch(max_results=3, description="Search the web for current events, facts, or any information you do not know.")
 
 @tool
 def create_local_directory(dir_name: str) -> str:
@@ -107,48 +74,72 @@ def create_local_directory(dir_name: str) -> str:
     except Exception as e:
         return f"Failed to create directory: {str(e)}"
 
-tools = [check_weather, get_current_time, save_memory, web_search, analyze_image, create_local_directory]
+tools = [check_weather, get_current_time, save_memory, web_search, create_local_directory]
 
-# (load_dotenv already called at top of file)
+# 4. Setup LLMs (OpenAI official API; vision model handles turns with images)
+_base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+_api_key = os.environ.get("OPENAI_API_KEY", "dummy")
+_model_name = os.environ.get("DEFAULT_MODEL", "gpt-4o-mini")
+_vision_model_name = os.environ.get("OPENAI_VISION_MODEL") or _model_name
 
-# 4. Setup LLM
-_model_name = os.environ.get("DEFAULT_MODEL", "gpt-4o")
-llm = ChatOpenAI(
-    model=_model_name,
-    api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
-    base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-)
+def _make_llm(model: str):
+    return ChatOpenAI(
+        model=model,
+        api_key=_api_key,
+        base_url=_base_url,
+        streaming=True,
+        stream_usage=True,
+    ).bind_tools(tools)
 
-llm_with_tools = llm.bind_tools(tools)
+llm_with_tools = _make_llm(_model_name)
+vision_llm_with_tools = llm_with_tools if _vision_model_name == _model_name else _make_llm(_vision_model_name)
+
+def _text_of(content) -> str:
+    """Extract plain text from str or multimodal content blocks."""
+    if isinstance(content, str):
+        return content
+    return " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+
+def _has_image(content) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "image_url" for b in content
+    )
 
 # 5. Define Graph Nodes
-def agent_node(state: AgentState):
+async def agent_node(state: AgentState, config: RunnableConfig):
     """The thinking node of the agent."""
     messages = state["messages"]
     
     user_msgs = [m for m in messages if isinstance(m, HumanMessage)]
-    latest_query = user_msgs[-1].content if user_msgs else ""
-    
-    past_contexts = memory_manager.format_context(latest_query)
+    latest = user_msgs[-1] if user_msgs else None
+    latest_query = _text_of(latest.content) if latest else ""
+    use_vision = latest is not None and _has_image(latest.content)
+    model_name = _vision_model_name if use_vision else _model_name
+    llm = vision_llm_with_tools if use_vision else llm_with_tools
+
+    # Embedding lookup is a blocking HTTP call — keep it off the event loop
+    past_contexts = await asyncio.to_thread(memory_manager.format_context, latest_query)
     
     sys_prompt = SystemMessage(content=f"""
 You are Aura, a highly capable personal AI assistant running locally.
 You can execute tasks, remember user preferences, and help plan long-term goals.
+You can see images the user attaches directly.
 Always be concise, professional, and helpful.
 
 {past_contexts}
 """)
     full_messages = [sys_prompt] + list(messages)
-    input_tokens_est = sum(len(str(m.content)) // 4 for m in full_messages)
+    input_tokens_est = sum(len(_text_of(m.content)) // 4 for m in full_messages)
 
-    log_bus.emit("flow", "FLOW", f"agent_node → invoking LLM ({len(full_messages)} msgs, ~{input_tokens_est} tokens est.)")
+    log_bus.emit("flow", "FLOW", f"agent_node → invoking {model_name} ({len(full_messages)} msgs, ~{input_tokens_est} tokens est.)")
 
     # Retry with exponential backoff for transient API errors
     last_err = None
     for attempt in range(3):
         t0 = time.time()
         try:
-            response = llm_with_tools.invoke(full_messages)
+            # Pass config explicitly so token callbacks reach astream_events on Python < 3.11
+            response = await llm.ainvoke(full_messages, config)
             latency = round((time.time() - t0) * 1000)
             usage = getattr(response, "usage_metadata", None)
             if usage:
@@ -160,7 +151,7 @@ Always be concise, professional, and helpful.
             tool_calls = getattr(response, "tool_calls", [])
             log_bus.emit("llm", "LLM",
                          f"← response {latency}ms | in:{in_tok} out:{out_tok} tok | {'→ ' + ', '.join(tc['name'] for tc in tool_calls) if tool_calls else 'direct reply'}",
-                         {"model": _model_name, "latency_ms": latency,
+                         {"model": model_name, "latency_ms": latency,
                           "input_tokens": in_tok, "output_tokens": out_tok,
                           "tool_calls": [tc["name"] for tc in tool_calls]})
             return {"messages": [response]}
@@ -168,87 +159,85 @@ Always be concise, professional, and helpful.
             last_err = e
             err_str = str(e)
             log_bus.emit("warn", "RETRY", f"attempt {attempt+1}/3 — {err_str[:100]}")
-            if "NoAvailableModel" in err_str or "429" in err_str or "503" in err_str:
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                time.sleep(wait)
+            if "429" in err_str or "500" in err_str or "503" in err_str:
+                await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
                 continue
             raise  # Non-transient error, propagate immediately
     raise last_err  # All retries exhausted
 
-def tool_node(state: AgentState):
-    """The execution node that runs tools requested by the LLM."""
-    messages = state["messages"]
-    last_message = messages[-1]
-    
-    tool_responses = []
-    tool_map = {t.name: t for t in tools}
-    
-    for tool_call in last_message.tool_calls:
-        tool_name = tool_call["name"]
-        tool_args = tool_call["args"]
-        
-        log_bus.emit("tool", "TOOL", f"► {tool_name}({', '.join(f'{k}={str(v)[:40]}' for k, v in tool_args.items())})")
-
-        if tool_name in tool_map:
-            t0 = time.time()
-            try:
-                result = tool_map[tool_name].invoke(tool_args)
-                latency = round((time.time() - t0) * 1000)
-                tool_msg = ToolMessage(
-                    content=str(result),
-                    tool_call_id=tool_call["id"],
-                    name=tool_name
-                )
-                tool_responses.append(tool_msg)
-                log_bus.emit("tool", "TOOL", f"✓ {tool_name} done {latency}ms → {str(result)[:80]}")
-            except Exception as e:
-                log_bus.emit("error", "ERROR", f"✗ {tool_name} failed: {str(e)[:100]}")
-                tool_responses.append(
-                    ToolMessage(content=f"Error: {e}", tool_call_id=tool_call["id"], name=tool_name)
-                )
-                
-    return {"messages": tool_responses}
-
 # 6. Build the Graph
 workflow = StateGraph(AgentState)
 workflow.add_node("agent", agent_node)
-workflow.add_node("tools", tool_node)
-
+workflow.add_node("tools", ToolNode(tools))
 workflow.add_edge(START, "agent")
-
-def should_continue(state: AgentState):
-    last_message = state["messages"][-1]
-    if not getattr(last_message, "tool_calls", None):
-        return "end"
-    return "tools"
-
-workflow.add_conditional_edges(
-    "agent",
-    should_continue,
-    {
-        "tools": "tools",
-        "end": END
-    }
-)
-
+workflow.add_conditional_edges("agent", tools_condition)
 workflow.add_edge("tools", "agent")
 
-import sqlite3
+# Compiled lazily: AsyncSqliteSaver needs a running event loop (see init_graph)
+app_graph = None
+_conn: Optional[aiosqlite.Connection] = None
 
-# Compile with a checkpointer for short term thread memory
-conn = sqlite3.connect(os.path.join(BACKEND_DIR, "aura_checkpoints.db"), check_same_thread=False)
-checkpointer = SqliteSaver(conn)
-checkpointer.setup()
-app_graph = workflow.compile(checkpointer=checkpointer)
+async def init_graph():
+    """Open the async SQLite checkpointer and compile the graph. Call on app startup."""
+    global app_graph, _conn
+    if app_graph is not None:
+        return app_graph
+    _conn = await aiosqlite.connect(os.path.join(BACKEND_DIR, "aura_checkpoints.db"))
+    checkpointer = AsyncSqliteSaver(_conn)
+    await checkpointer.setup()
+    app_graph = workflow.compile(checkpointer=checkpointer)
+    return app_graph
 
-def process_query(query: str, thread_id: str = "default_user") -> str:
-    """Run the graph, maintaining conversation state by thread_id."""
+async def close_graph():
+    global app_graph, _conn
+    if _conn is not None:
+        await _conn.close()
+    _conn = None
+    app_graph = None
+
+def build_user_message(query: str, image_base64: Optional[str] = None) -> HumanMessage:
+    """Build a HumanMessage; images become native image_url content blocks."""
+    if not image_base64:
+        return HumanMessage(content=query)
+    url = image_base64 if image_base64.startswith("data:") else f"data:image/jpeg;base64,{image_base64}"
+    return HumanMessage(content=[
+        {"type": "text", "text": query},
+        {"type": "image_url", "image_url": {"url": url}},
+    ])
+
+async def process_query(query: str, thread_id: str, image_base64: Optional[str] = None) -> AsyncIterator[dict]:
+    """Run the graph for one turn, yielding stream events:
+    {"type": "token", "content": str} — incremental reply text
+    {"type": "tool", "name": str, "status": "start"|"end"}
+    {"type": "done", "reply": str} — final full reply
+    """
+    graph = await init_graph()
     config = {"configurable": {"thread_id": thread_id}}
-    log_bus.emit("flow", "FLOW", f"◈ new query → thread={thread_id!r}, len={len(query)} chars")
-    final_state = app_graph.invoke(
-        {"messages": [HumanMessage(content=query)], "context": ""},
-        config=config
-    )
-    reply = final_state["messages"][-1].content
+    log_bus.emit("flow", "FLOW",
+                 f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_base64 else ''}")
+
+    async for event in graph.astream_events(
+        {"messages": [build_user_message(query, image_base64)], "context": ""},
+        config=config,
+        version="v2",
+    ):
+        kind = event["event"]
+        if kind == "on_chat_model_stream":
+            if event.get("metadata", {}).get("langgraph_node") != "agent":
+                continue
+            text = _text_of(event["data"]["chunk"].content)
+            if text:
+                yield {"type": "token", "content": text}
+        elif kind == "on_tool_start":
+            log_bus.emit("tool", "TOOL", f"► {event['name']}({str(event['data'].get('input', ''))[:80]})")
+            yield {"type": "tool", "name": event["name"], "status": "start"}
+        elif kind == "on_tool_end":
+            output = event["data"].get("output")
+            output = getattr(output, "content", output)
+            log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
+            yield {"type": "tool", "name": event["name"], "status": "end"}
+
+    state = await graph.aget_state(config)
+    reply = _text_of(state.values["messages"][-1].content)
     log_bus.emit("flow", "FLOW", f"◈ reply ready → {len(reply)} chars")
-    return reply
+    yield {"type": "done", "reply": reply}

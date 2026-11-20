@@ -6,10 +6,13 @@ import {
 import "./App.css";
 import { Live2DAvatar } from "./Live2DAvatar";
 
+const API_BASE = "http://127.0.0.1:8000";
+
 interface Message {
   role: "system" | "user" | "assistant";
   content: string;
   image?: string;
+  id?: number;
 }
 
 // ── Real-time log entry from backend SSE ──────────────────────────────
@@ -119,7 +122,14 @@ export function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState("");
   const [currentDate, setCurrentDate] = useState("");
-  const [sessionId] = useState(() => Math.random().toString(36).substring(2, 10).toUpperCase());
+  // Session id doubles as the LangGraph thread_id; persisted so conversation memory survives reloads
+  const [sessionId] = useState(() => {
+    const saved = localStorage.getItem("mercy.threadId");
+    if (saved) return saved;
+    const id = Math.random().toString(36).substring(2, 10).toUpperCase();
+    localStorage.setItem("mercy.threadId", id);
+    return id;
+  });
   const [msgCount, setMsgCount] = useState(0);
   const [messages, setMessages] = useState<Message[]>([
     { role: "system", content: "MERCY PROTOCOL v2.0 — AI JUDICIAL INTERFACE ONLINE. AWAITING SUBJECT INPUT." }
@@ -146,7 +156,7 @@ export function App() {
 
   // SSE — real-time backend log stream
   useEffect(() => {
-    const es = new EventSource("http://127.0.0.1:8000/api/logs");
+    const es = new EventSource(`${API_BASE}/api/logs`);
     es.onmessage = (e) => {
       try {
         const entry: LogEntry = JSON.parse(e.data);
@@ -207,24 +217,57 @@ export function App() {
     setMessages(prev => [...prev, { role: "user", content: userMsg, image: img || undefined }]);
     setMsgCount(c => c + 1);
     setIsLoading(true);
-    let base64 = undefined;
-    if (img) base64 = img.split(',')[1] || img;
+
+    const replyId = Date.now();
+    const updateReply = (fn: (content: string) => string) => {
+      setMessages(prev => {
+        const idx = prev.findIndex(m => m.id === replyId);
+        if (idx === -1) return [...prev, { role: "assistant", content: fn(""), id: replyId }];
+        const next = [...prev];
+        next[idx] = { ...next[idx], content: fn(next[idx].content) };
+        return next;
+      });
+    };
+    const appendToken = (token: string) => updateReply(c => c + token);
+    const setFinalReply = (reply: string) => updateReply(() => reply);
+
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/chat", {
+      const res = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg || "Please analyze this image.", image_base64: base64 })
+        body: JSON.stringify({
+          message: userMsg || "Please analyze this image.",
+          image_base64: img || undefined,
+          thread_id: sessionId,
+        })
       });
-      const data = await res.json();
-      if (data.status === "success" || data.reply) {
-        setMessages(prev => [...prev, { role: "assistant", content: data.reply }]);
-        setMsgCount(c => c + 1);
-        if (data.reply) {
-          const ts = new Date().getTime();
-          setAudioUrl(`http://127.0.0.1:8000/api/tts?text=${encodeURIComponent(data.reply)}&_t=${ts}`);
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalReply = "";
+      for (; ;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const raw = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const data = raw.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart()).join("\n");
+          if (!data) continue;
+          const evt = JSON.parse(data);
+          if (evt.type === "token") appendToken(evt.content);
+          else if (evt.type === "done") { finalReply = evt.reply; setFinalReply(evt.reply); }
+          else if (evt.type === "error") setMessages(prev => [...prev, { role: "system", content: "COMM_FAIL >> " + evt.message }]);
         }
-      } else {
-        setMessages(prev => [...prev, { role: "system", content: "COMM_FAIL >> " + JSON.stringify(data) }]);
+      }
+
+      if (finalReply) {
+        setMsgCount(c => c + 1);
+        const ts = new Date().getTime();
+        setAudioUrl(`${API_BASE}/api/tts?text=${encodeURIComponent(finalReply)}&_t=${ts}`);
       }
     } catch {
       setMessages(prev => [...prev, { role: "system", content: "NET_ERR >> BACKEND UNREACHABLE" }]);
@@ -386,7 +429,7 @@ export function App() {
               </div>
             ))}
 
-            {isLoading && (
+            {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
               <div className="flex items-start gap-2">
                 <div className="msg-assistant rounded-md corner-cut flex items-center gap-2"
                   style={{ padding: '10px 14px', fontSize: '12px', fontFamily: "'Share Tech Mono', monospace" }}>

@@ -11,22 +11,44 @@ import json
 # Ensure backend directory is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-app = FastAPI(title="Mercy Protocol — AI Judicial Interface", version="2.0.0")
+from contextlib import asynccontextmanager
+from typing import Optional
+from core import log_bus  # real-time log broadcaster
+from core.agent.graph import process_query, init_graph, close_graph
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_graph()
+    yield
+    await close_graph()
+
+app = FastAPI(title="Mercy Protocol — AI Judicial Interface", version="2.0.0", lifespan=lifespan)
+
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:1420",   # Vite dev server (tauri dev)
+    "http://127.0.0.1:1420",
+    "http://localhost:5173",   # Vite default port
+    "http://127.0.0.1:5173",
+    "tauri://localhost",       # Tauri on macOS / Linux
+    "http://tauri.localhost",  # Tauri v2 on Windows (Surface)
+    "https://tauri.localhost",
+]
+_cors_env = os.environ.get("CORS_ORIGINS")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else DEFAULT_CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
-from typing import Optional
-from core import log_bus  # real-time log broadcaster
+SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 class ChatRequest(BaseModel):
     message: str
-    image_base64: Optional[str] = None
+    image_base64: Optional[str] = None  # raw base64 or full data: URL
+    thread_id: str = "default_user"
 
 @app.get("/")
 async def root():
@@ -44,45 +66,37 @@ async def logs_sse(request: Request):
 
     async def event_stream():
         try:
-            # Send a heartbeat every 15 s to keep the connection alive
+            # Wait for events (no polling); send a heartbeat every 15 s to keep the connection alive
             while not await request.is_disconnected():
                 try:
-                    msg = queue.get_nowait()
+                    msg = await asyncio.wait_for(queue.get(), timeout=15)
                     yield f"data: {msg}\n\n"
-                except asyncio.QueueEmpty:
-                    await asyncio.sleep(0.25)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
         finally:
             log_bus.unsubscribe(queue)
             log_bus.emit("flow", "FLOW", "SSE client disconnected")
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        }
-    )
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
-# ─── Chat ─────────────────────────────────────────────────────────────
-from core.agent.graph import process_query
-
+# ─── Chat (SSE, token-level streaming) ───────────────────────────────
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
-    try:
-        augmented_message = request.message
-        if request.image_base64:
-            augmented_message += (
-                f"\n\n[SYSTEM]: The user has uploaded an image. "
-                f"You MUST use the `analyze_image` tool to understand it. "
-                f"Pass the user's question as `prompt` and the following base64 string as `base64_image`: "
-                f"{request.image_base64}"
-            )
-        reply = process_query(augmented_message)
-        return {"reply": reply, "status": "success"}
-    except Exception as e:
-        log_bus.emit("error", "ERROR", f"chat_endpoint exception: {str(e)[:200]}")
-        return {"reply": f"Agent error: {str(e)}", "status": "error"}
+    """
+    Streams the agent reply as Server-Sent Events. Each event is JSON:
+    {"type": "token", "content": ...} | {"type": "tool", "name": ..., "status": ...}
+    | {"type": "done", "reply": ...} | {"type": "error", "message": ...}
+    """
+    async def event_stream():
+        try:
+            async for event in process_query(request.message, request.thread_id, request.image_base64):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            log_bus.emit("error", "ERROR", f"chat_endpoint exception: {str(e)[:200]}")
+            error_event = {"type": "error", "message": f"Agent error: {e}"}
+            yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 # ─── TTS ──────────────────────────────────────────────────────────────
 @app.get("/api/tts")
