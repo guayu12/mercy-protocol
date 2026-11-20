@@ -1,4 +1,5 @@
 import os
+import threading
 import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from datetime import datetime
@@ -18,6 +19,7 @@ class MemoryManager:
     def __init__(self, db_path: str = "data/chroma_db", dedup_threshold: float = 0.92):
         self.db_path = db_path
         self.dedup_threshold = dedup_threshold
+        self._write_lock = threading.Lock()  # makes duplicate check + insert atomic
         os.makedirs(db_path, exist_ok=True)
 
         self.embedding_function = OpenAIEmbeddingFunction(
@@ -51,6 +53,10 @@ class MemoryManager:
     def add_memory(self, memory_text: str, source: str = "direct_chat", tags: List[str] = None) -> bool:
         """Save an important fact or preference to long-term vector store.
         Returns False if a near-duplicate memory already exists."""
+        with self._write_lock:
+            return self._add_memory_unlocked(memory_text, source, tags)
+
+    def _add_memory_unlocked(self, memory_text: str, source: str, tags: Optional[List[str]]) -> bool:
         if self.find_duplicate(memory_text) is not None:
             return False
 
