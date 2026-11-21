@@ -41,7 +41,22 @@ export async function loadVRMAClip(url: string, vrm: VRM): Promise<THREE.Animati
     const gltf = await loader.loadAsync(url);
     const anim = (gltf.userData.vrmAnimations as VRMAnimation[] | undefined)?.[0];
     if (!anim) throw new Error(`no VRMA animation in ${url}`);
-    return createVRMAnimationClip(anim, vrm);
+    const clip = createVRMAnimationClip(anim, vrm);
+    centerHips(clip, vrm);
+    return clip;
+}
+
+/** Re-center the hips track's x/z on the model's rest hips so clips never shift the character sideways. */
+function centerHips(clip: THREE.AnimationClip, vrm: VRM) {
+    const hips = vrm.humanoid.getNormalizedBoneNode("hips");
+    const rest = vrm.humanoid.normalizedRestPose.hips?.position;
+    const track = hips && clip.tracks.find(t => t.name === `${hips.name}.position`);
+    if (!track || !rest) return;
+    const v = track.values, n = v.length / 3;
+    let mx = 0, mz = 0;
+    for (let i = 0; i < n; i++) { mx += v[i * 3]; mz += v[i * 3 + 2]; }
+    const dx = rest[0] - mx / n, dz = rest[2] - mz / n;
+    for (let i = 0; i < n; i++) { v[i * 3] += dx; v[i * 3 + 2] += dz; }
 }
 
 type Euler3 = [number, number, number];
