@@ -16,12 +16,11 @@ import remarkGfm from "remark-gfm";
 import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
 import { Stage, type MediaStageData, type StageItem } from "./Stage";
+import { API_BASE } from "./api";
 import "./App.css";
 
 const ASSISTANT_NAME = "Aura";
 const VOICE_LABEL = "晓伊";
-const API_BASE = "http://127.0.0.1:8000";
-
 type DialogueMessage = {
   id: string;
   role: "user" | "assistant" | "system";

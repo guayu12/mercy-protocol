@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { API_BASE } from "./api";
 
 export type StageItem = {
   media_id: string;
@@ -59,10 +60,12 @@ export function Stage({ stage, currentMediaId, onCurrentChange, onClose }: Props
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [index, items, stage]);
 
-  const mediaUrl = useMemo(
-    () => (item ? `${item.src}${item.src.includes("?") ? "&" : "?"}v=${item.media_id}` : ""),
-    [item],
-  );
+  const mediaUrl = useMemo(() => {
+    if (!item) return "";
+    const url = new URL(item.src, API_BASE);
+    url.searchParams.set("v", item.media_id);
+    return url.toString();
+  }, [item]);
   if (!stage || !item) return null;
 
   const media = (
