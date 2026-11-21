@@ -15,6 +15,9 @@ import {
 
 export { EMOTIONS, GESTURES, type Emotion, type Gesture } from "./motion";
 
+/** A base loop split into the bones gestures animate (`arms`) and everything else (`body`), kept in sync. */
+interface BaseLoop { name: string; body: THREE.AnimationAction; arms: THREE.AnimationAction }
+
 const IDLE_VRMAS = ["/vrm/motions/idle_loop.vrma", "/vrm/motions/ual_idle.vrma"];
 const TALK_VRMA = "/vrm/motions/ual_talking.vrma";
 const BASE_FADE = 0.6;
@@ -100,9 +103,9 @@ export class AvatarEngine {
     /** Peak weight of emotion expressions (tunable from the debug panel). */
     emotionWeight = 0.7;
     private mixer: THREE.AnimationMixer | null = null;
-    private baseAction: THREE.AnimationAction | null = null;
-    private idleActions: THREE.AnimationAction[] = [];
-    private talkAction: THREE.AnimationAction | null = null;
+    private baseAction: BaseLoop | null = null;
+    private idleActions: BaseLoop[] = [];
+    private talkAction: BaseLoop | null = null;
     private idleIndex = 0;
     private talkHoldUntil = 0;
     private baseStarted = false;
@@ -176,19 +179,23 @@ export class AvatarEngine {
         const mixer = this.mixer;
         mixer.addEventListener("loop", e => {
             const n = this.idleActions.length;
-            if (e.action === this.baseAction && n > 1 && Math.random() < IDLE_SWITCH_CHANCE) {
+            if (e.action === this.baseAction?.body && n > 1 && Math.random() < IDLE_SWITCH_CHANCE) {
                 this.idleIndex = (this.idleIndex + 1 + Math.floor(Math.random() * (n - 1))) % n;
             }
         });
+        // Base loops are split so gestures only take over the bones they animate; the rest keeps playing.
+        const gestureTracks = new Set(Object.values(this.clips).flatMap(c => c?.tracks.map(t => t.name) ?? []));
+        const split = (name: string, clip: THREE.AnimationClip): BaseLoop => {
+            const part = (arms: boolean) => mixer.clipAction(new THREE.AnimationClip(
+                `${name}${arms ? "#arms" : ""}`, clip.duration, clip.tracks.filter(t => gestureTracks.has(t.name) === arms)));
+            return { name, body: part(false), arms: part(true) };
+        };
         // Each loop is optional: whatever loads joins the rotation, failures fall back (procedural if none).
         const load = (url: string) => loadVRMAClip(url, vrm)
-            .then(clip => {
-                clip.name = url.slice(url.lastIndexOf("/") + 1);
-                return this.vrm === vrm ? mixer.clipAction(clip) : null;
-            })
+            .then(clip => (this.vrm === vrm ? split(url.slice(url.lastIndexOf("/") + 1), clip) : null))
             .catch(err => { console.warn(`[VRM] motion ${url} unavailable:`, err); return null; });
         Promise.all(IDLE_VRMAS.map(load)).then(actions => {
-            this.idleActions = actions.filter((a): a is THREE.AnimationAction => a !== null);
+            this.idleActions = actions.filter((a): a is BaseLoop => a !== null);
         });
         load(TALK_VRMA).then(a => { this.talkAction = a; });
         const head = vrm.humanoid.getNormalizedBoneNode("head");
@@ -211,7 +218,7 @@ export class AvatarEngine {
     /** Base emotion; while speaking, the sentence's own emotion (if any) wins. */
     setEmotion(emotion: Emotion) { this.emotion = emotion; }
     getEmotion() { return this.emotion; }
-    get motionSource(): string { return this.baseAction ? this.baseAction.getClip().name || "vrma" : "procedural"; }
+    get motionSource(): string { return this.baseAction?.name ?? "procedural"; }
 
     /** One-shot gesture; ignored until the model is loaded. */
     gesture(name: Gesture) {
@@ -362,27 +369,32 @@ export class AvatarEngine {
 
     /**
      * Talking loop while speaking (held briefly after audio stops), otherwise one of the idle variants.
-     * Weights ramp linearly toward their targets each frame, so rapid switches never jump; the base yields to gestures.
+     * Weights ramp linearly toward their targets each frame, so rapid switches never jump; only the arms yield to gestures.
      */
     private updateBase(t: number, dt: number) {
         if (this.state === "speaking" || this.clock !== null) this.talkHoldUntil = t + TALK_HOLD;
         const idle = this.idleActions.length ? this.idleActions[this.idleIndex % this.idleActions.length] : null;
         const target = (t < this.talkHoldUntil && this.talkAction) || idle;
-        if (target && !target.isRunning()) {
+        if (target && !target.body.isRunning()) {
             // Only the very first base loop starts at full weight (nothing to blend from); later ones ramp in.
-            target.reset().setEffectiveWeight(this.baseStarted ? 0 : 1).play();
+            const w0 = this.baseStarted ? 0 : 1;
+            for (const a of [target.body, target.arms]) a.reset().setEffectiveWeight(w0).play();
             this.baseStarted = true;
         }
         this.baseAction = target;
         const gesturing = this.gestureAction !== null || this.fadingGesture !== null;
-        const step = dt / (gesturing ? GESTURE_FADE : BASE_FADE);
-        for (const a of [...this.idleActions, this.talkAction]) {
-            if (!a || !a.isRunning()) continue;
-            const goal = a === target && !this.gestureAction ? 1 : 0;
-            const w = a.getEffectiveWeight();
+        const ramp = (a: THREE.AnimationAction, goal: number, fade: number) => {
+            const w = a.getEffectiveWeight(), step = dt / fade;
             const next = goal > w ? Math.min(goal, w + step) : Math.max(goal, w - step);
             a.setEffectiveWeight(next);
-            if (next <= 0 && a !== target) a.stop();
+            return next;
+        };
+        for (const loop of [...this.idleActions, this.talkAction]) {
+            if (!loop || !loop.body.isRunning()) continue;
+            const on = loop === target;
+            const body = ramp(loop.body, on ? 1 : 0, BASE_FADE);
+            const arms = ramp(loop.arms, on && !this.gestureAction ? 1 : 0, gesturing ? GESTURE_FADE : BASE_FADE);
+            if (!on && body <= 0 && arms <= 0) { loop.body.stop(); loop.arms.stop(); }
         }
     }
 
@@ -518,7 +530,7 @@ export class AvatarEngine {
             this.fadingGesture = null;
         }
         // Without the VRMA base loop, let a gesture finish fading before procedural arms take over.
-        if (!this.baseAction && !this.gestureAction && !this.fadingGesture && !this.talkAction?.isRunning()) {
+        if (!this.baseAction && !this.gestureAction && !this.fadingGesture && !this.talkAction?.body.isRunning()) {
             const lu = bone("leftUpperArm"), ru = bone("rightUpperArm");
             const ll = bone("leftLowerArm"), rl = bone("rightLowerArm");
             if (lu) lu.rotation.set(0, 0, s * (-1.2 - breath * 0.02));
