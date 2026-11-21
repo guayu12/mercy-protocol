@@ -52,7 +52,15 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd }: VRMAvatarProps) {
         let disposed = false;
         let vrm: VRM | null = null;
 
-        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "low-power" });
+        let renderer: THREE.WebGLRenderer;
+        try {
+            renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "low-power" });
+        } catch (err: any) {
+            console.error("[VRM] WebGL init failed:", err);
+            setError(String(err?.message || err));
+            onLoadedRef.current?.();
+            return;
+        }
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.domElement.style.position = "absolute";
         renderer.domElement.style.inset = "0";
