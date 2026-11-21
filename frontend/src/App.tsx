@@ -118,6 +118,73 @@ function timeLabel(timestamp?: number) {
   return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
+function stripMarkdown(value: string) {
+  return value
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`+/g, "")
+    .replace(/\*\*|__|~~|\*|_/g, "")
+    .replace(/^\s{0,3}#{1,6}\s*/, "")
+    .replace(/^\s*>\s?/, "")
+    .replace(/^\s*(?:[-+*]|\d+[.)])\s+/, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function reportSummary(markdown: string, title: string) {
+  const lines = markdown.split(/\r?\n/);
+  const tableLines = new Set<number>();
+  const separator = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!separator.test(lines[index])) continue;
+    tableLines.add(index);
+    for (let row = index - 1; row >= 0 && lines[row].includes("|"); row -= 1) tableLines.add(row);
+    for (let row = index + 1; row < lines.length && lines[row].includes("|"); row += 1) tableLines.add(row);
+  }
+
+  const normalizedTitle = stripMarkdown(title).toLocaleLowerCase();
+  let fence: { character: string; length: number } | null = null;
+  let hasCode = false;
+  let hasTable = tableLines.size > 0;
+  let prose = "";
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      if (
+        fenceMatch &&
+        fenceMatch[1][0] === fence.character &&
+        fenceMatch[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fenceMatch) {
+      fence = { character: fenceMatch[1][0], length: fenceMatch[1].length };
+      hasCode = true;
+      continue;
+    }
+    if (tableLines.has(index)) continue;
+    const cleanLine = stripMarkdown(line);
+    if (!cleanLine) continue;
+    const heading = line.match(/^\s{0,3}#{1,6}\s+/);
+    if (heading && cleanLine.toLocaleLowerCase() === normalizedTitle) continue;
+    prose = cleanLine;
+    break;
+  }
+
+  if (prose) {
+    const characters = Array.from(prose);
+    return characters.length > 64 ? `${characters.slice(0, 63).join("")}…` : prose;
+  }
+  const fallback = [];
+  if (hasTable) fallback.push("含表格");
+  if (hasCode) fallback.push("含代码");
+  return fallback.join(" · ");
+}
+
 function isAbortError(error: unknown) {
   return error instanceof Error && error.name === "AbortError";
 }
@@ -967,6 +1034,9 @@ export function App() {
             ? { state: "thinking", label: workingLabel || "正在处理" }
             : { state: "idle", label: "空闲" };
   const latestReport = reports[reports.length - 1];
+  const latestReportSummary = latestReport
+    ? reportSummary(latestReport.markdown, latestReport.title)
+    : "";
   const reportNeedsLayout = Boolean(
     latestReport &&
       (latestReport.markdown.length > 1500 ||
@@ -993,7 +1063,6 @@ export function App() {
           <div className="brand" data-tauri-drag-region>
             <div className="brand-mark">M</div>
             <span>Mercy</span>
-            <span className="brand-ver">1a</span>
           </div>
           <div className="topbar-divider" />
           <button className="sys-pill" type="button" onClick={() => setLeftExpanded((value) => !value)}>
@@ -1113,7 +1182,7 @@ export function App() {
           {layout === "focus_evidence" && latestReport && !isReportExpanded ? (
             <div className="stage-report-summary">
               <strong>{latestReport.title}</strong>
-              <span>{latestReport.markdown.split("\n").find((line) => line.trim())?.replace(/^[#\s>*-]+/, "") ?? ""}</span>
+              <span>{latestReportSummary}</span>
               <button type="button" onClick={() => setIsReportExpanded(true)}>展开</button>
             </div>
           ) : (

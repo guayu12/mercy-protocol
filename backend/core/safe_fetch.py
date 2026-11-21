@@ -9,7 +9,6 @@ from urllib.parse import urljoin, urlsplit
 
 import httpcore
 import httpx
-from httpcore._backends.auto import AutoBackend
 
 
 CONNECT_TIMEOUT = 3.0
@@ -99,7 +98,7 @@ async def _validate_target(url: str, resolver=_resolve_addresses) -> None:
 class ValidatingNetworkBackend(httpcore.AsyncNetworkBackend):
     def __init__(self, resolver=_resolve_addresses, backend=None):
         self._resolver = resolver
-        self._backend = backend or AutoBackend()
+        self._backend = backend or httpcore.AnyIOBackend()
 
     async def connect_tcp(
         self,
