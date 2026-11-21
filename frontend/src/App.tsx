@@ -160,6 +160,8 @@ export function App() {
   const speechFailuresRef = useRef(new Set<string>());
   const currentPlaybackRef = useRef<{ sentence: SpeechSentence; audio: Speech } | null>(null);
   const speechWatchdogRef = useRef<number | null>(null);
+  const speechMetadataTimeoutRef = useRef<number | null>(null);
+  const speechMetadataProbeRef = useRef<HTMLAudioElement | null>(null);
   const handleAudioEndRef = useRef<() => void>(() => undefined);
   const isPumpingRef = useRef(false);
   const audioEpochRef = useRef(0);
@@ -219,6 +221,22 @@ export function App() {
     void getSpeechAudio(next.id).catch(() => undefined);
   }, [getSpeechAudio]);
 
+  const clearSpeechMetadataProbe = useCallback(() => {
+    if (speechMetadataTimeoutRef.current !== null) {
+      window.clearTimeout(speechMetadataTimeoutRef.current);
+      speechMetadataTimeoutRef.current = null;
+    }
+    const probe = speechMetadataProbeRef.current;
+    if (probe) {
+      probe.onloadedmetadata = null;
+      probe.onerror = null;
+      probe.pause();
+      probe.removeAttribute("src");
+      probe.load();
+      speechMetadataProbeRef.current = null;
+    }
+  }, []);
+
   const pumpSpeechQueue = useCallback(async () => {
     if (isPumpingRef.current || currentPlaybackRef.current) return;
     const sentence = speechQueueRef.current.shift();
@@ -250,10 +268,44 @@ export function App() {
           (latestEnd, cue) => Math.max(latestEnd, cue.end),
           0,
         );
-        speechWatchdogRef.current = window.setTimeout(() => {
-          speechWatchdogRef.current = null;
-          handleAudioEndRef.current();
-        }, (Math.max(lastVisemeEnd, 0.5) + 3) * 1000);
+        const handedAt = performance.now();
+        clearSpeechMetadataProbe();
+        const probe = new Audio(audio.audioUrl);
+        probe.preload = "metadata";
+        speechMetadataProbeRef.current = probe;
+        let metadataHandled = false;
+        const scheduleWatchdog = (audioDuration: number) => {
+          if (metadataHandled) return;
+          metadataHandled = true;
+          clearSpeechMetadataProbe();
+          if (
+            epoch !== audioEpochRef.current ||
+            currentPlaybackRef.current?.sentence.id !== sentence.id
+          ) {
+            return;
+          }
+          if (speechWatchdogRef.current !== null) {
+            window.clearTimeout(speechWatchdogRef.current);
+          }
+          const duration = Number.isFinite(audioDuration)
+            ? audioDuration
+            : lastVisemeEnd;
+          const totalDuration = Math.max(lastVisemeEnd, duration, 0.5) + 3;
+          const delay = Math.max(
+            0,
+            totalDuration * 1000 - (performance.now() - handedAt),
+          );
+          speechWatchdogRef.current = window.setTimeout(() => {
+            speechWatchdogRef.current = null;
+            handleAudioEndRef.current();
+          }, delay);
+        };
+        probe.onloadedmetadata = () => scheduleWatchdog(probe.duration);
+        probe.onerror = () => scheduleWatchdog(lastVisemeEnd);
+        speechMetadataTimeoutRef.current = window.setTimeout(
+          () => scheduleWatchdog(lastVisemeEnd),
+          2000,
+        );
       }
     } catch (error) {
       if (!isAbortError(error)) setSubtitle(sentence.text);
@@ -273,7 +325,7 @@ export function App() {
       setHasQueuedSpeech(false);
       if (!requestControllerRef.current) activeTurnIdRef.current = null;
     }
-  }, [getSpeechAudio, prefetchNextSentence]);
+  }, [clearSpeechMetadataProbe, getSpeechAudio, prefetchNextSentence]);
 
   const enqueueSentence = useCallback(
     (sentence: SpeechSentence) => {
@@ -291,6 +343,7 @@ export function App() {
       window.clearTimeout(speechWatchdogRef.current);
       speechWatchdogRef.current = null;
     }
+    clearSpeechMetadataProbe();
     const playback = currentPlaybackRef.current;
     if (!playback) return;
     URL.revokeObjectURL(playback.audio.audioUrl);
@@ -304,7 +357,7 @@ export function App() {
       setHasQueuedSpeech(false);
       if (!requestControllerRef.current) activeTurnIdRef.current = null;
     }
-  }, [pumpSpeechQueue]);
+  }, [clearSpeechMetadataProbe, pumpSpeechQueue]);
 
   useEffect(() => {
     handleAudioEndRef.current = handleAudioEnd;
@@ -341,6 +394,7 @@ export function App() {
     speechCacheRef.current.clear();
     speechFailuresRef.current.clear();
     speechQueueRef.current = [];
+    clearSpeechMetadataProbe();
     if (speechWatchdogRef.current !== null) {
       window.clearTimeout(speechWatchdogRef.current);
       speechWatchdogRef.current = null;
@@ -356,7 +410,7 @@ export function App() {
     setHasQueuedSpeech(false);
     setIsLoading(false);
     setBackendState("idle");
-  }, []);
+  }, [clearSpeechMetadataProbe]);
 
   useEffect(() => {
     const updateClock = () =>
@@ -524,13 +578,14 @@ export function App() {
       for (const audio of speechCacheRef.current.values()) URL.revokeObjectURL(audio.audioUrl);
       const playback = currentPlaybackRef.current;
       if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+      clearSpeechMetadataProbe();
       if (speechWatchdogRef.current !== null) {
         window.clearTimeout(speechWatchdogRef.current);
         speechWatchdogRef.current = null;
       }
       for (const timer of highlightTimersRef.current.values()) window.clearTimeout(timer);
     },
-    [],
+    [clearSpeechMetadataProbe],
   );
 
   const applyReportHighlight = useCallback((reportId: string, anchor: string) => {
