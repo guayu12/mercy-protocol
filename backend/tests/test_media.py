@@ -302,6 +302,42 @@ async def test_uploaded_media_supports_range_and_nosniff(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_image_attachments_decode_in_worker_and_encode_opaque_jpeg(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    await media_store.init_store(str(tmp_path / "session.db"))
+    image_path = media_store.media_directory() / "opaque"
+    Image.new("RGB", (16, 16), (200, 30, 10)).save(image_path, format="PNG")
+    record = await media_store.register_media(
+        "image-worker",
+        "image",
+        "upload",
+        "image/png",
+        "opaque.png",
+        path=str(image_path),
+        byte_count=image_path.stat().st_size,
+    )
+    original_to_thread = asyncio.to_thread
+    calls = []
+
+    async def tracked_to_thread(function, *args, **kwargs):
+        calls.append(function)
+        return await original_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(graph.asyncio, "to_thread", tracked_to_thread)
+    try:
+        _, images = await graph._prepare_user_media(
+            "请看看", "image-worker", [record["media_id"]], None
+        )
+        assert len(calls) == 1
+        assert images[0].startswith("data:image/jpeg;base64,")
+    finally:
+        await media_store.close_store()
+
+
+@pytest.mark.asyncio
 async def test_stage_persistence_clear_delete_and_chat_reconcile(tmp_path, monkeypatch):
     store_path = str(tmp_path / "session.db")
     await session_store.init_store(store_path)

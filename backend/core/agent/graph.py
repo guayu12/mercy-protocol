@@ -404,17 +404,20 @@ def _image_data_url(path: str) -> str | None:
             source.seek(0)
             image = source.copy()
             image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
-            image_format = (source.format or "").upper()
-            if image_format == "JPEG":
+            has_alpha = "A" in image.getbands() or "transparency" in source.info
+            if has_alpha:
+                image_format = "PNG"
+                image = image.convert("RGBA")
+                mime = "image/png"
+            else:
+                image_format = "JPEG"
                 image = image.convert("RGB")
                 mime = "image/jpeg"
-            elif image_format == "WEBP":
-                mime = "image/webp"
-            else:
-                image_format = "PNG"
-                mime = "image/png"
             output = io.BytesIO()
-            image.save(output, format=image_format)
+            if image_format == "JPEG":
+                image.save(output, format=image_format, quality=85)
+            else:
+                image.save(output, format=image_format)
     except Exception as error:
         log_bus.emit("warn", "MEDIA", f"could not decode uploaded image: {error}")
         return None
@@ -439,7 +442,7 @@ async def _prepare_user_media(
             )
             legacy_data = base64.b64decode(encoded)
             legacy = await media_store.register_legacy_image(thread_id, legacy_data)
-            data_url = _image_data_url(legacy["path"])
+            data_url = await asyncio.to_thread(_image_data_url, legacy["path"])
             if data_url:
                 image_urls.append(data_url)
         except Exception as error:
@@ -461,7 +464,9 @@ async def _prepare_user_media(
                 record = await media_store.cache_remote_image(
                     media_id, safe_media_fetcher, cache_limit
                 )
-            data_url = _image_data_url(record.get("path") or "")
+            data_url = await asyncio.to_thread(
+                _image_data_url, record.get("path") or ""
+            )
             if data_url:
                 image_urls.append(data_url)
         except Exception as error:
