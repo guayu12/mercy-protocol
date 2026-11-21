@@ -59,6 +59,7 @@ cp .env.example .env        # then fill in your API keys / model names
 
 Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_BASE_URL`.
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
+Legacy memories in the `personal_assistant_memory` collection are not automatically carried over to `personal_assistant_memory_openai`, which uses OpenAI embeddings.
 
 ### 2. Avatar model
 
