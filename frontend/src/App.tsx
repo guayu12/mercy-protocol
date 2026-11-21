@@ -13,7 +13,9 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
+import { Stage, type MediaStageData, type StageItem } from "./Stage";
 import "./App.css";
 
 const ASSISTANT_NAME = "Aura";
@@ -26,9 +28,11 @@ type DialogueMessage = {
   content: string;
   createdAt: number;
   turnId?: string;
-  image?: string;
+  attachments?: Array<{ media_id: string; kind: "image" | "video"; filename: string }>;
   interrupted?: boolean;
 };
+
+type UploadedAttachment = StageItem & { filename: string; previewUrl: string };
 
 type Report = {
   report_id: string;
@@ -66,6 +70,8 @@ type ChatEvent =
   | { type: "report.delta"; report_id: string; markdown: string }
   | { type: "report.done"; report_id: string }
   | { type: "report.highlight"; report_id: string; anchor: string }
+  | ({ type: "stage.show" } & MediaStageData)
+  | { type: "stage.clear" }
   | { type: "done"; turn_id: string; spoken_text: string }
   | { type: "error"; message: string };
 
@@ -77,11 +83,17 @@ const markdownComponents: Components = {
       {children}
     </a>
   ),
-  img: ({ alt }) => (
-    <span className="report-image-placeholder">
-      ［图片：{alt || "未命名"}］
-    </span>
-  ),
+  img: ({ alt, src }) =>
+    src?.startsWith("media:m_") ? (
+      <img
+        className="report-media-image"
+        src={`${API_BASE}/api/media/${src.slice("media:".length)}`}
+        alt={alt || ""}
+        loading="lazy"
+      />
+    ) : (
+      <span className="report-image-placeholder">［图片：{alt || "未命名"}］</span>
+    ),
   code: ({ children, className }) =>
     className ? (
       <code className={className}>{children}</code>
@@ -127,7 +139,11 @@ export function App() {
     return id;
   });
   const [query, setQuery] = useState("");
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const [stage, setStage] = useState<MediaStageData | null>(null);
+  const [stageCurrentMediaId, setStageCurrentMediaId] = useState<string | null>(null);
+  const [isReportExpanded, setIsReportExpanded] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(window.innerWidth < 1100);
   const [isListening, setIsListening] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
@@ -143,7 +159,6 @@ export function App() {
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [hasUnreadReports, setHasUnreadReports] = useState(false);
-  const [isReportLong, setIsReportLong] = useState(false);
   const [isAvatarLoaded, setIsAvatarLoaded] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -426,6 +441,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const updateWidth = () => setIsNarrow(window.innerWidth < 1100);
+    window.addEventListener("resize", updateWidth);
+    return () => window.removeEventListener("resize", updateWidth);
+  }, []);
+
+  useEffect(() => {
     const eventSource = new EventSource(`${API_BASE}/api/logs`);
     eventSource.onopen = () => setBackendConnected(true);
     eventSource.onerror = () => setBackendConnected(false);
@@ -447,6 +468,7 @@ export function App() {
         if (!response.ok) throw new Error(`Session request failed: ${response.status}`);
         return (await response.json()) as {
           reports?: Report[];
+          stage?: MediaStageData | null;
           utterances?: Array<{
             id: number;
             turn_id: string;
@@ -469,6 +491,10 @@ export function App() {
         }));
         setReports((previous) => (previous.length ? previous : restoredReports));
         setMessages((previous) => (previous.length ? previous : restoredMessages));
+        if (session.stage) {
+          setStage(session.stage);
+          setStageCurrentMediaId(session.stage.items[0]?.media_id ?? null);
+        }
         shouldFollowReportRef.current = true;
       })
       .catch((error: unknown) => {
@@ -494,25 +520,6 @@ export function App() {
       reportAtBottomRef.current = true;
     }
     if (shouldFollowReportRef.current) shouldFollowReportRef.current = false;
-  }, [reports]);
-
-  useEffect(() => {
-    const list = reportListRef.current;
-    const content = list?.querySelector(".report-inner");
-    if (!list) return;
-    const measure = () => {
-      const next = reports.length > 0 && list.scrollHeight > list.clientHeight + 8;
-      setIsReportLong((previous) => (previous === next ? previous : next));
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(list);
-    if (content) observer.observe(content);
-    window.addEventListener("resize", measure);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", measure);
-    };
   }, [reports]);
 
   useEffect(() => {
@@ -709,6 +716,19 @@ export function App() {
         case "report.highlight":
           applyReportHighlight(event.report_id, event.anchor);
           break;
+        case "stage.show":
+          setStage({ caption: event.caption, focus: event.focus, items: event.items });
+          setStageCurrentMediaId((current) =>
+            event.items.some((item) => item.media_id === current)
+              ? current
+              : event.items[0]?.media_id ?? null,
+          );
+          setIsReportExpanded(false);
+          break;
+        case "stage.clear":
+          setStage(null);
+          setStageCurrentMediaId(null);
+          break;
         case "done":
           setMessages((previous) =>
             previous.map((message) =>
@@ -737,8 +757,8 @@ export function App() {
 
   const handleSend = useCallback(async () => {
     const message = query.trim();
-    const image = selectedImage;
-    if (!message && !image) return;
+    const pendingAttachments = attachments;
+    if (!message && pendingAttachments.length === 0) return;
     if (
       activeTurnIdRef.current ||
       requestControllerRef.current ||
@@ -751,16 +771,21 @@ export function App() {
 
     const interrupted = pendingInterruptedRef.current ?? undefined;
     pendingInterruptedRef.current = null;
-    const text = message || "请帮我看看这张图片。";
+    const text = message || "请帮我看看这份媒体。";
     setQuery("");
-    setSelectedImage(null);
+    setAttachments([]);
+    pendingAttachments.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
     setMessages((previous) => [
       ...previous,
       {
         id: makeId("user"),
         role: "user",
         content: text,
-        image: image ?? undefined,
+        attachments: pendingAttachments.map(({ media_id, kind, filename }) => ({
+          media_id,
+          kind,
+          filename,
+        })),
         createdAt: Date.now(),
       },
     ]);
@@ -777,9 +802,13 @@ export function App() {
         signal: controller.signal,
         body: JSON.stringify({
           message: text,
-          image_base64: image ?? undefined,
           thread_id: sessionId,
-          screen_state: { viewing_report_id: viewingReportIdRef.current },
+          attachments: pendingAttachments.map((attachment) => attachment.media_id),
+          screen_state: {
+            viewing_report_id: viewingReportIdRef.current,
+            stage_media_ids: stage?.items.map((item) => item.media_id) ?? [],
+            stage_current_media_id: stageCurrentMediaId,
+          },
           interrupted,
         }),
       });
@@ -831,18 +860,59 @@ export function App() {
         activeTurnIdRef.current = null;
       }
     }
-  }, [addSystemNotice, handleChatEvent, interruptActiveTurn, query, selectedImage, sessionId]);
+  }, [addSystemNotice, attachments, handleChatEvent, interruptActiveTurn, query, sessionId, stage, stageCurrentMediaId]);
 
-  const handleImageSelect = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") setSelectedImage(reader.result);
-    };
-    reader.readAsDataURL(file);
+  const handleImageSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
     event.target.value = "";
+    for (const file of files) {
+      try {
+        const form = new FormData();
+        form.append("thread_id", sessionId);
+        form.append("file", file);
+        const response = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: form });
+        if (!response.ok) {
+          const body = await response.json().catch(() => null);
+          throw new Error(body?.detail ?? `上传失败：${response.status}`);
+        }
+        const uploaded = (await response.json()) as { media_id: string; kind: "image" | "video"; mime: string };
+        setAttachments((previous) => [
+          ...previous,
+          {
+            ...uploaded,
+            src: `/api/media/${uploaded.media_id}`,
+            caption: file.name,
+            filename: file.name,
+            previewUrl: URL.createObjectURL(file),
+          },
+        ]);
+      } catch (error) {
+        addSystemNotice(error instanceof Error ? error.message : "媒体上传失败。");
+      }
+    }
   };
+
+  const handleRemoveAttachment = (mediaId: string) => {
+    setAttachments((previous) => {
+      const removed = previous.find((item) => item.media_id === mediaId);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return previous.filter((item) => item.media_id !== mediaId);
+    });
+  };
+
+  const handleCloseStage = useCallback(async () => {
+    setStage(null);
+    setStageCurrentMediaId(null);
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/session/${encodeURIComponent(sessionId)}/stage`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error(`关闭展示台失败：${response.status}`);
+    } catch (error) {
+      addSystemNotice(error instanceof Error ? error.message : "关闭展示台失败。");
+    }
+  }, [addSystemNotice, sessionId]);
 
   const handleComposerChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const next = event.target.value;
@@ -896,8 +966,25 @@ export function App() {
           : backendState === "working"
             ? { state: "thinking", label: workingLabel || "正在处理" }
             : { state: "idle", label: "空闲" };
-  const layout = isReportLong ? "report" : "conversation";
-  const layoutLabel = layout === "report" ? "长报告阅读" : "默认对话";
+  const latestReport = reports[reports.length - 1];
+  const reportNeedsLayout = Boolean(
+    latestReport &&
+      (latestReport.markdown.length > 1500 ||
+        /^\s*\|?.+\|\s*\n\s*\|?\s*:?-{3,}/m.test(latestReport.markdown)),
+  );
+  const layout = stage
+    ? stage.focus === "primary" && !isNarrow
+      ? "focus_evidence"
+      : "evidence"
+    : reportNeedsLayout
+      ? "report"
+      : "conversation";
+  const layoutLabel = {
+    conversation: "对话",
+    report: "报告",
+    evidence: "展示台",
+    focus_evidence: "聚焦看图",
+  }[layout];
 
   return (
     <div id="app" data-layout={layout} data-left-expanded={leftExpanded} data-state={status.state}>
@@ -1013,6 +1100,23 @@ export function App() {
         </aside>
 
         <section id="center-col">
+          <AnimatePresence initial={false}>
+            {stage && (
+              <Stage
+                stage={stage}
+                currentMediaId={stageCurrentMediaId}
+                onCurrentChange={setStageCurrentMediaId}
+                onClose={() => void handleCloseStage()}
+              />
+            )}
+          </AnimatePresence>
+          {layout === "focus_evidence" && latestReport && !isReportExpanded ? (
+            <div className="stage-report-summary">
+              <strong>{latestReport.title}</strong>
+              <span>{latestReport.markdown.split("\n").find((line) => line.trim())?.replace(/^[#\s>*-]+/, "") ?? ""}</span>
+              <button type="button" onClick={() => setIsReportExpanded(true)}>展开</button>
+            </div>
+          ) : (
           <div id="log-panel" className="surface-card" aria-label="报告文档区">
             <div id="log-full-view">
               <div className="panel-header">
@@ -1067,21 +1171,31 @@ export function App() {
               </div>
             </div>
           </div>
+          )}
 
-          {selectedImage && (
-            <div className="image-preview-chip">
-              <img src={selectedImage} alt="待发送图片预览" />
-              <span>图片已添加</span>
-              <button type="button" aria-label="移除图片" onClick={() => setSelectedImage(null)}>
-                <X size={14} />
-              </button>
+          {attachments.length > 0 && (
+            <div className="attachment-list" aria-label="待发送附件">
+              {attachments.map((attachment) => (
+                <div className="image-preview-chip" key={attachment.media_id}>
+                  {attachment.kind === "image" ? (
+                    <img src={attachment.previewUrl} alt="" />
+                  ) : (
+                    <span className="video-chip-icon">视频</span>
+                  )}
+                  <span>{attachment.filename}</span>
+                  <button type="button" aria-label={`移除${attachment.filename}`} onClick={() => handleRemoveAttachment(attachment.media_id)}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 
           <div id="input-bar">
             <input
               type="file"
-              accept="image/*"
+              accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"
+              multiple
               ref={fileInputRef}
               onChange={handleImageSelect}
               hidden
@@ -1089,8 +1203,8 @@ export function App() {
             <button
               className="composer-icon-btn"
               type="button"
-              aria-label="上传图片"
-              title="上传图片"
+              aria-label="上传图片或视频"
+              title="上传图片或视频"
               onClick={() => fileInputRef.current?.click()}
             >
               <ImageIcon size={19} />
@@ -1120,7 +1234,7 @@ export function App() {
             <button
               id="send-btn"
               type="button"
-              disabled={!query.trim() && !selectedImage}
+              disabled={!query.trim() && attachments.length === 0}
               onClick={() => void handleSend()}
             >
               <span>{isLoading ? "发送" : "发送"}</span>
@@ -1193,10 +1307,23 @@ export function App() {
                       <time>{timeLabel(message.createdAt)}</time>
                       {message.interrupted && <span className="interrupted-tag">已打断</span>}
                     </div>
-                    {(message.content || message.image) && (
+                    {(message.content || message.attachments?.length) && (
                       <div className="dialogue-bubble">
                         {message.content && <p>{message.content}</p>}
-                        {message.image && <img className="dialogue-image" src={message.image} alt="用户上传图片" />}
+                        {message.attachments?.map((attachment) =>
+                          attachment.kind === "image" ? (
+                            <img
+                              className="dialogue-image"
+                              key={attachment.media_id}
+                              src={`${API_BASE}/api/media/${attachment.media_id}`}
+                              alt={attachment.filename}
+                            />
+                          ) : (
+                            <div className="dialogue-video" key={attachment.media_id}>
+                              视频 · {attachment.filename}
+                            </div>
+                          ),
+                        )}
                       </div>
                     )}
                     {message.role === "assistant" && !message.content && isLoading && (

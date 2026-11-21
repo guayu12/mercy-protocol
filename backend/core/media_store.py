@@ -356,9 +356,77 @@ async def update_media_mime(media_id: str, mime: str) -> None:
         await _db().commit()
 
 
+async def update_media_probe(
+    media_id: str, mime: str, byte_count: int | None
+) -> None:
+    async with _lock():
+        await _db().execute(
+            "UPDATE media SET mime = ?, bytes = COALESCE(?, bytes), last_used_at = ? "
+            "WHERE media_id = ?",
+            (mime, byte_count, time.time(), media_id),
+        )
+        await _db().commit()
+
+
 async def clear_cached_path(media_id: str) -> None:
     async with _lock():
         await _db().execute(
             "UPDATE media SET path = NULL WHERE media_id = ?", (media_id,)
         )
         await _db().commit()
+
+
+async def cache_remote_image(media_id: str, fetcher, max_cache_bytes: int) -> dict:
+    async with cache_lock(media_id):
+        record = await get_media(media_id)
+        if record is None or record["kind"] != "image" or not record["url"]:
+            raise ValueError("Remote image is unavailable")
+        cache_root = cache_directory().resolve()
+        cached_path = Path(record["path"]).resolve() if record["path"] else None
+        if (
+            cached_path
+            and cached_path.parent == cache_root
+            and cached_path.is_file()
+        ):
+            await update_last_used(media_id)
+            return record
+
+        destination = cache_root / media_id
+        try:
+            result = await fetcher.download_to_file(
+                record["url"], destination, IMAGE_LIMIT
+            )
+            mime = result["content_type"]
+            if mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+                raise ValueError("Remote media is not a supported image")
+            size = destination.stat().st_size
+            await update_media_mime(media_id, mime)
+            await set_cached_path(media_id, str(destination), size)
+            total = 0
+            entries = await cached_media()
+            for entry in entries:
+                path = Path(entry["path"])
+                if path.is_file():
+                    total += path.stat().st_size
+                else:
+                    await clear_cached_path(entry["media_id"])
+            for entry in entries:
+                if total <= max_cache_bytes:
+                    break
+                if entry["media_id"] == media_id:
+                    continue
+                path = Path(entry["path"])
+                if path.is_file():
+                    size = path.stat().st_size
+                    path.unlink(missing_ok=True)
+                    total -= size
+                await clear_cached_path(entry["media_id"])
+            if total > max_cache_bytes:
+                destination.unlink(missing_ok=True)
+                await clear_cached_path(media_id)
+                raise ValueError("Remote media cache is full")
+            await update_last_used(media_id)
+            return await get_media(media_id)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise

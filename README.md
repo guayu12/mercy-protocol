@@ -54,6 +54,7 @@ cd backend
 python3.12 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 cp .env.example .env        # then fill in your API keys / model names
+set -a; [ ! -f .env ] || . ./.env; set +a
 ./venv/bin/python -m uvicorn main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8000
 ```
 

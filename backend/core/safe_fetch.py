@@ -218,7 +218,12 @@ class SafeMediaFetcher:
         for redirect_count in range(MAX_REDIRECTS + 1):
             await _validate_target(current_url, self._resolver)
             request = client.build_request(method, current_url, headers=headers)
-            response = await client.send(request, stream=True, follow_redirects=False)
+            try:
+                response = await client.send(
+                    request, stream=True, follow_redirects=False
+                )
+            except httpx.HTTPError as error:
+                raise SafeFetchError("Remote media request failed") from error
             if response.status_code not in REDIRECT_STATUSES:
                 return response
             location = response.headers.get("location")
@@ -232,9 +237,15 @@ class SafeMediaFetcher:
 
     async def probe(self, url: str) -> dict:
         async with self._client() as client:
-            response = await self._request(client, "HEAD", url)
-            if not 200 <= response.status_code < 300:
-                await response.aclose()
+            try:
+                response = await self._request(client, "HEAD", url)
+            except UnsafeAddress:
+                raise
+            except SafeFetchError:
+                response = None
+            if response is None or not 200 <= response.status_code < 300:
+                if response is not None:
+                    await response.aclose()
                 response = await self._request(
                     client, "GET", url, headers={"Range": "bytes=0-0"}
                 )
