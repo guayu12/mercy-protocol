@@ -215,6 +215,11 @@ export function App() {
   const [leftExpanded, setLeftExpanded] = useState(false);
   const [clock, setClock] = useState("");
   const [reports, setReports] = useState<Report[]>([]);
+  const [pendingReportHighlight, setPendingReportHighlight] = useState<{
+    reportId: string;
+    anchor: string;
+    nonce: number;
+  } | null>(null);
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [hasUnreadReports, setHasUnreadReports] = useState(false);
@@ -245,7 +250,7 @@ export function App() {
   const isPumpingRef = useRef(false);
   const audioEpochRef = useRef(0);
   const highlightTimersRef = useRef(new Map<string, number>());
-  const pendingReportHighlightRef = useRef<{ reportId: string; anchor: string } | null>(null);
+  const reportHighlightNonceRef = useRef(0);
 
   const addSystemNotice = useCallback((content: string) => {
     setMessages((previous) => [
@@ -689,15 +694,16 @@ export function App() {
   }, []);
 
   useLayoutEffect(() => {
-    if (!pendingReportHighlightRef.current || !isReportExpanded) return;
+    if (!pendingReportHighlight || !isReportExpanded) return;
     const frame = window.requestAnimationFrame(() => {
-      const pending = pendingReportHighlightRef.current;
-      if (pending && applyReportHighlight(pending.reportId, pending.anchor)) {
-        pendingReportHighlightRef.current = null;
+      if (applyReportHighlight(pendingReportHighlight.reportId, pendingReportHighlight.anchor)) {
+        setPendingReportHighlight((pending) =>
+          pending?.nonce === pendingReportHighlight.nonce ? null : pending,
+        );
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [applyReportHighlight, isReportExpanded, reports, stage]);
+  }, [applyReportHighlight, isReportExpanded, pendingReportHighlight, reports, stage]);
 
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
@@ -788,10 +794,11 @@ export function App() {
           );
           break;
         case "report.highlight":
-          pendingReportHighlightRef.current = {
+          setPendingReportHighlight({
             reportId: event.report_id,
             anchor: event.anchor,
-          };
+            nonce: ++reportHighlightNonceRef.current,
+          });
           setStage((previous) =>
             previous?.focus === "primary" ? { ...previous, focus: "normal" } : previous,
           );
