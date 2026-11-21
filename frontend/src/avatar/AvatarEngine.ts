@@ -144,7 +144,9 @@ export class AvatarEngine {
 
     /** Pin an expression weight (debug); null releases it. */
     setExpressionOverride(name: string, value: number | null) {
-        if (value === null) this.overrides.delete(name); else this.overrides.set(name, value);
+        if (value !== null) { this.overrides.set(name, value); return; }
+        this.overrides.delete(name);
+        this.vrm?.expressionManager?.setValue(name, 0);
     }
 
     setLighting(_preset: LightingPreset) {
