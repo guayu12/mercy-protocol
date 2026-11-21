@@ -387,19 +387,37 @@ async def process_query(
                 )
             )
             if valid_interruption:
-                spoken_parts = [
-                    speech_queue.get_sentence(sentence_id)
+                current_segment = speech_queue.get_turn_segment(previous_turn_id)
+                spoken_entries = [
+                    (
+                        speech_queue.get_sentence(sentence_id),
+                        speech_queue.get_sentence_segment(sentence_id),
+                    )
                     for sentence_id in sentence_ids
                 ]
-                if any(text is None for text in spoken_parts):
+                if any(
+                    text is None or segment is None
+                    for text, segment in spoken_entries
+                ) or (sentence_ids and current_segment is None):
                     await session_store.mark_interrupted(
                         thread_id, previous_turn_id, None
                     )
                 else:
-                    spoken = "".join(text for text in spoken_parts if text)
+                    spoken = "".join(text for text, _ in spoken_entries if text)
                     interruption_text = (
                         spoken + "……（说到这里被用户打断）"
                         if spoken
+                        else "（还没开口就被用户打断了）"
+                    )
+                    last_segment = current_segment if current_segment is not None else 0
+                    last_segment_text = "".join(
+                        text
+                        for text, segment in spoken_entries
+                        if segment == last_segment and text
+                    )
+                    checkpoint_text = (
+                        last_segment_text + "……（说到这里被用户打断）"
+                        if last_segment_text
                         else "（还没开口就被用户打断了）"
                     )
                     state = await graph.aget_state(config)
@@ -414,7 +432,7 @@ async def process_query(
                             {
                                 "messages": [
                                     AIMessage(
-                                        content=interruption_text,
+                                        content=checkpoint_text,
                                         id=messages[-1].id,
                                     )
                                 ]
@@ -425,7 +443,7 @@ async def process_query(
                     ):
                         await graph.aupdate_state(
                             config,
-                            {"messages": [AIMessage(content=interruption_text)]},
+                            {"messages": [AIMessage(content=checkpoint_text)]},
                             as_node="agent",
                         )
                     await session_store.mark_interrupted(
@@ -442,9 +460,12 @@ async def process_query(
         reported_show_report_calls = set()
         report_status_pending = 0
         assistant_utterance_saved = False
+        segment_index = 0
 
         def remember(sentence: dict):
-            speech_queue.remember_sentence(turn_id, sentence["id"], sentence["text"])
+            speech_queue.remember_sentence(
+                turn_id, sentence["id"], sentence["text"], segment_index
+            )
             emitted_sentences.append(sentence["text"])
 
         async def save_assistant_utterance(interrupted: bool):
@@ -526,6 +547,7 @@ async def process_query(
                             "turn_id": turn_id,
                             **sentence,
                         }
+                    speaking_started = False
                     log_bus.emit("tool", "TOOL", f"► {event['name']}({str(event['data'].get('input', ''))[:80]})")
                     labels = {
                         "tavily_search": "正在搜索",
@@ -546,6 +568,8 @@ async def process_query(
                     output = getattr(output, "content", output)
                     log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
                     last_tool_end_sentence_count = len(emitted_sentences)
+                    segment_index += 1
+                    speech_queue.advance_turn_segment(turn_id)
                     yield {"type": "tool", "name": event["name"], "status": "end"}
                 elif kind == "on_custom_event" and event.get("name") == "report":
                     yield event["data"]

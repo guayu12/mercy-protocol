@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -119,6 +120,18 @@ async def test_process_query_splits_reports_from_speech(monkeypatch, tmp_path):
         assert all("|" not in event["text"] for event in speech_events)
         assert all(not any(mark in event["text"] for mark in "#*`") for event in speech_events)
         assert all("http" not in event["text"] for event in speech_events)
+        first_sentence_index = events.index(speech_events[0])
+        second_sentence_index = events.index(speech_events[1])
+        assert events[first_sentence_index - 1] == {
+            "type": "status",
+            "state": "speaking",
+            "label": "",
+        }
+        assert events[second_sentence_index - 1] == {
+            "type": "status",
+            "state": "speaking",
+            "label": "",
+        }
         assert next(event for event in events if event["type"] == "tool")["name"] == "show_report"
         state = await agent_graph.app_graph.aget_state(
             {"configurable": {"thread_id": "protocol-report"}}
@@ -369,6 +382,7 @@ async def test_disconnect_persists_emitted_sentence_as_interrupted(monkeypatch, 
                 break
         assert first_sentence is not None
 
+        await asyncio.sleep(0.05)
         await generator.aclose()
 
         assistants = [
@@ -427,5 +441,117 @@ async def test_next_turn_rewrites_checkpoint_to_spoken_interruption(
         utterances = await session_store.recent_utterances("protocol-interrupt")
         assert utterances[1]["text"] == "第一句。……（说到这里被用户打断）"
         assert utterances[1]["interrupted"] == 1
+    finally:
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_interruption_rewrites_only_the_last_spoken_tool_segment(
+    monkeypatch, tmp_path
+):
+    report_call = {
+        "name": "show_report",
+        "args": {"title": "摘要", "markdown": "第一条\n第二条"},
+        "id": "segment_report",
+        "type": "tool_call",
+    }
+    connection = await _install_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            AIMessage(content="我先整理一下。", tool_calls=[report_call]),
+            AIMessage(content="报告放屏幕上了。重点有两条。你看看。"),
+            AIMessage(content="新一轮回复。"),
+            AIMessage(content="我先整理一下。", tool_calls=[report_call]),
+            AIMessage(content="报告放屏幕上了。重点有两条。你看看。"),
+            AIMessage(content="新一轮回复。"),
+        ],
+    )
+    try:
+        async def interrupt_after(thread_id: str, sentence_count: int):
+            first_events = [
+                event
+                async for event in agent_graph.process_query(
+                    "做个摘要", thread_id
+                )
+            ]
+            turn_id = first_events[0]["turn_id"]
+            sentence_ids = [
+                event["id"]
+                for event in first_events
+                if event["type"] == "speech.sentence"
+            ][:sentence_count]
+            second_events = [
+                event
+                async for event in agent_graph.process_query(
+                    "刚才说到哪？",
+                    thread_id,
+                    interrupted={
+                        "turn_id": turn_id,
+                        "spoken_sentence_ids": sentence_ids,
+                    },
+                )
+            ]
+            state = await agent_graph.app_graph.aget_state(
+                {"configurable": {"thread_id": thread_id}}
+            )
+            return first_events, second_events, state
+
+        first_events, _, state = await interrupt_after(
+            "protocol-segment-interrupt", 2
+        )
+        first_sentence, second_sentence = [
+            event
+            for event in first_events
+            if event["type"] == "speech.sentence"
+        ][:2]
+        checkpoint = next(
+            message
+            for message in state.values["messages"]
+            if isinstance(message, AIMessage)
+            and message.content.startswith("报告放屏幕上了。")
+        )
+        assert checkpoint.content == (
+            second_sentence["text"] + "……（说到这里被用户打断）"
+        )
+        utterances = await session_store.recent_utterances(
+            "protocol-segment-interrupt"
+        )
+        assistant = next(
+            item
+            for item in utterances
+            if item["role"] == "assistant"
+            and item["turn_id"] == first_events[0]["turn_id"]
+        )
+        assert assistant["text"] == (
+            first_sentence["text"]
+            + second_sentence["text"]
+            + "……（说到这里被用户打断）"
+        )
+        assert assistant["interrupted"] == 1
+
+        first_events, _, state = await interrupt_after(
+            "protocol-earlier-segment-only", 1
+        )
+        checkpoint = next(
+            message
+            for message in state.values["messages"]
+            if isinstance(message, AIMessage)
+            and message.content == "（还没开口就被用户打断了）"
+        )
+        assert checkpoint.content == "（还没开口就被用户打断了）"
+        utterances = await session_store.recent_utterances(
+            "protocol-earlier-segment-only"
+        )
+        assistant = next(
+            item
+            for item in utterances
+            if item["role"] == "assistant"
+            and item["turn_id"] == first_events[0]["turn_id"]
+        )
+        assert assistant["text"] == (
+            "我先整理一下。……（说到这里被用户打断）"
+        )
+        assert assistant["interrupted"] == 1
     finally:
         await _close_graph(connection)
