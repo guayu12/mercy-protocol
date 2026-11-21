@@ -52,8 +52,23 @@ export function Stage({ stage, currentMediaId, onCurrentChange, onClose }: Props
   useEffect(() => {
     if (!stage) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setEnlarged(false);
-      else if (items.length > 1 && event.key === "ArrowLeft") navigate(index - 1);
+      if (event.key === "Escape") {
+        setEnlarged(false);
+        return;
+      }
+      const target = event.target;
+      if (
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            target.closest("input, textarea, select, [contenteditable='true']")))
+      ) {
+        return;
+      }
+      if (items.length > 1 && event.key === "ArrowLeft") navigate(index - 1);
       else if (items.length > 1 && event.key === "ArrowRight") navigate(index + 1);
     };
     window.addEventListener("keydown", onKeyDown);
