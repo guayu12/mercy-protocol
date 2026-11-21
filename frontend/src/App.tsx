@@ -12,16 +12,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import ReactMarkdown, {
-  defaultUrlTransform,
   type Components,
-  type UrlTransform,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
 import { Stage, type MediaStageData, type StageItem } from "./Stage";
 import { API_BASE } from "./api";
-import { isMediaRef, mediaUrl } from "./mediaHelpers.js";
+import { markdownUrlTransform, reportImage } from "./reportMarkdown.mjs";
 import "./App.css";
 
 const ASSISTANT_NAME = "Aura";
@@ -81,26 +79,13 @@ type ChatEvent =
 
 type BackendState = "idle" | "thinking" | "working";
 
-const markdownUrlTransform: UrlTransform = (url) =>
-  isMediaRef(url) ? url : defaultUrlTransform(url);
-
 const markdownComponents: Components = {
   a: ({ children, href }) => (
     <a className="report-link" href={href} target="_blank" rel="noreferrer">
       {children}
     </a>
   ),
-  img: ({ alt, src }) =>
-    isMediaRef(src ?? "") ? (
-      <img
-        className="report-media-image"
-        src={mediaUrl(src.slice("media:".length))}
-        alt={alt || ""}
-        loading="lazy"
-      />
-    ) : (
-      <span className="report-image-placeholder">［图片：{alt || "未命名"}］</span>
-    ),
+  img: reportImage,
   code: ({ children, className }) =>
     className ? (
       <code className={className}>{children}</code>
