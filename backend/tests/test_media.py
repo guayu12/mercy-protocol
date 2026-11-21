@@ -28,6 +28,8 @@ import main
         "::1",
         "fc00::1",
         "::ffff:127.0.0.1",
+        "64:ff9b::7f00:1",
+        "64:ff9b:1:7f00:0:100::",
     ],
 )
 async def test_safe_fetch_rejects_private_resolved_addresses(address):

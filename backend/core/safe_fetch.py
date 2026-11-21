@@ -15,6 +15,10 @@ CONNECT_TIMEOUT = 3.0
 READ_TIMEOUT = 10.0
 MAX_REDIRECTS = 3
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+NAT64_PREFIXES = (
+    ipaddress.IPv6Network("64:ff9b::/96"),
+    ipaddress.IPv6Network("64:ff9b:1::/48"),
+)
 
 
 class SafeFetchError(Exception):
@@ -58,7 +62,14 @@ def _as_httpx_error(error: Exception, request: httpx.Request) -> httpx.Transport
 def _is_public_address(value: str) -> bool:
     address = ipaddress.ip_address(value.split("%", 1)[0])
     if isinstance(address, ipaddress.IPv6Address):
-        if address.ipv4_mapped is not None:
+        if address in NAT64_PREFIXES[0]:
+            address = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        elif address in NAT64_PREFIXES[1]:
+            value = int(address)
+            embedded_ipv4 = ((value >> 64) & 0xFFFF) << 16
+            embedded_ipv4 |= (value >> 40) & 0xFFFF
+            address = ipaddress.IPv4Address(embedded_ipv4)
+        elif address.ipv4_mapped is not None:
             address = address.ipv4_mapped
         elif int(address) >> 32 == 0 and int(address) not in (0, 1):
             embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
