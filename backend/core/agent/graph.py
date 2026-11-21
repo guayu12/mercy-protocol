@@ -651,7 +651,7 @@ async def _close_pending_tool_calls(graph, config):
     disconnect), answer the dangling tool calls so OpenAI accepts the history."""
     state = await graph.aget_state(config)
     messages = state.values.get("messages", []) if state.values else []
-    if not state.next or not messages or not isinstance(messages[-1], AIMessage):
+    if not messages or not isinstance(messages[-1], AIMessage):
         return
     pending = getattr(messages[-1], "tool_calls", None) or []
     if not pending:
