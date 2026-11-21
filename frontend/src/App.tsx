@@ -259,6 +259,7 @@ export function App() {
   const isPumpingRef = useRef(false);
   const audioEpochRef = useRef(0);
   const highlightTimersRef = useRef(new Map<string, number>());
+  const pendingReportHighlightRef = useRef<{ reportId: string; anchor: string } | null>(null);
 
   const addSystemNotice = useCallback((content: string) => {
     setMessages((previous) => [
@@ -677,15 +678,15 @@ export function App() {
 
   const applyReportHighlight = useCallback((reportId: string, anchor: string) => {
     const list = reportListRef.current;
-    if (!list) return;
+    if (!list) return false;
     const card = Array.from(list.querySelectorAll<HTMLElement>(".report-card")).find(
       (item) => item.dataset.reportId === reportId,
     );
-    if (!card) return;
+    if (!card) return false;
     const target = Array.from(card.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6,p,li,td,pre")).find(
       (item) => item.textContent?.toLocaleLowerCase().includes(anchor.toLocaleLowerCase()),
     );
-    if (!target) return;
+    if (!target) return false;
     target.classList.add("report-highlight");
     list.scrollTo({
       top: list.scrollTop + target.getBoundingClientRect().top - list.getBoundingClientRect().top - 24,
@@ -698,7 +699,19 @@ export function App() {
       highlightTimersRef.current.delete(reportId);
     }, 4500);
     highlightTimersRef.current.set(reportId, timer);
+    return true;
   }, []);
+
+  useLayoutEffect(() => {
+    if (!pendingReportHighlightRef.current || !isReportExpanded) return;
+    const frame = window.requestAnimationFrame(() => {
+      const pending = pendingReportHighlightRef.current;
+      if (pending && applyReportHighlight(pending.reportId, pending.anchor)) {
+        pendingReportHighlightRef.current = null;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [applyReportHighlight, isReportExpanded, reports, stage]);
 
   const handleChatEvent = useCallback(
     (event: ChatEvent) => {
@@ -789,7 +802,14 @@ export function App() {
           );
           break;
         case "report.highlight":
-          applyReportHighlight(event.report_id, event.anchor);
+          pendingReportHighlightRef.current = {
+            reportId: event.report_id,
+            anchor: event.anchor,
+          };
+          setStage((previous) =>
+            previous?.focus === "primary" ? { ...previous, focus: "normal" } : previous,
+          );
+          setIsReportExpanded(true);
           break;
         case "stage.show":
           setStage({ caption: event.caption, focus: event.focus, items: event.items });
@@ -827,7 +847,7 @@ export function App() {
           break;
       }
     },
-    [addSystemNotice, applyReportHighlight, enqueueSentence],
+    [addSystemNotice, enqueueSentence],
   );
 
   const handleSend = useCallback(async () => {
