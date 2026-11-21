@@ -386,6 +386,16 @@ async def test_stage_persistence_clear_delete_and_chat_reconcile(tmp_path, monke
             json={"message": "继续", "thread_id": "stage-test"},
         )
         session = await client.get("/api/session/stage-test")
+        assert session.json()["stage"] is not None
+        await client.post(
+            "/api/chat",
+            json={
+                "message": "继续",
+                "thread_id": "stage-test",
+                "screen_state": {"stage_media_ids": []},
+            },
+        )
+        session = await client.get("/api/session/stage-test")
     assert session.json()["stage"] is None
     await media_store.close_store()
     await session_store.close_store()

@@ -154,10 +154,12 @@ async def chat_endpoint(request: ChatRequest):
     """
     Streams spoken sentences, reports, status and tool events as Server-Sent Events.
     """
-    screen_state = request.screen_state.model_dump() if request.screen_state else {}
-    await media_store.reconcile_stage(
-        request.thread_id, screen_state.get("stage_media_ids", [])
-    )
+    screen_state = {}
+    if request.screen_state is not None:
+        screen_state = request.screen_state.model_dump()
+        await media_store.reconcile_stage(
+            request.thread_id, screen_state.get("stage_media_ids", [])
+        )
     await _register_message_links(request.thread_id, request.message)
 
     async def event_stream():
