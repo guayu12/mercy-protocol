@@ -216,9 +216,7 @@ export class AvatarEngine {
      */
     setQuality(quality: Quality) {
         this.quality = quality;
-        this.composer?.dispose();
-        this.composer = null;
-        this.bloom = null;
+        this.disposeComposer();
         if (quality === "high") {
             this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
@@ -244,7 +242,7 @@ export class AvatarEngine {
         this.stopSpeech();
         this.audio.removeEventListener("ended", this.endSpeech);
         this.timer.dispose();
-        this.composer?.dispose();
+        this.disposeComposer();
         this.backdrop.mesh.geometry.dispose();
         (this.backdrop.mesh.material as THREE.Material).dispose();
         this.ro.disconnect();
@@ -264,6 +262,15 @@ export class AvatarEngine {
         this.onSpeechEnd = null;
         cb?.();
     };
+
+    /** EffectComposer.dispose() only frees its own targets, not the passes' (bloom mips, materials). */
+    private disposeComposer() {
+        if (!this.composer) return;
+        for (const pass of this.composer.passes) pass.dispose();
+        this.composer.dispose();
+        this.composer = null;
+        this.bloom = null;
+    }
 
     /** Render loop only runs while the tab is visible and the canvas is on screen. */
     private updateLoop = () => {
