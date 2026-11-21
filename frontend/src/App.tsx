@@ -548,14 +548,16 @@ export function App() {
       })
       .then((session) => {
         const restoredReports = session.reports ?? [];
-        const restoredMessages = (session.utterances ?? []).map((utterance) => ({
-          id: `utterance_${utterance.id}`,
-          turnId: utterance.turn_id,
-          role: utterance.role,
-          content: utterance.text,
-          interrupted: utterance.interrupted,
-          createdAt: utterance.created_at,
-        }));
+        const restoredMessages = (session.utterances ?? [])
+          .filter((utterance) => utterance.text.trim())
+          .map((utterance) => ({
+            id: `utterance_${utterance.id}`,
+            turnId: utterance.turn_id,
+            role: utterance.role,
+            content: utterance.text,
+            interrupted: utterance.interrupted,
+            createdAt: utterance.created_at,
+          }));
         setReports((previous) => (previous.length ? previous : restoredReports));
         setMessages((previous) => (previous.length ? previous : restoredMessages));
         if (session.stage) {

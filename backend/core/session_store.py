@@ -126,6 +126,8 @@ async def add_utterance(
     text: str,
     interrupted: bool = False,
 ):
+    if role == "assistant" and not text.strip():
+        return
     async with _get_lock():
         db = _db()
         await db.execute(
@@ -155,7 +157,7 @@ async def mark_interrupted(
                 "AND role = 'assistant' ORDER BY id DESC LIMIT 1)",
                 (spoken_text, thread_id, turn_id),
             )
-        if cursor.rowcount == 0:
+        if cursor.rowcount == 0 and spoken_text:
             await db.execute(
                 "INSERT INTO utterances (thread_id, turn_id, role, text, interrupted, created_at) "
                 "VALUES (?, ?, 'assistant', ?, 1, ?)",
