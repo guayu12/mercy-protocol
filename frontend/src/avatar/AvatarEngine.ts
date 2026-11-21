@@ -15,7 +15,11 @@ import {
 
 export { EMOTIONS, GESTURES, type Emotion, type Gesture } from "./motion";
 
-const IDLE_VRMA = "/vrm/motions/idle_loop.vrma";
+const IDLE_VRMAS = ["/vrm/motions/idle_loop.vrma", "/vrm/motions/ual_idle.vrma"];
+const TALK_VRMA = "/vrm/motions/ual_talking.vrma";
+const BASE_FADE = 0.6;
+/** Chance to switch to another idle variant each time the current one loops. */
+const IDLE_SWITCH_CHANCE = 0.35;
 const GESTURE_FADE = 0.3;
 const PROC_GESTURE_SECONDS = 1.1;
 
@@ -95,6 +99,9 @@ export class AvatarEngine {
     emotionWeight = 0.7;
     private mixer: THREE.AnimationMixer | null = null;
     private baseAction: THREE.AnimationAction | null = null;
+    private idleActions: THREE.AnimationAction[] = [];
+    private talkAction: THREE.AnimationAction | null = null;
+    private idleIndex = 0;
     private clips: Partial<Record<Gesture, THREE.AnimationClip>> = {};
     private gestureAction: THREE.AnimationAction | null = null;
     private fadingGesture: THREE.AnimationAction | null = null;
@@ -162,11 +169,24 @@ export class AvatarEngine {
         }
         this.mixer = new THREE.AnimationMixer(vrm.scene);
         this.clips = gestureClips(vrm, this.axis);
-        loadVRMAClip(IDLE_VRMA, vrm).then(clip => {
-            if (this.vrm !== vrm || !this.mixer) return;
-            this.baseAction = this.mixer.clipAction(clip);
-            this.baseAction.play();
-        }).catch(err => console.warn("[VRM] idle motion unavailable, using procedural idle:", err));
+        const mixer = this.mixer;
+        mixer.addEventListener("loop", e => {
+            const n = this.idleActions.length;
+            if (e.action === this.baseAction && n > 1 && Math.random() < IDLE_SWITCH_CHANCE) {
+                this.idleIndex = (this.idleIndex + 1 + Math.floor(Math.random() * (n - 1))) % n;
+            }
+        });
+        // Each loop is optional: whatever loads joins the rotation, failures fall back (procedural if none).
+        const load = (url: string) => loadVRMAClip(url, vrm)
+            .then(clip => {
+                clip.name = url.slice(url.lastIndexOf("/") + 1);
+                return this.vrm === vrm ? mixer.clipAction(clip) : null;
+            })
+            .catch(err => { console.warn(`[VRM] motion ${url} unavailable:`, err); return null; });
+        Promise.all(IDLE_VRMAS.map(load)).then(actions => {
+            this.idleActions = actions.filter((a): a is THREE.AnimationAction => a !== null);
+        });
+        load(TALK_VRMA).then(a => { this.talkAction = a; });
         const head = vrm.humanoid.getNormalizedBoneNode("head");
         if (head) {
             vrm.scene.updateMatrixWorld(true);
@@ -187,7 +207,7 @@ export class AvatarEngine {
     /** Base emotion; while speaking, the sentence's own emotion (if any) wins. */
     setEmotion(emotion: Emotion) { this.emotion = emotion; }
     getEmotion() { return this.emotion; }
-    get motionSource(): "vrma" | "procedural" { return this.baseAction ? "vrma" : "procedural"; }
+    get motionSource(): string { return this.baseAction ? this.baseAction.getClip().name || "vrma" : "procedural"; }
 
     /** One-shot gesture; ignored until the model is loaded. */
     gesture(name: Gesture) {
@@ -337,6 +357,21 @@ export class AvatarEngine {
         this.bloom = null;
     }
 
+    /** Talking loop while speaking, otherwise one of the idle variants; cross-faded, never mid-gesture. */
+    private updateBase() {
+        if (this.gestureAction) return;
+        const speaking = this.state === "speaking" || this.clock !== null;
+        const idle = this.idleActions.length ? this.idleActions[this.idleIndex % this.idleActions.length] : null;
+        const next = (speaking && this.talkAction) || idle || this.talkAction;
+        if (!next || next === this.baseAction) return;
+        next.enabled = true;
+        next.reset();
+        if (this.baseAction) next.fadeIn(BASE_FADE);
+        next.play();
+        this.baseAction?.fadeOut(BASE_FADE);
+        this.baseAction = next;
+    }
+
     /** Hand back to the idle loop shortly before a one-shot clip ends. */
     private updateGesture() {
         const a = this.gestureAction;
@@ -459,6 +494,7 @@ export class AvatarEngine {
         // Procedural offsets are layered on top of whatever the mixer wrote this frame.
         for (const n of [neck, chest, spine]) n?.quaternion.identity();
         this.updateGesture();
+        this.updateBase();
         this.mixer?.update(dt);
         const add = (node: THREE.Object3D | null, x: number, y: number, z: number) => {
             node?.quaternion.multiply(this.qTmp.setFromEuler(this.eTmp.set(x * s, y, z * s)));
