@@ -77,6 +77,11 @@ const markdownComponents: Components = {
       {children}
     </a>
   ),
+  img: ({ alt }) => (
+    <span className="report-image-placeholder">
+      ［图片：{alt || "未命名"}］
+    </span>
+  ),
   code: ({ children, className }) =>
     className ? (
       <code className={className}>{children}</code>

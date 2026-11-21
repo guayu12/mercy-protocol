@@ -690,6 +690,16 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
+.report-image-placeholder {
+  display: inline-flex;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .report-markdown {
   color: #c7cad2;
   font-size: 13px;
