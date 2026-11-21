@@ -11,7 +11,11 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type Components,
+  type UrlTransform,
+} from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
@@ -75,6 +79,9 @@ type ChatEvent =
   | { type: "error"; message: string };
 
 type BackendState = "idle" | "thinking" | "working";
+
+const markdownUrlTransform: UrlTransform = (url) =>
+  /^media:m_[A-Za-z0-9_-]+$/.test(url) ? url : defaultUrlTransform(url);
 
 const markdownComponents: Components = {
   a: ({ children, href }) => (
@@ -1221,7 +1228,11 @@ export function App() {
                         {report.title && <h2 className="report-title">{report.title}</h2>}
                         {report.markdown ? (
                           <div className="report-markdown">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={markdownComponents}
+                              urlTransform={markdownUrlTransform}
+                            >
                               {report.markdown}
                             </ReactMarkdown>
                           </div>
