@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 from core import log_bus  # real-time log broadcaster
 from core.agent.graph import process_query, init_graph, close_graph
+from core.speech import synthesize
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -109,6 +110,16 @@ async def tts_endpoint(text: str):
                 yield chunk["data"]
 
     return StreamingResponse(generate_audio(), media_type="audio/mpeg")
+
+
+class SpeechRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/speech")
+async def speech_endpoint(req: SpeechRequest):
+    """Synthesize speech and return base64 audio plus a timed viseme track for avatar lip-sync."""
+    return await synthesize(req.text)
 
 if __name__ == "__main__":
     import uvicorn

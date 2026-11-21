@@ -4,7 +4,7 @@ import {
   Loader2, X, Activity, Cpu, Database, Eye, Radio, AlertTriangle
 } from "lucide-react";
 import "./App.css";
-import { Live2DAvatar } from "./Live2DAvatar";
+import { VRMAvatar, type Speech } from "./VRMAvatar";
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -119,7 +119,7 @@ export function App() {
   const [isListening, setIsListening] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isAvatarLoaded, setIsAvatarLoaded] = useState(false);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [speech, setSpeech] = useState<Speech | null>(null);
   const [currentTime, setCurrentTime] = useState("");
   const [currentDate, setCurrentDate] = useState("");
   // Session id doubles as the LangGraph thread_id; persisted so conversation memory survives reloads
@@ -209,6 +209,23 @@ export function App() {
     e.target.value = "";
   };
 
+  const speak = async (text: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { audio, mime, visemes } = await res.json();
+      const bytes = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
+      const audioUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      setSpeech(prev => { if (prev) URL.revokeObjectURL(prev.audioUrl); return { audioUrl, visemes }; });
+    } catch (e) {
+      console.warn("[TTS] speech failed:", e);
+    }
+  };
+
   const handleSend = async () => {
     if ((!query.trim() && !selectedImage) || isLoading) return;
     const userMsg = query.trim();
@@ -266,8 +283,7 @@ export function App() {
 
       if (finalReply) {
         setMsgCount(c => c + 1);
-        const ts = new Date().getTime();
-        setAudioUrl(`${API_BASE}/api/tts?text=${encodeURIComponent(finalReply)}&_t=${ts}`);
+        speak(finalReply);
       }
     } catch {
       setMessages(prev => [...prev, { role: "system", content: "NET_ERR >> BACKEND UNREACHABLE" }]);
@@ -522,7 +538,7 @@ export function App() {
             </div>
           </div>
 
-          {/* Live2D Avatar Frame */}
+          {/* VRM Avatar Frame */}
           <div className="avatar-frame rounded-lg flex-1 relative overflow-hidden" style={{ minHeight: 0 }}>
             <div className="corner-tl" /><div className="corner-tr" />
             <div className="corner-bl" /><div className="corner-br" />
@@ -545,10 +561,10 @@ export function App() {
                 <span className="text-[9px] font-mono neon-cyan tracking-[0.3em]">LOADING NEURAL AVATAR...</span>
               </div>
             )}
-            <Live2DAvatar
+            <VRMAvatar
               onLoaded={() => setIsAvatarLoaded(true)}
-              audioUrl={audioUrl}
-              onAudioEnd={() => setAudioUrl(null)}
+              speech={speech}
+              onAudioEnd={() => setSpeech(prev => { if (prev) URL.revokeObjectURL(prev.audioUrl); return null; })}
             />
             <div className="absolute bottom-0 left-0 right-0 p-3 z-10 pointer-events-none"
               style={{ background: 'linear-gradient(to top, rgba(0,5,15,0.9), transparent)' }}>
@@ -595,7 +611,7 @@ export function App() {
         style={{ background: 'rgba(0,5,15,0.95)', borderTop: '1px solid rgba(0,229,255,0.1)' }}>
         <div className="flex items-center gap-4 text-white/25">
           <span>MERCY.OS // BUILD 2026.02</span>
-          <span>PIXI.JS v6.5.10 // LIVE2D CUBISM v4</span>
+          <span>THREE.JS // VRM 1.0</span>
           <span>LANGGRAPH v0.3 // CHROMADB</span>
         </div>
         <div className="flex items-center gap-3 text-white/25">
