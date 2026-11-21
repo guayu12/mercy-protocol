@@ -564,6 +564,7 @@ export function App() {
             <VRMAvatar
               onLoaded={() => setIsAvatarLoaded(true)}
               speech={speech}
+              state={speech ? "speaking" : isLoading ? "thinking" : isListening ? "listening" : "idle"}
               onAudioEnd={() => setSpeech(prev => { if (prev) URL.revokeObjectURL(prev.audioUrl); return null; })}
             />
             <div className="absolute bottom-0 left-0 right-0 p-3 z-10 pointer-events-none"
