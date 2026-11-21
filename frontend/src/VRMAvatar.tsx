@@ -36,6 +36,8 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
         let eng: AvatarEngine;
         try {
             eng = new AvatarEngine(container);
+            const q = new URLSearchParams(location.search);
+            if (q.get("quality") === "high" || q.get("bloom") === "1") eng.setQuality("high");
             if (DEBUG_ENABLED) (window as unknown as { __avatar?: AvatarEngine }).__avatar = eng;
         } catch (err: any) {
             console.error("[VRM] WebGL init failed:", err);

@@ -15,6 +15,7 @@ function Lab() {
         (window as unknown as { __avatar?: AvatarEngine }).__avatar = eng;
         if (q.get("look")) eng.setLighting(q.get("look") as LightingPreset);
         if (q.get("quality")) eng.setQuality(q.get("quality") as Quality);
+        if (q.get("bloom") === "1") eng.setQuality("high");
         if (q.get("framing")) eng.setFraming(q.get("framing") as Framing);
         if (q.get("state")) eng.setState(q.get("state") as AvatarState);
         eng.load(q.get("model") ?? "/vrm/avatar.vrm").then(() => {

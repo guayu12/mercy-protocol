@@ -62,15 +62,15 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
     };
 
     const s = engine.stats;
-    const btn = "px-2 py-0.5 rounded border border-[#00e5ff]/40 hover:bg-[#00e5ff]/20 disabled:opacity-40";
-    const active = "bg-[#00e5ff]/30";
+    const btn = "px-2 py-0.5 rounded border border-[#e5a96d]/40 hover:bg-[#e5a96d]/20 disabled:opacity-40";
+    const active = "bg-[#e5a96d]/30";
 
     return createPortal(
-        <div className="fixed bottom-3 left-3 z-[1000] w-64 max-h-[70vh] overflow-y-auto rounded-md bg-black/80 border border-[#00e5ff]/40 text-[10px] font-mono text-cyan-100 backdrop-blur pointer-events-auto"
+        <div className="fixed bottom-3 left-3 z-[1000] w-64 max-h-[70vh] overflow-y-auto rounded-md bg-black/80 border border-[#e5a96d]/40 text-[10px] font-mono text-amber-100 backdrop-blur pointer-events-auto"
             data-testid="avatar-debug-panel">
-            <button className="w-full flex justify-between px-2 py-1 border-b border-[#00e5ff]/30" onClick={() => setOpen(!open)}>
+            <button className="w-full flex justify-between px-2 py-1 border-b border-[#e5a96d]/30" onClick={() => setOpen(!open)}>
                 <span>AVATAR DEBUG</span>
-                <span>{s.fps} FPS · {s.drawCalls} DC {open ? "▾" : "▸"}</span>
+                <span>{s.fps}/{s.targetFps} FPS · {s.drawCalls} DC {open ? "▾" : "▸"}</span>
             </button>
             {open && (
                 <div className="p-2 space-y-2">
@@ -102,15 +102,15 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
                     <section>
                         <div className="text-white/50 mb-1">LOOK · QUALITY · FRAMING</div>
                         <div className="grid grid-cols-3 gap-1">
-                            <select className="bg-black border border-[#00e5ff]/40 rounded px-1" value={lighting}
+                            <select className="bg-black border border-[#e5a96d]/40 rounded px-1" value={lighting}
                                 onChange={e => { const p = e.target.value as LightingPreset; setLighting(p); engine.setLighting(p); }}>
                                 {LIGHTING_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
                             </select>
-                            <select className="bg-black border border-[#00e5ff]/40 rounded px-1" value={quality}
+                            <select className="bg-black border border-[#e5a96d]/40 rounded px-1" value={quality}
                                 onChange={e => { const q = e.target.value as Quality; setQuality(q); engine.setQuality(q); }}>
                                 {QUALITIES.map(q => <option key={q} value={q}>{q}</option>)}
                             </select>
-                            <select className="bg-black border border-[#00e5ff]/40 rounded px-1" value={framing}
+                            <select className="bg-black border border-[#e5a96d]/40 rounded px-1" value={framing}
                                 onChange={e => { const f = e.target.value as Framing; setFraming(f); engine.setFraming(f); }}>
                                 {FRAMINGS.map(f => <option key={f} value={f}>{f}</option>)}
                             </select>

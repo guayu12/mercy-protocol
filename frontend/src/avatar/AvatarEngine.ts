@@ -25,7 +25,7 @@ const FRAMES = {
     upper: { viewH: 1.05, viewW: 0.75, faceFromTop: 0.24 },
 };
 
-export interface AvatarStats { fps: number; drawCalls: number; triangles: number; textures: number; geometries: number }
+export interface AvatarStats { fps: number; targetFps: number; drawCalls: number; triangles: number; textures: number; geometries: number }
 
 /** Body-language parameters blended per state (radians / normalized offsets). */
 interface Pose { lean: number; headTilt: number; headPitch: number; lookX: number; lookY: number; pointerFollow: number }
@@ -52,7 +52,10 @@ export class AvatarEngine {
     private camAim = new THREE.Vector3();
     private viewH = 1;
     private framing: Framing = "auto";
-    private quality: Quality = "high";
+    private quality: Quality = "balanced";
+    private onScreen = true;
+    private io: IntersectionObserver;
+    private lastFrame = 0;
     private lighting: LightingPreset = "studio";
     private composer: EffectComposer | null = null;
     private bloom: UnrealBloomPass | null = null;
@@ -77,12 +80,12 @@ export class AvatarEngine {
 
     private frames = 0;
     private fpsWindowStart = 0;
-    readonly stats: AvatarStats = { fps: 0, drawCalls: 0, triangles: 0, textures: 0, geometries: 0 };
+    readonly stats: AvatarStats = { fps: 0, targetFps: 30, drawCalls: 0, triangles: 0, textures: 0, geometries: 0 };
 
     /** Throws if WebGL is unavailable. */
     constructor(container: HTMLElement) {
         this.container = container;
-        this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "high-performance" });
+        this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "low-power" });
         this.renderer.info.autoReset = false;
         const s = this.renderer.domElement.style;
         s.position = "absolute"; s.inset = "0"; s.width = "100%"; s.height = "100%";
@@ -102,7 +105,10 @@ export class AvatarEngine {
         this.audio.addEventListener("ended", this.endSpeech);
 
         this.timer.connect(document);
-        this.renderer.setAnimationLoop(this.tick);
+        this.io = new IntersectionObserver(([e]) => { this.onScreen = e.isIntersecting; this.updateLoop(); });
+        this.io.observe(container);
+        document.addEventListener("visibilitychange", this.updateLoop);
+        this.updateLoop();
     }
 
     async load(url: string) {
@@ -204,14 +210,17 @@ export class AvatarEngine {
         this.updateBloom();
     }
 
-    /** high: MSAA + bloom post chain at up to 2x pixel ratio; balanced: direct render at 1x. */
+    /**
+     * balanced (default, tablet-friendly): direct render, <=1.5x pixel ratio, 30 fps unless speaking.
+     * high: HalfFloat MSAA target + bloom, <=2x pixel ratio, 60 fps always.
+     */
     setQuality(quality: Quality) {
         this.quality = quality;
         this.composer?.dispose();
         this.composer = null;
         this.bloom = null;
         if (quality === "high") {
-            this.renderer.setPixelRatio(Math.min(Math.max(window.devicePixelRatio, 1.5), 2));
+            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
             const composer = new EffectComposer(this.renderer, rt);
             composer.addPass(new RenderPass(this.scene, this.camera));
@@ -221,7 +230,7 @@ export class AvatarEngine {
             this.composer = composer;
             this.updateBloom();
         } else {
-            this.renderer.setPixelRatio(1);
+            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
         }
         this.resize();
     }
@@ -230,6 +239,8 @@ export class AvatarEngine {
 
     dispose() {
         this.renderer.setAnimationLoop(null);
+        this.io.disconnect();
+        document.removeEventListener("visibilitychange", this.updateLoop);
         this.stopSpeech();
         this.audio.removeEventListener("ended", this.endSpeech);
         this.timer.dispose();
@@ -252,6 +263,12 @@ export class AvatarEngine {
         this.clock = null;
         this.onSpeechEnd = null;
         cb?.();
+    };
+
+    /** Render loop only runs while the tab is visible and the canvas is on screen. */
+    private updateLoop = () => {
+        const run = this.onScreen && !document.hidden;
+        this.renderer.setAnimationLoop(run ? this.tick : null);
     };
 
     private updateBloom() {
@@ -320,8 +337,13 @@ export class AvatarEngine {
         this.pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -(((e.clientY - r.top) / r.height) * 2 - 1));
     };
 
-    private tick = () => {
-        this.timer.update();
+    private tick = (now: number) => {
+        const target = this.quality === "high" || this.state === "speaking" || this.clock ? 60 : 30;
+        this.stats.targetFps = target;
+        // rAF runs at display rate; skip frames to hit the target (small slack for vsync jitter).
+        if (target < 60 && now - this.lastFrame < 1000 / target - 4) return;
+        this.lastFrame = now;
+        this.timer.update(now);
         const dt = Math.min(this.timer.getDelta(), 0.1);
         const t = this.timer.getElapsed();
         this.renderer.info.reset();
