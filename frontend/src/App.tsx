@@ -1,623 +1,1128 @@
-import { useState, useEffect, useRef } from "react";
 import {
-  Mic, Send, Settings, Camera, Image as ImageIcon,
-  Loader2, X, Activity, Cpu, Database, Eye, Radio, AlertTriangle
+  Activity,
+  ArrowDown,
+  FileText,
+  Image as ImageIcon,
+  Mic,
+  PanelLeftOpen,
+  Send,
+  Wifi,
+  WifiOff,
+  X,
 } from "lucide-react";
-import "./App.css";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
+import "./App.css";
 
+const ASSISTANT_NAME = "Aura";
+const VOICE_LABEL = "晓伊";
 const API_BASE = "http://127.0.0.1:8000";
 
-interface Message {
-  role: "system" | "user" | "assistant";
+type DialogueMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
   content: string;
+  createdAt: number;
+  turnId?: string;
   image?: string;
-  id?: number;
-}
-
-// ── Real-time log entry from backend SSE ──────────────────────────────
-interface LogEntry {
-  ts: number;          // ms epoch
-  level: string;       // "info" | "warn" | "tool" | "llm" | "flow" | "error"
-  category: string;    // "LLM" | "TOOL" | "FLOW" | "ERROR" | ...
-  message: string;
-  data: Record<string, unknown>;
-}
-
-// ── Color map per level ───────────────────────────────────────────────
-const LEVEL_COLOR: Record<string, string> = {
-  flow: "#00e5ff",    // cyan
-  llm: "#00ff88",    // green
-  tool: "#ffab00",    // amber
-  warn: "#ff9800",    // orange
-  error: "#ff3d5a",    // red
-  info: "#90a4ae",    // grey
+  interrupted?: boolean;
 };
 
-// ── Live system metrics (fake, just for the hardware display) ────────
-function useLiveMetrics() {
-  const [cpu, setCpu] = useState(34);
-  const [mem, setMem] = useState(61);
-  const [net, setNet] = useState(12);
-  useEffect(() => {
-    const t = setInterval(() => {
-      setCpu(c => Math.min(95, Math.max(15, c + (Math.random() - 0.5) * 10)));
-      setMem(m => Math.min(85, Math.max(50, m + (Math.random() - 0.5) * 4)));
-      setNet(n => Math.min(99, Math.max(2, n + (Math.random() - 0.5) * 20)));
-    }, 1800);
-    return () => clearInterval(t);
-  }, []);
-  return { cpu: Math.round(cpu), mem: Math.round(mem), net: Math.round(net) };
-}
+type Report = {
+  report_id: string;
+  title: string;
+  query: string;
+  markdown: string;
+  created_at: number;
+  complete?: boolean;
+};
 
-// ── Mini metric bar ───────────────────────────────────────────────────
-function MetricBar({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <div className="mb-2">
-      <div className="flex justify-between text-[9px] font-mono mb-1" style={{ color }}>
-        <span>{label}</span><span>{value}%</span>
-      </div>
-      <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${value}%`, background: color, boxShadow: `0 0 6px ${color}` }}
-        />
-      </div>
+type LogEntry = {
+  ts: number;
+  level: string;
+  category: string;
+  message: string;
+};
+
+type SpeechSentence = {
+  turn_id: string;
+  id: string;
+  text: string;
+};
+
+type SpeechFetch = {
+  controller: AbortController;
+  promise: Promise<Speech>;
+};
+
+type ChatEvent =
+  | { type: "turn"; turn_id: string }
+  | { type: "status"; state: string; label?: string }
+  | { type: "tool"; name: string; status: string }
+  | ({ type: "speech.sentence" } & SpeechSentence)
+  | { type: "report.open"; report_id: string; title: string; query: string }
+  | { type: "report.delta"; report_id: string; markdown: string }
+  | { type: "report.done"; report_id: string }
+  | { type: "report.highlight"; report_id: string; anchor: string }
+  | { type: "done"; turn_id: string; spoken_text: string }
+  | { type: "error"; message: string };
+
+type BackendState = "idle" | "thinking" | "working";
+
+const markdownComponents: Components = {
+  a: ({ children, href }) => (
+    <a className="report-link" href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+  code: ({ children, className }) =>
+    className ? (
+      <code className={className}>{children}</code>
+    ) : (
+      <code className="inline-code">{children}</code>
+    ),
+  pre: ({ children }) => <pre className="md-code">{children}</pre>,
+  table: ({ children }) => (
+    <div className="table-wrap">
+      <table className="md-table">{children}</table>
     </div>
-  );
+  ),
+};
+
+function makeId(prefix: string) {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// ── Waveform ──────────────────────────────────────────────────────────
-function Waveform({ active }: { active: boolean }) {
-  const bars = [7, 12, 8];
-  return (
-    <div className="flex items-center gap-[2px] h-6 flex-none" style={{ width: '16px' }}>
-      {bars.map((h, i) => (
-        <div
-          key={i}
-          className="waveform-bar"
-          style={{
-            height: active ? `${h * 2}px` : '3px',
-            animationDelay: `${i * 0.06}s`,
-            animationDuration: active ? `${0.5 + (i % 5) * 0.12}s` : '0s',
-            opacity: active ? 1 : 0.2,
-            transition: 'height 0.3s ease',
-          }}
-        />
-      ))}
-    </div>
-  );
+function timeLabel(timestamp?: number) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
-// ── Format timestamp as HH:MM:SS.mmm ─────────────────────────────────
-function fmtTs(ms: number): string {
-  const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
 }
 
-// ── Single log row ────────────────────────────────────────────────────
-function LogRow({ entry }: { entry: LogEntry }) {
-  const color = LEVEL_COLOR[entry.level] ?? "#90a4ae";
-  return (
-    <div className="flex gap-1.5 py-[3px] border-b border-white/[0.04] items-start group hover:bg-white/[0.02] transition-colors">
-      <span className="flex-none text-[8px] font-mono text-white/20 pt-px">{fmtTs(entry.ts)}</span>
-      <span className="flex-none text-[8px] font-mono font-bold px-1 rounded"
-        style={{ color, textShadow: `0 0 6px ${color}40` }}>
-        {entry.category}
-      </span>
-      <span className="text-[9px] font-mono leading-relaxed break-words min-w-0"
-        style={{ color: entry.level === 'error' ? '#ff3d5a' : 'rgba(176,224,240,0.75)' }}>
-        {entry.message}
-      </span>
-    </div>
-  );
+function decodeAudio(audio: string, mime: string, visemes: Speech["visemes"]): Speech {
+  const bytes = Uint8Array.from(atob(audio), (character) => character.charCodeAt(0));
+  return {
+    audioUrl: URL.createObjectURL(new Blob([bytes], { type: mime })),
+    visemes,
+  };
 }
 
-// ═════════════════════════════════════════════════════════════════════
 export function App() {
-  const [query, setQuery] = useState("");
-  const [isListening, setIsListening] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isAvatarLoaded, setIsAvatarLoaded] = useState(false);
-  const [speech, setSpeech] = useState<Speech | null>(null);
-  const [currentTime, setCurrentTime] = useState("");
-  const [currentDate, setCurrentDate] = useState("");
-  // Session id doubles as the LangGraph thread_id; persisted so conversation memory survives reloads
   const [sessionId] = useState(() => {
     const saved = localStorage.getItem("mercy.threadId");
     if (saved) return saved;
-    const id = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const id = makeId("mp");
     localStorage.setItem("mercy.threadId", id);
     return id;
   });
-  const [msgCount, setMsgCount] = useState(0);
-  const [messages, setMessages] = useState<Message[]>([
-    { role: "system", content: "MERCY PROTOCOL v2.0 — AI JUDICIAL INTERFACE ONLINE. AWAITING SUBJECT INPUT." }
-  ]);
+  const [query, setQuery] = useState("");
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [hasQueuedSpeech, setHasQueuedSpeech] = useState(false);
+  const [speech, setSpeech] = useState<Speech | null>(null);
+  const [subtitle, setSubtitle] = useState("");
+  const [backendState, setBackendState] = useState<BackendState>("idle");
+  const [workingLabel, setWorkingLabel] = useState("");
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [leftExpanded, setLeftExpanded] = useState(false);
+  const [clock, setClock] = useState("");
+  const [reports, setReports] = useState<Report[]>([]);
+  const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [hasUnreadReports, setHasUnreadReports] = useState(false);
+  const [isReportLong, setIsReportLong] = useState(false);
+  const [isAvatarLoaded, setIsAvatarLoaded] = useState(false);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { cpu, mem, net } = useLiveMetrics();
+  const reportListRef = useRef<HTMLDivElement>(null);
+  const dialogueListRef = useRef<HTMLDivElement>(null);
+  const logFeedRef = useRef<HTMLDivElement>(null);
+  const subtitleTextRef = useRef<HTMLDivElement>(null);
+  const reportAtBottomRef = useRef(true);
+  const shouldFollowReportRef = useRef(false);
+  const viewingReportIdRef = useRef<string | null>(null);
+  const requestControllerRef = useRef<AbortController | null>(null);
+  const activeTurnIdRef = useRef<string | null>(null);
+  const pendingInterruptedRef = useRef<{ turn_id: string; spoken_sentence_ids: string[] } | null>(null);
+  const sentenceTextRef = useRef(new Map<string, string>());
+  const spokenSentenceIdsRef = useRef(new Map<string, string[]>());
+  const speechQueueRef = useRef<SpeechSentence[]>([]);
+  const speechCacheRef = useRef(new Map<string, Speech>());
+  const speechFetchesRef = useRef(new Map<string, SpeechFetch>());
+  const speechFailuresRef = useRef(new Set<string>());
+  const currentPlaybackRef = useRef<{ sentence: SpeechSentence; audio: Speech } | null>(null);
+  const isPumpingRef = useRef(false);
+  const audioEpochRef = useRef(0);
+  const highlightTimersRef = useRef(new Map<string, number>());
 
-  // Clock
-  useEffect(() => {
-    const tick = () => {
-      const now = new Date();
-      setCurrentTime(now.toLocaleTimeString('en-US', { hour12: false }));
-      setCurrentDate(now.toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' }));
-    };
-    tick();
-    const t = setInterval(tick, 1000);
-    return () => clearInterval(t);
+  const addSystemNotice = useCallback((content: string) => {
+    setMessages((previous) => [
+      ...previous,
+      { id: makeId("notice"), role: "system", content, createdAt: Date.now() },
+    ]);
   }, []);
 
-  // SSE — real-time backend log stream
+  const getSpeechAudio = useCallback((sentenceId: string) => {
+    const cached = speechCacheRef.current.get(sentenceId);
+    if (cached) return Promise.resolve(cached);
+
+    const activeFetch = speechFetchesRef.current.get(sentenceId);
+    if (activeFetch) return activeFetch.promise;
+
+    const controller = new AbortController();
+    const promise = fetch(`${API_BASE}/api/speech/${encodeURIComponent(sentenceId)}`, {
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Speech request failed: ${response.status}`);
+        const payload = (await response.json()) as {
+          audio: string;
+          mime: string;
+          visemes: Speech["visemes"];
+        };
+        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        const audio = decodeAudio(payload.audio, payload.mime, payload.visemes);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(audio.audioUrl);
+          throw new DOMException("Aborted", "AbortError");
+        }
+        speechCacheRef.current.set(sentenceId, audio);
+        return audio;
+      })
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) speechFailuresRef.current.add(sentenceId);
+        throw error;
+      })
+      .finally(() => {
+        if (speechFetchesRef.current.get(sentenceId)?.controller === controller) {
+          speechFetchesRef.current.delete(sentenceId);
+        }
+      });
+
+    speechFetchesRef.current.set(sentenceId, { controller, promise });
+    return promise;
+  }, []);
+
+  const prefetchNextSentence = useCallback(() => {
+    const next = speechQueueRef.current[0];
+    if (!next || speechFailuresRef.current.has(next.id)) return;
+    void getSpeechAudio(next.id).catch(() => undefined);
+  }, [getSpeechAudio]);
+
+  const pumpSpeechQueue = useCallback(async () => {
+    if (isPumpingRef.current || currentPlaybackRef.current) return;
+    const sentence = speechQueueRef.current.shift();
+    if (!sentence) {
+      setHasQueuedSpeech(false);
+      if (!requestControllerRef.current) activeTurnIdRef.current = null;
+      return;
+    }
+
+    const epoch = audioEpochRef.current;
+    isPumpingRef.current = true;
+    try {
+      if (speechFailuresRef.current.has(sentence.id)) {
+        setSubtitle(sentence.text);
+      } else {
+        const audio = await getSpeechAudio(sentence.id);
+        if (epoch !== audioEpochRef.current) return;
+        speechCacheRef.current.delete(sentence.id);
+        const spoken = spokenSentenceIdsRef.current.get(sentence.turn_id) ?? [];
+        if (!spoken.includes(sentence.id)) {
+          spoken.push(sentence.id);
+          spokenSentenceIdsRef.current.set(sentence.turn_id, spoken);
+        }
+        currentPlaybackRef.current = { sentence, audio };
+        setSubtitle(sentence.text);
+        setIsAudioPlaying(true);
+        setHasQueuedSpeech(true);
+        setSpeech(audio);
+      }
+    } catch (error) {
+      if (!isAbortError(error)) setSubtitle(sentence.text);
+    } finally {
+      if (epoch === audioEpochRef.current) isPumpingRef.current = false;
+    }
+
+    if (epoch !== audioEpochRef.current) return;
+    if (currentPlaybackRef.current) {
+      prefetchNextSentence();
+      return;
+    }
+    if (speechQueueRef.current.length > 0) {
+      setHasQueuedSpeech(true);
+      requestAnimationFrame(() => void pumpSpeechQueue());
+    } else {
+      setHasQueuedSpeech(false);
+      if (!requestControllerRef.current) activeTurnIdRef.current = null;
+    }
+  }, [getSpeechAudio, prefetchNextSentence]);
+
+  const enqueueSentence = useCallback(
+    (sentence: SpeechSentence) => {
+      sentenceTextRef.current.set(sentence.id, sentence.text);
+      speechQueueRef.current.push(sentence);
+      setHasQueuedSpeech(true);
+      if (currentPlaybackRef.current) prefetchNextSentence();
+      else void pumpSpeechQueue();
+    },
+    [prefetchNextSentence, pumpSpeechQueue],
+  );
+
+  const handleAudioEnd = useCallback(() => {
+    const playback = currentPlaybackRef.current;
+    if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+    currentPlaybackRef.current = null;
+    setSpeech(null);
+    setIsAudioPlaying(false);
+    if (speechQueueRef.current.length > 0) {
+      setHasQueuedSpeech(true);
+      requestAnimationFrame(() => void pumpSpeechQueue());
+    } else {
+      setHasQueuedSpeech(false);
+      if (!requestControllerRef.current) activeTurnIdRef.current = null;
+    }
+  }, [pumpSpeechQueue]);
+
+  const interruptActiveTurn = useCallback(() => {
+    const turnId = activeTurnIdRef.current;
+    const hasActiveWork =
+      Boolean(turnId) ||
+      Boolean(requestControllerRef.current) ||
+      Boolean(currentPlaybackRef.current) ||
+      speechQueueRef.current.length > 0 ||
+      isPumpingRef.current;
+    if (!hasActiveWork) return;
+
+    if (turnId) {
+      const spokenIds = [...(spokenSentenceIdsRef.current.get(turnId) ?? [])];
+      pendingInterruptedRef.current = { turn_id: turnId, spoken_sentence_ids: spokenIds };
+      const spokenText = spokenIds.map((id) => sentenceTextRef.current.get(id) ?? "").join("");
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.turnId === turnId
+            ? { ...message, content: spokenText, interrupted: true }
+            : message,
+        ),
+      );
+    }
+
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = null;
+    for (const request of speechFetchesRef.current.values()) request.controller.abort();
+    speechFetchesRef.current.clear();
+    for (const audio of speechCacheRef.current.values()) URL.revokeObjectURL(audio.audioUrl);
+    speechCacheRef.current.clear();
+    speechFailuresRef.current.clear();
+    speechQueueRef.current = [];
+    const playback = currentPlaybackRef.current;
+    if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+    currentPlaybackRef.current = null;
+    audioEpochRef.current += 1;
+    isPumpingRef.current = false;
+    activeTurnIdRef.current = null;
+    setSpeech(null);
+    setIsAudioPlaying(false);
+    setHasQueuedSpeech(false);
+    setIsLoading(false);
+    setBackendState("idle");
+  }, []);
+
   useEffect(() => {
-    const es = new EventSource(`${API_BASE}/api/logs`);
-    es.onmessage = (e) => {
+    const updateClock = () =>
+      setClock(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }));
+    updateClock();
+    const timer = window.setInterval(updateClock, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const eventSource = new EventSource(`${API_BASE}/api/logs`);
+    eventSource.onopen = () => setBackendConnected(true);
+    eventSource.onerror = () => setBackendConnected(false);
+    eventSource.onmessage = (event) => {
       try {
-        const entry: LogEntry = JSON.parse(e.data);
-        setLogs(prev => {
-          const next = [...prev, entry];
-          return next.length > 300 ? next.slice(-300) : next; // cap at 300 entries
-        });
-      } catch { }
+        const entry = JSON.parse(event.data) as LogEntry;
+        setLogs((previous) => [...previous, entry].slice(-300));
+      } catch {
+        // Ignore malformed log entries and keep the live connection.
+      }
     };
-    es.onerror = () => { };
-    return () => es.close();
+    return () => eventSource.close();
   }, []);
 
-  // Auto-scroll logs
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const controller = new AbortController();
+    fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Session request failed: ${response.status}`);
+        return (await response.json()) as {
+          reports?: Report[];
+          utterances?: Array<{
+            id: number;
+            turn_id: string;
+            role: "user" | "assistant";
+            text: string;
+            interrupted?: boolean;
+            created_at: number;
+          }>;
+        };
+      })
+      .then((session) => {
+        const restoredReports = session.reports ?? [];
+        const restoredMessages = (session.utterances ?? []).map((utterance) => ({
+          id: `utterance_${utterance.id}`,
+          turnId: utterance.turn_id,
+          role: utterance.role,
+          content: utterance.text,
+          interrupted: utterance.interrupted,
+          createdAt: utterance.created_at,
+        }));
+        setReports((previous) => (previous.length ? previous : restoredReports));
+        setMessages((previous) => (previous.length ? previous : restoredMessages));
+        shouldFollowReportRef.current = true;
+      })
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) addSystemNotice("无法恢复本地会话记录。");
+      });
+    return () => controller.abort();
+  }, [addSystemNotice, sessionId]);
+
+  useEffect(() => {
+    const feed = logFeedRef.current;
+    if (feed) feed.scrollTop = feed.scrollHeight;
   }, [logs]);
 
-  // Auto-scroll chat
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, selectedImage]);
+  useLayoutEffect(() => {
+    const list = reportListRef.current;
+    if (!list) return;
+    if (shouldFollowReportRef.current) {
+      list.scrollTop = list.scrollHeight;
+      reportAtBottomRef.current = true;
+      shouldFollowReportRef.current = false;
+    } else if (shouldFollowReportRef.current || reportAtBottomRef.current) {
+      list.scrollTop = list.scrollHeight;
+      reportAtBottomRef.current = true;
+    }
+    if (shouldFollowReportRef.current) shouldFollowReportRef.current = false;
+  }, [reports]);
 
-  // ASR
+  useEffect(() => {
+    const list = reportListRef.current;
+    const content = list?.querySelector(".report-inner");
+    if (!list) return;
+    const measure = () => {
+      const next = reports.length > 0 && list.scrollHeight > list.clientHeight + 8;
+      setIsReportLong((previous) => (previous === next ? previous : next));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(list);
+    if (content) observer.observe(content);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [reports]);
+
+  useEffect(() => {
+    const list = reportListRef.current;
+    if (!list) return;
+    const cards = Array.from(list.querySelectorAll<HTMLElement>(".report-card"));
+    const ratios = new Map<string, number>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const id = (entry.target as HTMLElement).dataset.reportId;
+          if (id) ratios.set(id, entry.isIntersecting ? entry.intersectionRatio : 0);
+        }
+        const visible = [...ratios.entries()].sort((a, b) => b[1] - a[1])[0];
+        if (visible && visible[1] > 0) viewingReportIdRef.current = visible[0];
+      },
+      { root: list, threshold: [0, 0.2, 0.5, 0.8, 1] },
+    );
+    cards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, [reports]);
+
+  useEffect(() => {
+    const panel = dialogueListRef.current;
+    if (panel) panel.scrollTop = panel.scrollHeight;
+  }, [messages]);
+
+  useEffect(() => {
+    const element = subtitleTextRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [subtitle]);
+
   useEffect(() => {
     if (!isListening) return;
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { setIsListening(false); return; }
-    const rec = new SR();
-    rec.lang = "zh-CN";
-    rec.interimResults = false;
-    rec.onresult = (e: any) => {
-      setQuery(prev => prev ? prev + " " + e.results[0][0].transcript : e.results[0][0].transcript);
+    const Recognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!Recognition) {
+      setIsListening(false);
+      return;
+    }
+    const recognition = new Recognition();
+    recognition.lang = "zh-CN";
+    recognition.interimResults = false;
+    recognition.onresult = (event: any) => {
+      const recognized = event.results?.[0]?.[0]?.transcript;
+      if (recognized) setQuery((previous) => (previous ? `${previous} ${recognized}` : recognized));
       setIsListening(false);
     };
-    rec.onerror = () => setIsListening(false);
-    rec.onend = () => setIsListening(false);
-    try { rec.start(); } catch { setIsListening(false); }
-    return () => { try { rec.stop(); } catch { } };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    try {
+      recognition.start();
+    } catch {
+      setIsListening(false);
+    }
+    return () => {
+      try {
+        recognition.stop();
+      } catch {
+        // Recognition may already have stopped.
+      }
+    };
   }, [isListening]);
 
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      if (typeof ev.target?.result === 'string') setSelectedImage(ev.target.result);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  };
+  useEffect(
+    () => () => {
+      requestControllerRef.current?.abort();
+      for (const request of speechFetchesRef.current.values()) request.controller.abort();
+      for (const audio of speechCacheRef.current.values()) URL.revokeObjectURL(audio.audioUrl);
+      const playback = currentPlaybackRef.current;
+      if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+      for (const timer of highlightTimersRef.current.values()) window.clearTimeout(timer);
+    },
+    [],
+  );
 
-  const speak = async (text: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/api/speech`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { audio, mime, visemes } = await res.json();
-      const bytes = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
-      const audioUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
-      setSpeech(prev => { if (prev) URL.revokeObjectURL(prev.audioUrl); return { audioUrl, visemes }; });
-    } catch (e) {
-      console.warn("[TTS] speech failed:", e);
+  const applyReportHighlight = useCallback((reportId: string, anchor: string) => {
+    const list = reportListRef.current;
+    if (!list) return;
+    const card = Array.from(list.querySelectorAll<HTMLElement>(".report-card")).find(
+      (item) => item.dataset.reportId === reportId,
+    );
+    if (!card) return;
+    const target = Array.from(card.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6,p,li,td,pre")).find(
+      (item) => item.textContent?.toLocaleLowerCase().includes(anchor.toLocaleLowerCase()),
+    );
+    if (!target) return;
+    target.classList.add("report-highlight");
+    list.scrollTo({
+      top: list.scrollTop + target.getBoundingClientRect().top - list.getBoundingClientRect().top - 24,
+      behavior: "smooth",
+    });
+    const previousTimer = highlightTimersRef.current.get(reportId);
+    if (previousTimer) window.clearTimeout(previousTimer);
+    const timer = window.setTimeout(() => {
+      target.classList.remove("report-highlight");
+      highlightTimersRef.current.delete(reportId);
+    }, 4500);
+    highlightTimersRef.current.set(reportId, timer);
+  }, []);
+
+  const handleChatEvent = useCallback(
+    (event: ChatEvent) => {
+      switch (event.type) {
+        case "turn":
+          activeTurnIdRef.current = event.turn_id;
+          spokenSentenceIdsRef.current.set(event.turn_id, []);
+          setMessages((previous) => [
+            ...previous,
+            {
+              id: event.turn_id,
+              turnId: event.turn_id,
+              role: "assistant",
+              content: "",
+              createdAt: Date.now(),
+            },
+          ]);
+          break;
+        case "status":
+          if (event.state === "thinking") {
+            setBackendState("thinking");
+            setWorkingLabel("");
+          } else if (event.state === "working") {
+            setBackendState("working");
+            setWorkingLabel(event.label ?? "正在处理");
+          } else if (event.state === "idle") {
+            setBackendState("idle");
+            setWorkingLabel("");
+          }
+          break;
+        case "speech.sentence":
+          setMessages((previous) => {
+            const index = previous.findIndex(
+              (message) => message.role === "assistant" && message.turnId === event.turn_id,
+            );
+            if (index === -1) {
+              return [
+                ...previous,
+                {
+                  id: event.turn_id,
+                  turnId: event.turn_id,
+                  role: "assistant",
+                  content: event.text,
+                  createdAt: Date.now(),
+                },
+              ];
+            }
+            const next = [...previous];
+            next[index] = { ...next[index], content: next[index].content + event.text };
+            return next;
+          });
+          enqueueSentence({ turn_id: event.turn_id, id: event.id, text: event.text });
+          break;
+        case "report.open": {
+          const follow = reportAtBottomRef.current;
+          shouldFollowReportRef.current = follow;
+          if (!follow) setHasUnreadReports(true);
+          setReports((previous) => {
+            if (previous.some((report) => report.report_id === event.report_id)) return previous;
+            return [
+              ...previous,
+              {
+                report_id: event.report_id,
+                title: event.title,
+                query: event.query,
+                markdown: "",
+                created_at: Date.now() / 1000,
+                complete: false,
+              },
+            ];
+          });
+          break;
+        }
+        case "report.delta":
+          setReports((previous) =>
+            previous.map((report) =>
+              report.report_id === event.report_id
+                ? { ...report, markdown: report.markdown + event.markdown }
+                : report,
+            ),
+          );
+          break;
+        case "report.done":
+          setReports((previous) =>
+            previous.map((report) =>
+              report.report_id === event.report_id ? { ...report, complete: true } : report,
+            ),
+          );
+          break;
+        case "report.highlight":
+          applyReportHighlight(event.report_id, event.anchor);
+          break;
+        case "done":
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.role === "assistant" &&
+              message.turnId === event.turn_id &&
+              !message.content &&
+              event.spoken_text
+                ? { ...message, content: event.spoken_text }
+                : message,
+            ),
+          );
+          setBackendState("idle");
+          setWorkingLabel("");
+          break;
+        case "error":
+          addSystemNotice(event.message);
+          setBackendState("idle");
+          setWorkingLabel("");
+          break;
+        case "tool":
+          break;
+      }
+    },
+    [addSystemNotice, applyReportHighlight, enqueueSentence],
+  );
+
+  const handleSend = useCallback(async () => {
+    const message = query.trim();
+    const image = selectedImage;
+    if (!message && !image) return;
+    if (
+      activeTurnIdRef.current ||
+      requestControllerRef.current ||
+      currentPlaybackRef.current ||
+      speechQueueRef.current.length > 0 ||
+      isPumpingRef.current
+    ) {
+      interruptActiveTurn();
     }
-  };
 
-  const handleSend = async () => {
-    if ((!query.trim() && !selectedImage) || isLoading) return;
-    const userMsg = query.trim();
-    const img = selectedImage;
-    setQuery(""); setSelectedImage(null);
-    setMessages(prev => [...prev, { role: "user", content: userMsg, image: img || undefined }]);
-    setMsgCount(c => c + 1);
+    const interrupted = pendingInterruptedRef.current ?? undefined;
+    pendingInterruptedRef.current = null;
+    const text = message || "请帮我看看这张图片。";
+    setQuery("");
+    setSelectedImage(null);
+    setMessages((previous) => [
+      ...previous,
+      {
+        id: makeId("user"),
+        role: "user",
+        content: text,
+        image: image ?? undefined,
+        createdAt: Date.now(),
+      },
+    ]);
+
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
     setIsLoading(true);
-
-    const replyId = Date.now();
-    const updateReply = (fn: (content: string) => string) => {
-      setMessages(prev => {
-        const idx = prev.findIndex(m => m.id === replyId);
-        if (idx === -1) return [...prev, { role: "assistant", content: fn(""), id: replyId }];
-        const next = [...prev];
-        next[idx] = { ...next[idx], content: fn(next[idx].content) };
-        return next;
-      });
-    };
-    const appendToken = (token: string) => updateReply(c => c + token);
-    const setFinalReply = (reply: string) => updateReply(() => reply);
-
+    setBackendState("thinking");
+    setWorkingLabel("");
     try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
+      const response = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
-          message: userMsg || "Please analyze this image.",
-          image_base64: img || undefined,
+          message: text,
+          image_base64: image ?? undefined,
           thread_id: sessionId,
-        })
+          screen_state: { viewing_report_id: viewingReportIdRef.current },
+          interrupted,
+        }),
       });
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-
-      const reader = res.body.getReader();
+      if (!response.ok) throw new Error(`Chat request failed: ${response.status}`);
+      if (!response.body) throw new Error("Chat response did not include a stream.");
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let finalReply = "";
-      for (; ;) {
+      const dispatch = (chunk: string) => {
+        const data = chunk
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (!data || controller.signal.aborted) return;
+        try {
+          handleChatEvent(JSON.parse(data) as ChatEvent);
+        } catch {
+          addSystemNotice("收到无法识别的后端事件。");
+        }
+      };
+
+      while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        let sep;
-        while ((sep = buffer.indexOf("\n\n")) !== -1) {
-          const raw = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          const data = raw.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart()).join("\n");
-          if (!data) continue;
-          const evt = JSON.parse(data);
-          if (evt.type === "token") appendToken(evt.content);
-          else if (evt.type === "done") { finalReply = evt.reply; setFinalReply(evt.reply); }
-          else if (evt.type === "error") setMessages(prev => [...prev, { role: "system", content: "COMM_FAIL >> " + evt.message }]);
+        let separator = buffer.indexOf("\n\n");
+        while (separator !== -1) {
+          dispatch(buffer.slice(0, separator));
+          buffer = buffer.slice(separator + 2);
+          separator = buffer.indexOf("\n\n");
         }
       }
-
-      if (finalReply) {
-        setMsgCount(c => c + 1);
-        speak(finalReply);
-      }
-    } catch {
-      setMessages(prev => [...prev, { role: "system", content: "NET_ERR >> BACKEND UNREACHABLE" }]);
+      buffer += decoder.decode();
+      if (buffer.trim()) dispatch(buffer);
+    } catch (error) {
+      if (!isAbortError(error)) addSystemNotice(error instanceof Error ? error.message : "对话请求失败。");
     } finally {
-      setIsLoading(false);
+      if (requestControllerRef.current === controller) {
+        requestControllerRef.current = null;
+        setIsLoading(false);
+      }
+      if (
+        !requestControllerRef.current &&
+        !currentPlaybackRef.current &&
+        speechQueueRef.current.length === 0 &&
+        !isPumpingRef.current
+      ) {
+        activeTurnIdRef.current = null;
+      }
+    }
+  }, [addSystemNotice, handleChatEvent, interruptActiveTurn, query, selectedImage, sessionId]);
+
+  const handleImageSelect = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") setSelectedImage(reader.result);
+    };
+    reader.readAsDataURL(file);
+    event.target.value = "";
+  };
+
+  const handleComposerChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    const next = event.target.value;
+    if (next && !query && (
+      activeTurnIdRef.current ||
+      requestControllerRef.current ||
+      currentPlaybackRef.current ||
+      speechQueueRef.current.length > 0 ||
+      isPumpingRef.current
+    )) {
+      interruptActiveTurn();
+    }
+    setQuery(next);
+  };
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void handleSend();
     }
   };
 
+  const handleMicToggle = () => {
+    if (!isListening) interruptActiveTurn();
+    setIsListening((previous) => !previous);
+  };
+
+  const handleReportScroll = () => {
+    const list = reportListRef.current;
+    if (!list) return;
+    const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 36;
+    reportAtBottomRef.current = atBottom;
+    if (atBottom) setHasUnreadReports(false);
+  };
+
+  const scrollToLatestReport = () => {
+    const list = reportListRef.current;
+    if (!list) return;
+    list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+    reportAtBottomRef.current = true;
+    setHasUnreadReports(false);
+  };
+
+  const status =
+    isListening || query.trim()
+      ? { state: "listening", label: "倾听中" }
+      : hasQueuedSpeech || isAudioPlaying
+        ? { state: "speaking", label: "说话中" }
+        : backendState === "thinking"
+          ? { state: "thinking", label: "思考中" }
+          : backendState === "working"
+            ? { state: "thinking", label: workingLabel || "正在处理" }
+            : { state: "idle", label: "空闲" };
+  const layout = isReportLong ? "report" : "conversation";
+  const layoutLabel = layout === "report" ? "长报告阅读" : "默认对话";
+
   return (
-    <div className="w-full h-full tactical-grid scanlines vignette overflow-hidden relative flex flex-col"
-      style={{ fontFamily: "'Rajdhani', sans-serif" }}>
-
-      {/* ══════════ TOP COMMAND BAR ══════════ */}
-      <div
-        data-tauri-drag-region
-        className="flex-none h-10 flex items-center justify-between px-5 z-50 cursor-move relative"
-        style={{ background: 'rgba(0,5,15,0.95)', borderBottom: '1px solid rgba(0,229,255,0.15)' }}
-      >
-        <div className="flex items-center gap-3 pointer-events-none">
-          <div className="w-2 h-2 rounded-full bg-[#00e5ff] pulse-cyan" />
-          <span className="text-[10px] font-mono font-bold neon-cyan tracking-[0.25em] flicker">
-            MERCY PROTOCOL // JUDICIAL AI v2.0
-          </span>
-        </div>
-        <div className="flex items-center gap-6 pointer-events-none text-[9px] font-mono">
-          <span className="text-white/30">SESSION</span>
-          <span className="neon-amber tracking-widest">{sessionId}</span>
-          <div className="w-px h-4 bg-white/10" />
-          <span className="text-white/30">CASE</span>
-          <span className="text-white/60 tracking-wider">2026-MERCY-{String(msgCount).padStart(3, '0')}</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right pointer-events-none">
-            <div className="text-[11px] font-mono font-bold neon-cyan">{currentTime}</div>
-            <div className="text-[8px] font-mono text-white/30 tracking-wider">{currentDate}</div>
+    <div id="app" data-layout={layout} data-left-expanded={leftExpanded} data-state={status.state}>
+      <header id="topbar" data-tauri-drag-region>
+        <div className="topbar-left" data-tauri-drag-region>
+          <div className="brand" data-tauri-drag-region>
+            <div className="brand-mark">M</div>
+            <span>Mercy</span>
+            <span className="brand-ver">1a</span>
           </div>
-          <button className="btn-holo p-1.5 rounded text-[10px] pointer-events-auto"><Settings size={12} /></button>
+          <div className="topbar-divider" />
+          <button className="sys-pill" type="button" onClick={() => setLeftExpanded((value) => !value)}>
+            <span className={`dot-live ${backendConnected ? "" : "offline"}`} />
+            <span>后端 {backendConnected ? "在线" : "离线"}</span>
+          </button>
+          <span className="session-pill">#{sessionId.slice(-8).toUpperCase()}</span>
         </div>
-        <div className="top-bar-line absolute bottom-0 left-0 right-0" />
-      </div>
-
-      {/* ══════════ MAIN LAYOUT ══════════ */}
-      <div className="flex-1 flex flex-row overflow-hidden p-3 gap-3 min-h-0">
-
-        {/* ── LEFT SIDEBAR ─────────────────────────────────────── */}
-        <div className="flex-none w-56 flex flex-col gap-3">
-
-          {/* System Metrics */}
-          <div className="holo-panel rounded-lg p-3 corner-cut flex-none">
-            <div className="flex items-center gap-2 mb-3">
-              <Cpu size={10} className="neon-cyan" />
-              <span className="text-[9px] font-mono font-bold neon-cyan tracking-widest">SYS.RESOURCES</span>
-            </div>
-            <MetricBar label="CPU" value={cpu} color="#00e5ff" />
-            <MetricBar label="MEM" value={mem} color="#ffab00" />
-            <MetricBar label="NET" value={net} color="#00ff88" />
+        <div className="topbar-right">
+          <div className="layout-pill">
+            布局：<strong>{layoutLabel}</strong>
           </div>
+          <span className="clock-text">{clock}</span>
+        </div>
+      </header>
 
-          {/* Real-time Backend Log Panel */}
-          <div className="holo-panel rounded-lg flex-1 flex flex-col overflow-hidden corner-cut" style={{ minHeight: 0 }}>
-            <div className="flex-none px-3 pt-3 pb-2 flex items-center gap-2 border-b border-white/5">
-              <Activity size={10} className="neon-amber" />
-              <span className="text-[9px] font-mono font-bold neon-amber tracking-widest">BACKEND.LOG</span>
-              <div className="flex-1" />
-              <span className="text-[7px] font-mono text-white/20">{logs.length} events</span>
-              <div className="w-1.5 h-1.5 rounded-full"
-                style={{
-                  background: logs.length > 0 ? '#00ff88' : '#ff3d5a',
-                  boxShadow: logs.length > 0 ? '0 0 6px #00ff88' : '0 0 6px #ff3d5a'
-                }} />
-            </div>
-            <div className="flex-1 overflow-y-auto mercy-scroll px-2 py-1 min-h-0">
-              {logs.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-white/15 text-[8px] font-mono gap-2">
-                  <Activity size={16} strokeWidth={1} />
-                  <span>Waiting for backend events...</span>
+      <button
+        id="left-drawer-backdrop"
+        aria-label="关闭系统状态抽屉"
+        type="button"
+        onClick={() => setLeftExpanded(false)}
+      />
+
+      <main id="workspace">
+        <aside id="left-rail" aria-label="系统状态与实时事件">
+          <div className="left-full">
+            <section className="rail-section">
+              <div className="rail-head">
+                <span className="rail-title">服务连接</span>
+                <span className={`rail-badge ${backendConnected ? "ok" : "err"}`}>
+                  {backendConnected ? "已连接" : "离线"}
+                </span>
+              </div>
+              <div className="net-row">
+                <span className="net-left">
+                  {backendConnected ? <Wifi size={14} /> : <WifiOff size={14} />}
+                  后端事件流
+                </span>
+                <span className={`service-state ${backendConnected ? "online" : "offline"}`}>
+                  {backendConnected ? "在线" : "离线"}
+                </span>
+              </div>
+              <div className="net-row">
+                <span className="net-left">
+                  <Activity size={14} />
+                  口语合成
+                </span>
+                <span className="service-state">{VOICE_LABEL} · 按需</span>
+              </div>
+            </section>
+
+            <section className="rail-section grow">
+              <div className="rail-head">
+                <span className="rail-title">后端事件流</span>
+                <span className="rail-badge">SSE</span>
+              </div>
+              <div className="log-feed" ref={logFeedRef}>
+                {logs.length === 0 ? (
+                  <div className="log-empty">等待后端事件…</div>
+                ) : (
+                  logs.map((entry, index) => (
+                    <div className="log-item" key={`${entry.ts}-${index}`}>
+                      <span className={`log-dot ${entry.level === "error" ? "err" : entry.level === "warning" ? "accent" : "ok"}`} />
+                      <span className="log-time">{timeLabel(entry.ts)}</span>
+                      <span className="log-content">
+                        <strong>{entry.category}</strong>
+                        <span>{entry.message}</span>
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="rail-section rail-foot">
+              <div className="rail-head">
+                <span className="rail-title">当前会话</span>
+                <span className="rail-badge">{reports.length} 份报告</span>
+              </div>
+              <div className="rail-session-id">{sessionId}</div>
+            </section>
+          </div>
+          <div className="left-slim">
+            <button
+              className="slim-btn"
+              title="展开系统状态与日志"
+              aria-label="展开系统状态与日志"
+              type="button"
+              onClick={() => setLeftExpanded(true)}
+            >
+              <PanelLeftOpen size={18} />
+            </button>
+            <span className={`slim-dot ${backendConnected ? "ok" : "err"}`} />
+            <button
+              className="slim-btn"
+              title="查看报告"
+              aria-label="查看报告"
+              type="button"
+              onClick={() => reportListRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
+            >
+              <FileText size={17} />
+            </button>
+          </div>
+        </aside>
+
+        <section id="center-col">
+          <div id="log-panel" className="surface-card" aria-label="报告文档区">
+            <div id="log-full-view">
+              <div className="panel-header">
+                <div className="panel-title-wrap">
+                  <span className="panel-title">报告文档</span>
+                  <span className="panel-subtitle">结构化资料在这里持续累积</span>
                 </div>
-              ) : (
-                logs.map((entry, i) => <LogRow key={i} entry={entry} />)
-              )}
-              <div ref={logsEndRef} />
-            </div>
-          </div>
+                <span className="report-count-pill">{reports.length} 份报告</span>
+              </div>
 
-          {/* Network Status */}
-          <div className="holo-panel holo-panel-amber rounded-lg p-3 corner-cut flex-none">
-            <div className="flex items-center gap-2 mb-2">
-              <Radio size={10} className="neon-amber" />
-              <span className="text-[9px] font-mono font-bold neon-amber tracking-widest">NETWORK</span>
-            </div>
-            <div className="space-y-1.5">
-              {[
-                { label: 'LANGGRAPH', status: 'LINKED', ok: true },
-                { label: 'CHROMADB', status: 'READY', ok: true },
-                { label: 'TTS API', status: 'STANDBY', ok: true },
-                { label: 'ASR', status: isListening ? 'LISTENING' : 'IDLE', ok: isListening },
-                { label: 'LOG STREAM', status: logs.length > 0 ? 'LIVE' : 'OFFLINE', ok: logs.length > 0 },
-              ].map(item => (
-                <div key={item.label} className="flex justify-between items-center">
-                  <span className="text-[8px] font-mono text-white/40">{item.label}</span>
-                  <span className={`text-[8px] font-mono font-bold ${item.ok ? 'neon-green' : 'text-white/30'}`}>
-                    {item.status}
-                  </span>
+              <div id="report-list" ref={reportListRef} onScroll={handleReportScroll}>
+                <div className="report-inner">
+                  {reports.length === 0 ? (
+                    <div className="report-empty">
+                      <div className="empty-icon">
+                        <FileText size={22} strokeWidth={1.4} />
+                      </div>
+                      <h2>报告会出现在这里</h2>
+                      <p>日常对话会在右侧以口语呈现；需要表格、代码或详细说明时，Aura 会整理成报告。</p>
+                    </div>
+                  ) : (
+                    reports.map((report) => (
+                      <article className="report-card" data-report-id={report.report_id} key={report.report_id}>
+                        <div className="report-meta">
+                          <div className="report-meta-left">
+                            <span className="report-id">#{report.report_id}</span>
+                            <span>{timeLabel(report.created_at)}</span>
+                          </div>
+                          {!report.complete && <span className="report-progress">正在整理</span>}
+                        </div>
+                        {report.query && <div className="report-source-q">来源问题：{report.query}</div>}
+                        {report.title && <h2 className="report-title">{report.title}</h2>}
+                        {report.markdown ? (
+                          <div className="report-markdown">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                              {report.markdown}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          <div className="report-loading">正在整理内容…</div>
+                        )}
+                      </article>
+                    ))
+                  )}
                 </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* ── CENTER: Chat / Evidence Panel ─────────────────────── */}
-        <div className="flex-1 flex flex-col gap-3 min-w-0">
-
-          {/* Visual Evidence Port */}
-          <div className="holo-panel rounded-lg flex-none h-[30%] relative overflow-hidden corner-cut">
-            <div className="scan-bar" style={{ animationDuration: '6s', animationDelay: '2s' }} />
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <div className="flex flex-col items-center gap-3 opacity-35">
-                <Eye size={36} strokeWidth={1} className="neon-cyan" />
-                <span className="text-[9px] font-mono tracking-[0.3em] text-white/40">[ VISUAL EVIDENCE PORT ]</span>
-                <span className="text-[8px] font-mono text-white/20 tracking-wider">READY FOR IMAGE / SCREEN CAPTURE</span>
+                {hasUnreadReports && (
+                  <button className="unread-pill" type="button" onClick={scrollToLatestReport}>
+                    <ArrowDown size={15} />
+                    有新报告到达，点击查看
+                  </button>
+                )}
               </div>
             </div>
-            <div className="absolute top-2 left-3 text-[8px] font-mono text-white/20">REC.00</div>
-            <div className="absolute top-2 right-3 text-[8px] font-mono text-white/20">●REC</div>
-            <div className="absolute bottom-2 left-3 text-[8px] font-mono text-white/20">CHAN.A</div>
-            <div className="absolute bottom-2 right-3 text-[8px] font-mono text-white/20">4K.HDR</div>
           </div>
 
-          {/* ── Chat Transcript — more spacious ── */}
-          <div className="holo-panel rounded-lg flex-1 overflow-y-auto mercy-scroll flex flex-col gap-4 corner-cut"
-            style={{ minHeight: 0, padding: '16px 20px' }}>
-            <div className="flex items-center gap-2 mb-1 flex-none">
-              <Database size={10} className="neon-cyan" />
-              <span className="text-[9px] font-mono font-bold neon-cyan tracking-widest">INTERROGATION.LOG</span>
-              <div className="flex-1 h-px bg-white/10 mx-2" />
-              <span className="text-[8px] font-mono text-white/30">{msgCount} ENTRIES</span>
-            </div>
-
-            {messages.map((msg, idx) => (
-              <div key={idx} className={`flex flex-col gap-1.5 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                <div className="text-[9px] font-mono text-white/30 px-1">
-                  {msg.role === 'user' ? '◎ SUBJECT' : msg.role === 'assistant' ? '◈ JUDICIAL.AI' : '⚠ SYS'}
-                  <span className="ml-2 text-white/15">{new Date().toLocaleTimeString('en-US', { hour12: false })}</span>
-                </div>
-                <div className={`max-w-[88%] rounded-md corner-cut leading-relaxed
-                  ${msg.role === 'user' ? 'msg-user' : msg.role === 'system' ? 'msg-system' : 'msg-assistant'}`}
-                  style={{ padding: '10px 14px', fontSize: '12px', fontFamily: "'Share Tech Mono', monospace" }}>
-                  {msg.role === 'system' && (
-                    <span className="neon-amber mr-2 text-[9px] font-bold">⚠ SYS:</span>
-                  )}
-                  {msg.role === 'assistant' && (
-                    <span className="neon-cyan mr-2 text-[9px] font-bold">◈ AI:</span>
-                  )}
-                  {msg.content}
-                  {msg.image && (
-                    <img src={msg.image} alt="evidence" className="mt-3 rounded max-h-40 object-contain border border-white/10" />
-                  )}
-                </div>
-              </div>
-            ))}
-
-            {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
-              <div className="flex items-start gap-2">
-                <div className="msg-assistant rounded-md corner-cut flex items-center gap-2"
-                  style={{ padding: '10px 14px', fontSize: '12px', fontFamily: "'Share Tech Mono', monospace" }}>
-                  <Loader2 size={12} className="animate-spin neon-cyan" />
-                  <span className="neon-cyan/60">PROCESSING EVIDENCE...</span>
-                </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Image Preview */}
           {selectedImage && (
-            <div className="relative inline-flex items-start self-end holo-panel rounded p-2 corner-cut flex-none">
-              <button onClick={() => setSelectedImage(null)} className="absolute -top-2 -right-2 btn-holo rounded-full p-0.5 z-10">
-                <X size={10} />
+            <div className="image-preview-chip">
+              <img src={selectedImage} alt="待发送图片预览" />
+              <span>图片已添加</span>
+              <button type="button" aria-label="移除图片" onClick={() => setSelectedImage(null)}>
+                <X size={14} />
               </button>
-              <img src={selectedImage} alt="Evidence" className="h-16 rounded object-contain" />
-              <span className="text-[7px] font-mono text-white/30 absolute bottom-0 left-0 right-0 text-center pb-0.5">EVIDENCE.QUEUED</span>
             </div>
           )}
 
-          {/* ── Input Area — more spacious ── */}
-          <div className={`flex-none holo-panel rounded-lg corner-cut flex items-end gap-2 ${isListening ? 'border-[#ff3d5a]/50' : ''}`}
-            style={{ padding: '10px 12px', transition: 'border-color 0.3s ease' }}>
-
-            <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImageSelect} className="hidden" />
-
-            <div className="flex items-center gap-1.5 flex-none pb-0.5">
-              <button className="btn-holo p-2 rounded" title="Camera" onClick={() => { }}>
-                <Camera size={14} />
-              </button>
-              <button className="btn-holo p-2 rounded" title="Upload" onClick={() => fileInputRef.current?.click()}>
-                <ImageIcon size={14} />
-              </button>
-              <div className="w-px h-6 bg-white/10" />
-              <button onClick={() => setIsListening(!isListening)}
-                className={`p-2 rounded transition-all duration-300 ${isListening ? 'btn-mic-active btn-holo' : 'btn-holo'}`}>
-                <Mic size={14} className={isListening ? "animate-pulse" : ""} />
-              </button>
-              <Waveform active={isListening} />
-            </div>
-
+          <div id="input-bar">
+            <input
+              type="file"
+              accept="image/*"
+              ref={fileInputRef}
+              onChange={handleImageSelect}
+              hidden
+            />
+            <button
+              className="composer-icon-btn"
+              type="button"
+              aria-label="上传图片"
+              title="上传图片"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <ImageIcon size={19} />
+            </button>
             <textarea
+              id="chat-input"
               value={query}
-              onChange={e => setQuery(e.target.value)}
-              disabled={isLoading}
               rows={1}
-              placeholder={
-                isListening ? "LISTENING..."
-                  : isLoading ? "DELIBERATING..."
-                    : selectedImage ? "ANNOTATE..."
-                      : "ENTER STATEMENT..."
-              }
-              className="flex-1 mercy-input tracking-wide px-3 py-2 resize-none min-h-[36px] max-h-[120px]"
-              style={{ fontSize: '13px', lineHeight: '1.5', overflowY: 'auto' }}
-              onInput={e => {
-                const t = e.currentTarget;
-                t.style.height = 'auto';
-                t.style.height = Math.min(t.scrollHeight, 120) + 'px';
-              }}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+              placeholder={isListening ? "正在倾听…" : `和 ${ASSISTANT_NAME} 说点什么…`}
+              onChange={handleComposerChange}
+              onKeyDown={handleComposerKeyDown}
+              onInput={(event) => {
+                const element = event.currentTarget;
+                element.style.height = "auto";
+                element.style.height = `${Math.min(element.scrollHeight, 120)}px`;
               }}
             />
-
             <button
-              onClick={handleSend}
-              disabled={isLoading || (!query.trim() && !selectedImage)}
-              className="btn-send px-3 py-2 rounded flex items-center gap-1.5 font-mono font-bold tracking-wider flex-none"
-              style={{ fontSize: '10px' }}>
-              <Send size={13} />
-              <span>SUBMIT</span>
+              className={`composer-icon-btn mic-btn ${isListening ? "active" : ""}`}
+              type="button"
+              aria-label={isListening ? "停止语音输入" : "语音输入"}
+              title={isListening ? "停止语音输入" : "语音输入"}
+              onClick={handleMicToggle}
+            >
+              <Mic size={19} />
+            </button>
+            <button
+              id="send-btn"
+              type="button"
+              disabled={!query.trim() && !selectedImage}
+              onClick={() => void handleSend()}
+            >
+              <span>{isLoading ? "发送" : "发送"}</span>
+              <Send size={15} />
             </button>
           </div>
-        </div>
+        </section>
 
-        {/* ── RIGHT: AI Avatar Terminal ─────────────────────────── */}
-        <div className="flex-none w-[36%] flex flex-col gap-3">
-
-          {/* Header row */}
-          <div className="holo-panel rounded-lg p-2.5 flex items-center justify-between corner-cut flex-none">
-            <div className="flex items-center gap-2">
-              <AlertTriangle size={10} className="neon-red" />
-              <span className="text-[9px] font-mono font-bold neon-red tracking-widest">JUDICIAL.AI // ACTIVE</span>
+        <aside id="right-col" aria-label={`${ASSISTANT_NAME} 角色与口语对话`}>
+          <div id="avatar-card" data-state={status.state} data-avatar-loaded={isAvatarLoaded}>
+            <div className="avatar-scene">
+              <VRMAvatar
+                onLoaded={() => setIsAvatarLoaded(true)}
+                speech={speech}
+                onAudioEnd={handleAudioEnd}
+              />
             </div>
-            <div className="flex gap-2 items-center">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#00ff88] pulse-cyan" />
-              <span className="text-[8px] font-mono text-white/30">ONLINE</span>
+            <div className="avatar-vignette" />
+            <div className="avatar-top-bar">
+              <div className="avatar-name-pill">
+                <span>{ASSISTANT_NAME}</span>
+                <span className="avatar-voice-tag">· {VOICE_LABEL}</span>
+              </div>
+              <div className="status-pill">
+                <span className="status-dot" />
+                <span>{status.label}</span>
+              </div>
+            </div>
+            {!isAvatarLoaded && <span className="avatar-loading">角色加载中</span>}
+            <div id="subtitle-bar" aria-live="polite">
+              <div className="subtitle-top">
+                <span>实时字幕</span>
+                <span className={`voice-bars ${hasQueuedSpeech ? "active" : ""}`} aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              </div>
+              <div id="subtitle-text" ref={subtitleTextRef}>
+                {subtitle || "等待她的第一句话…"}
+              </div>
             </div>
           </div>
 
-          {/* VRM Avatar Frame */}
-          <div className="avatar-frame rounded-lg flex-1 relative overflow-hidden" style={{ minHeight: 0 }}>
-            <div className="corner-tl" /><div className="corner-tr" />
-            <div className="corner-bl" /><div className="corner-br" />
-            <div className="scan-bar" style={{ animationDuration: '5s', opacity: 0.4 }} />
-            <div className="absolute inset-0 bg-gradient-to-b from-[#000a1e] via-[#000510] to-[#000a1e] pointer-events-none" />
-            <div className="absolute inset-0 pointer-events-none"
-              style={{ background: 'radial-gradient(ellipse at 50% 80%, rgba(0,229,255,0.06) 0%, transparent 70%)' }} />
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 w-8 h-8 pointer-events-none z-20 opacity-20">
-              <div className="absolute top-0 left-1/2 w-px h-3 bg-[#00e5ff]" style={{ transform: 'translateX(-50%)' }} />
-              <div className="absolute bottom-0 left-1/2 w-px h-3 bg-[#00e5ff]" style={{ transform: 'translateX(-50%)' }} />
-              <div className="absolute left-0 top-1/2 h-px w-3 bg-[#00e5ff]" style={{ transform: 'translateY(-50%)' }} />
-              <div className="absolute right-0 top-1/2 h-px w-3 bg-[#00e5ff]" style={{ transform: 'translateY(-50%)' }} />
-              <div className="absolute inset-2 rounded-full border border-[#00e5ff]/40" />
-            </div>
-            {!isAvatarLoaded && (
-              <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-4">
-                <div className="w-12 h-12 rounded-full border border-[#00e5ff]/30 flex items-center justify-center">
-                  <div className="w-8 h-8 rounded-full border-t border-[#00e5ff] animate-spin" />
-                </div>
-                <span className="text-[9px] font-mono neon-cyan tracking-[0.3em]">LOADING NEURAL AVATAR...</span>
+          <div id="dialogue-panel" className="surface-card">
+            <div className="panel-header">
+              <div className="panel-title-wrap">
+                <span className="panel-title">口语对话</span>
+                <span className="panel-subtitle">字幕与对话记录</span>
               </div>
-            )}
-            <VRMAvatar
-              onLoaded={() => setIsAvatarLoaded(true)}
-              speech={speech}
-              onAudioEnd={() => setSpeech(prev => { if (prev) URL.revokeObjectURL(prev.audioUrl); return null; })}
-            />
-            <div className="absolute bottom-0 left-0 right-0 p-3 z-10 pointer-events-none"
-              style={{ background: 'linear-gradient(to top, rgba(0,5,15,0.9), transparent)' }}>
-              <div className="flex justify-between items-end">
-                <div>
-                  <div className="text-[8px] font-mono text-white/25 tracking-wider">SUBJECT.ID</div>
-                  <div className="text-[10px] font-mono neon-cyan">JUDICIAL.AI // MX-7</div>
-                </div>
-                <Waveform active={isLoading || isListening} />
-                <div className="text-right">
-                  <div className="text-[8px] font-mono text-white/25 tracking-wider">VERDICT</div>
-                  <div className={`text-[10px] font-mono font-bold ${isLoading ? 'neon-amber' : 'neon-green'}`}>
-                    {isLoading ? 'DELIBERATING' : 'AWAITING'}
+              <span className="dialogue-live"><span />实时</span>
+            </div>
+            <div id="dialogue-list" ref={dialogueListRef}>
+              {messages.length === 0 ? (
+                <div className="dialogue-empty">对话内容会显示在这里。</div>
+              ) : (
+                messages.map((message) => (
+                  <div
+                    className={`dialogue-message ${message.role} ${message.interrupted ? "interrupted" : ""}`}
+                    key={message.id}
+                  >
+                    <div className="dialogue-meta">
+                      <span>
+                        {message.role === "user"
+                          ? "你"
+                          : message.role === "assistant"
+                            ? ASSISTANT_NAME
+                            : "系统"}
+                      </span>
+                      <time>{timeLabel(message.createdAt)}</time>
+                      {message.interrupted && <span className="interrupted-tag">已打断</span>}
+                    </div>
+                    {(message.content || message.image) && (
+                      <div className="dialogue-bubble">
+                        {message.content && <p>{message.content}</p>}
+                        {message.image && <img className="dialogue-image" src={message.image} alt="用户上传图片" />}
+                      </div>
+                    )}
+                    {message.role === "assistant" && !message.content && isLoading && (
+                      <div className="dialogue-bubble thinking-bubble">正在思考…</div>
+                    )}
                   </div>
-                </div>
-              </div>
+                ))
+              )}
             </div>
           </div>
-
-          {/* Stats panel */}
-          <div className="holo-panel holo-panel-amber rounded-lg p-3 flex-none corner-cut">
-            <div className="grid grid-cols-3 gap-3 text-center">
-              <div>
-                <div className="text-[9px] font-mono text-white/25 tracking-wider">QUERIES</div>
-                <div className="text-[18px] font-bold neon-cyan font-mono">{msgCount}</div>
-              </div>
-              <div>
-                <div className="text-[9px] font-mono text-white/25 tracking-wider">STATUS</div>
-                <div className={`text-[11px] font-bold font-mono ${isAvatarLoaded ? 'neon-green' : 'neon-amber'}`}>
-                  {isAvatarLoaded ? 'ACTIVE' : 'INIT'}
-                </div>
-              </div>
-              <div>
-                <div className="text-[9px] font-mono text-white/25 tracking-wider">THREAT</div>
-                <div className="text-[11px] font-bold font-mono neon-green">LOW</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ══════════ BOTTOM STATUS BAR ══════════ */}
-      <div className="flex-none h-7 flex items-center justify-between px-5 text-[8px] font-mono"
-        style={{ background: 'rgba(0,5,15,0.95)', borderTop: '1px solid rgba(0,229,255,0.1)' }}>
-        <div className="flex items-center gap-4 text-white/25">
-          <span>MERCY.OS // BUILD 2026.02</span>
-          <span>THREE.JS // VRM 1.0</span>
-          <span>LANGGRAPH v0.3 // CHROMADB</span>
-        </div>
-        <div className="flex items-center gap-3 text-white/25">
-          <span className="neon-green">● ALL SYSTEMS NOMINAL</span>
-        </div>
-      </div>
+        </aside>
+      </main>
     </div>
   );
 }

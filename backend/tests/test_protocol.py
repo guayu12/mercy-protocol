@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from core import session_store
+from core import session_store, speech_queue
 from core.agent import graph as agent_graph
 
 
@@ -39,6 +39,7 @@ class ScriptedChatModel(GenericFakeChatModel):
 
 
 async def _install_graph(monkeypatch, tmp_path, responses):
+    speech_queue.clear()
     await session_store.init_store(str(tmp_path / "session.db"))
     connection = await agent_graph.aiosqlite.connect(str(tmp_path / "checkpoints.db"))
     checkpointer = AsyncSqliteSaver(connection)
@@ -102,12 +103,33 @@ async def test_process_query_splits_reports_from_speech(monkeypatch, tmp_path):
             "report.delta",
             "report.done",
         ]
+        working_events = [
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("state") == "working"
+            and event.get("label") == "正在整理报告"
+        ]
+        report_open_index = next(
+            index for index, event in enumerate(events) if event["type"] == "report.open"
+        )
+        assert len(working_events) == 1
+        assert working_events[0][0] < report_open_index
         assert "|语言|性能|" in report_events[1]["markdown"]
         speech_events = [event for event in events if event["type"] == "speech.sentence"]
         assert all("|" not in event["text"] for event in speech_events)
         assert all(not any(mark in event["text"] for mark in "#*`") for event in speech_events)
         assert all("http" not in event["text"] for event in speech_events)
         assert next(event for event in events if event["type"] == "tool")["name"] == "show_report"
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": "protocol-report"}}
+        )
+        ai_messages = [
+            message
+            for message in state.values["messages"]
+            if isinstance(message, AIMessage)
+        ]
+        assert ai_messages[0].content == "我整理一下。"
+        assert ai_messages[-1].content == "三种语言各有取舍。我建议按项目需求选择。你更看重哪一项？"
     finally:
         await _close_graph(connection)
 
@@ -136,6 +158,195 @@ async def test_process_query_moves_overflow_to_a_report(monkeypatch, tmp_path):
             if event["type"] == "speech.sentence"
         ] == ["详细内容我放在屏幕上了。"]
         assert events[-1]["spoken_text"] == "详细内容我放在屏幕上了。"
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": "protocol-overflow"}}
+        )
+        last_ai_message = next(
+            message
+            for message in reversed(state.values["messages"])
+            if isinstance(message, AIMessage)
+        )
+        report_id = report_events[0]["report_id"]
+        assert last_ai_message.content == (
+            f"详细内容我放在屏幕上了。\n[完整内容已作为报告 {report_id} 上屏]"
+        )
+    finally:
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_wrong_interruption_turn_is_ignored(monkeypatch, tmp_path):
+    connection = await _install_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            AIMessage(content="第一句。第二句。"),
+            AIMessage(content="我接着说。"),
+        ],
+    )
+    try:
+        first_events = [
+            event
+            async for event in agent_graph.process_query(
+                "说一说", "protocol-wrong-interrupt"
+            )
+        ]
+        turn_id = first_events[0]["turn_id"]
+        generator = agent_graph.process_query(
+            "刚才说到哪？",
+            "protocol-wrong-interrupt",
+            interrupted={
+                "turn_id": "t_wrong",
+                "spoken_sentence_ids": ["t_wrong.1"],
+            },
+        )
+        assert (await anext(generator))["type"] == "turn"
+        await generator.aclose()
+
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": "protocol-wrong-interrupt"}}
+        )
+        prior_message = next(
+            message
+            for message in state.values["messages"]
+            if isinstance(message, AIMessage) and not message.tool_calls
+        )
+        assert prior_message.content == "第一句。第二句。"
+        utterances = await session_store.recent_utterances("protocol-wrong-interrupt")
+        prior_assistant = next(
+            item
+            for item in utterances
+            if item["role"] == "assistant" and item["turn_id"] == turn_id
+        )
+        assert prior_assistant["text"] == "第一句。第二句。"
+        assert prior_assistant["interrupted"] == 0
+    finally:
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_missing_interruption_sentence_preserves_checkpoint_and_utterance(
+    monkeypatch, tmp_path
+):
+    connection = await _install_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            AIMessage(content="第一句。第二句。"),
+            AIMessage(content="我接着说。"),
+        ],
+    )
+    try:
+        first_events = [
+            event
+            async for event in agent_graph.process_query(
+                "说一说", "protocol-missing-interrupt"
+            )
+        ]
+        turn_id = first_events[0]["turn_id"]
+        first_sentence = next(
+            event for event in first_events if event["type"] == "speech.sentence"
+        )
+        speech_queue.clear()
+        generator = agent_graph.process_query(
+            "刚才说到哪？",
+            "protocol-missing-interrupt",
+            interrupted={
+                "turn_id": turn_id,
+                "spoken_sentence_ids": [first_sentence["id"]],
+            },
+        )
+        assert (await anext(generator))["type"] == "turn"
+        await generator.aclose()
+
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": "protocol-missing-interrupt"}}
+        )
+        prior_message = next(
+            message
+            for message in state.values["messages"]
+            if isinstance(message, AIMessage) and not message.tool_calls
+        )
+        assert prior_message.content == "第一句。第二句。"
+        utterances = await session_store.recent_utterances("protocol-missing-interrupt")
+        prior_assistant = next(
+            item
+            for item in utterances
+            if item["role"] == "assistant" and item["turn_id"] == turn_id
+        )
+        assert prior_assistant["text"] == "第一句。第二句。"
+        assert prior_assistant["interrupted"] == 1
+    finally:
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_invalid_highlight_anchor_does_not_dispatch_event(monkeypatch, tmp_path):
+    connection = await _install_graph(monkeypatch, tmp_path, [])
+    try:
+        await session_store.create_report(
+            "protocol-highlight", "报告", "问题", "原文中包含有效标题。"
+        )
+        report = (await session_store.list_reports("protocol-highlight"))[0]
+        scripted_model = ScriptedChatModel(
+            messages=iter(
+                [
+                AIMessage(
+                    content="我帮你看一下。",
+                    tool_calls=[
+                        {
+                            "name": "highlight_report",
+                            "args": {
+                                "report_id": report["report_id"],
+                                "anchor": "missing phrase",
+                            },
+                            "id": "highlight_2",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="报告里没有这段文字。"),
+                ]
+            )
+        )
+        monkeypatch.setattr(agent_graph, "llm_with_tools", scripted_model)
+        events = [
+            event
+            async for event in agent_graph.process_query(
+                "高亮一段", "protocol-highlight"
+            )
+        ]
+        assert not any(event["type"] == "report.highlight" for event in events)
+        assert events[-1]["spoken_text"] == "我帮你看一下。报告里没有这段文字。"
+    finally:
+        await _close_graph(connection)
+
+
+class FailingChatModel(GenericFakeChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        for char in "第一句。第二句":
+            yield ChatGenerationChunk(message=AIMessageChunk(content=char))
+        raise RuntimeError("scripted stream failure")
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_persists_sentences_already_emitted(monkeypatch, tmp_path):
+    connection = await _install_graph(monkeypatch, tmp_path, [])
+    failing_model = FailingChatModel(messages=iter([]))
+    monkeypatch.setattr(agent_graph, "llm_with_tools", failing_model)
+    monkeypatch.setattr(agent_graph, "vision_llm_with_tools", failing_model)
+    try:
+        with pytest.raises(RuntimeError, match="scripted stream failure"):
+            async for _ in agent_graph.process_query(
+                "说一说", "protocol-stream-error"
+            ):
+                pass
+        utterances = await session_store.recent_utterances("protocol-stream-error")
+        assistant = next(item for item in utterances if item["role"] == "assistant")
+        assert assistant["text"] == "第一句。"
     finally:
         await _close_graph(connection)
 

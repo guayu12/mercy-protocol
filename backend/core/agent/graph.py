@@ -120,6 +120,12 @@ async def highlight_report(
     report_id: str, anchor: str, config: RunnableConfig
 ) -> str:
     """Highlight a specific part of an on-screen report when the user asks to see it; anchor must be its exact heading or a short exact phrase."""
+    thread_id = config.get("configurable", {}).get("thread_id", "default_user")
+    report = await session_store.get_report(thread_id, report_id)
+    if not report:
+        return "找不到这份报告"
+    if not anchor.strip() or anchor.casefold() not in report["markdown"].casefold():
+        return "报告里没有这段文字，请用报告中的原文标题或短语"
     await adispatch_custom_event(
         "report",
         {"type": "report.highlight", "report_id": report_id, "anchor": anchor},
@@ -144,7 +150,7 @@ _base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 _api_key = os.environ.get("OPENAI_API_KEY", "dummy")
 _model_name = os.environ.get("DEFAULT_MODEL", "gpt-6-luna")
 _vision_model_name = os.environ.get("OPENAI_VISION_MODEL") or _model_name
-_reasoning_effort = os.environ.get("DEFAULT_REASONING_EFFORT", "none")
+_reasoning_effort = os.environ.get("DEFAULT_REASONING_EFFORT", "")
 
 def _make_llm(model: str):
     options = dict(
@@ -190,23 +196,34 @@ async def agent_node(state: AgentState, config: RunnableConfig):
     thread_id = configurable.get("thread_id", "default_user")
     screen_state = configurable.get("screen_state") or {}
     reports = await session_store.list_reports(thread_id)
-    recent_reports = reports[-3:]
-    older_reports = reports[:-3]
     screen_lines = []
-    if older_reports:
-        screen_lines.append("较早的报告：")
-        screen_lines.extend(
-            f"- {report['report_id']}：{report['title']}" for report in older_reports
+    viewing_report_id = screen_state.get("viewing_report_id")
+    focused_report = next(
+        (
+            report
+            for report in reports
+            if report["report_id"] == viewing_report_id
+        ),
+        None,
+    )
+    if focused_report is None and reports:
+        focused_report = reports[-1]
+    if focused_report:
+        markdown = focused_report["markdown"]
+        if len(markdown) > 4000:
+            markdown = markdown[:4000] + "…（已截断，可用 read_report 读全文）"
+        screen_lines.append(
+            f"报告编号：{focused_report['report_id']}\n标题：{focused_report['title']}\n"
+            f"来源问题：{focused_report['query']}\n正文：\n{markdown}"
         )
-    if recent_reports:
-        screen_lines.append("最近的报告：")
-        for report in recent_reports:
-            markdown = report["markdown"]
-            if len(markdown) > 4000:
-                markdown = markdown[:4000] + "…（已截断，可用 read_report 读全文）"
-            screen_lines.append(
-                f"报告编号：{report['report_id']}\n标题：{report['title']}\n"
-                f"来源问题：{report['query']}\n正文：\n{markdown}"
+        other_reports = [
+            report for report in reports if report is not focused_report
+        ]
+        if other_reports:
+            screen_lines.append("其他报告：")
+            screen_lines.extend(
+                f"- {report['report_id']}：{report['title']}"
+                for report in other_reports
             )
     else:
         screen_lines.append("当前还没有报告。")
@@ -355,37 +372,65 @@ async def process_query(
         if interrupted:
             previous_turn_id = interrupted.get("turn_id", "")
             sentence_ids = interrupted.get("spoken_sentence_ids", [])
-            spoken = "".join(
-                speech_queue.get_sentence(sentence_id) or ""
-                for sentence_id in sentence_ids
+            latest_utterance = await session_store.latest_user_or_assistant_utterance(
+                thread_id
             )
-            interruption_text = (
-                spoken + "……（说到这里被用户打断）"
-                if spoken
-                else "（还没开口就被用户打断了）"
-            )
-            state = await graph.aget_state(config)
-            messages = state.values.get("messages", []) if state.values else []
-            if messages and isinstance(messages[-1], AIMessage) and not (
-                getattr(messages[-1], "tool_calls", None) or []
-            ):
-                await graph.aupdate_state(
-                    config,
-                    {
-                        "messages": [
-                            AIMessage(content=interruption_text, id=messages[-1].id)
-                        ]
-                    },
+            valid_interruption = (
+                isinstance(previous_turn_id, str)
+                and latest_utterance is not None
+                and latest_utterance["turn_id"] == previous_turn_id
+                and isinstance(sentence_ids, list)
+                and all(
+                    isinstance(sentence_id, str)
+                    and sentence_id.startswith(f"{previous_turn_id}.")
+                    for sentence_id in sentence_ids
                 )
-            elif messages and isinstance(messages[-1], (HumanMessage, ToolMessage)):
-                await graph.aupdate_state(
-                    config,
-                    {"messages": [AIMessage(content=interruption_text)]},
-                    as_node="agent",
-                )
-            await session_store.mark_interrupted(
-                thread_id, previous_turn_id, interruption_text
             )
+            if valid_interruption:
+                spoken_parts = [
+                    speech_queue.get_sentence(sentence_id)
+                    for sentence_id in sentence_ids
+                ]
+                if any(text is None for text in spoken_parts):
+                    await session_store.mark_interrupted(
+                        thread_id, previous_turn_id, None
+                    )
+                else:
+                    spoken = "".join(text for text in spoken_parts if text)
+                    interruption_text = (
+                        spoken + "……（说到这里被用户打断）"
+                        if spoken
+                        else "（还没开口就被用户打断了）"
+                    )
+                    state = await graph.aget_state(config)
+                    messages = (
+                        state.values.get("messages", []) if state.values else []
+                    )
+                    if messages and isinstance(messages[-1], AIMessage) and not (
+                        getattr(messages[-1], "tool_calls", None) or []
+                    ):
+                        await graph.aupdate_state(
+                            config,
+                            {
+                                "messages": [
+                                    AIMessage(
+                                        content=interruption_text,
+                                        id=messages[-1].id,
+                                    )
+                                ]
+                            },
+                        )
+                    elif messages and isinstance(
+                        messages[-1], (HumanMessage, ToolMessage)
+                    ):
+                        await graph.aupdate_state(
+                            config,
+                            {"messages": [AIMessage(content=interruption_text)]},
+                            as_node="agent",
+                        )
+                    await session_store.mark_interrupted(
+                        thread_id, previous_turn_id, interruption_text
+                    )
         await session_store.add_utterance(
             thread_id, turn_id, "user", query, interrupted=False
         )
@@ -394,9 +439,14 @@ async def process_query(
         router = SpeechRouter(turn_id)
         speaking_started = False
         report_id = None
+        emitted_sentences = []
+        last_tool_end_sentence_count = 0
+        reported_show_report_calls = set()
+        report_status_pending = 0
 
         def remember(sentence: dict):
             speech_queue.remember_sentence(turn_id, sentence["id"], sentence["text"])
+            emitted_sentences.append(sentence["text"])
 
         def speech_status():
             nonlocal speaking_started
@@ -408,18 +458,48 @@ async def process_query(
         log_bus.emit("flow", "FLOW",
                      f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_base64 else ''}")
 
-        async for event in graph.astream_events(
-            {"messages": [build_user_message(query, image_base64)], "context": ""},
-            config=config,
-            version="v2",
-        ):
-            kind = event["event"]
-            if kind == "on_chat_model_stream":
-                if event.get("metadata", {}).get("langgraph_node") != "agent":
-                    continue
-                text = _text_of(event["data"]["chunk"].content)
-                if text:
-                    for sentence in router.feed(text):
+        try:
+            async for event in graph.astream_events(
+                {"messages": [build_user_message(query, image_base64)], "context": ""},
+                config=config,
+                version="v2",
+            ):
+                kind = event["event"]
+                if kind == "on_chat_model_stream":
+                    if event.get("metadata", {}).get("langgraph_node") != "agent":
+                        continue
+                    chunk = event["data"]["chunk"]
+                    for index, tool_call in enumerate(
+                        getattr(chunk, "tool_call_chunks", []) or []
+                    ):
+                        if not isinstance(tool_call, dict) or tool_call.get("name") != "show_report":
+                            continue
+                        call_key = (
+                            f"{event.get('run_id')}:"
+                            f"{tool_call.get('id') or tool_call.get('index', index)}"
+                        )
+                        if call_key not in reported_show_report_calls:
+                            reported_show_report_calls.add(call_key)
+                            report_status_pending += 1
+                            yield {
+                                "type": "status",
+                                "state": "working",
+                                "label": "正在整理报告",
+                            }
+                    text = _text_of(chunk.content)
+                    if text:
+                        for sentence in router.feed(text):
+                            status = speech_status()
+                            if status:
+                                yield status
+                            remember(sentence)
+                            yield {
+                                "type": "speech.sentence",
+                                "turn_id": turn_id,
+                                **sentence,
+                            }
+                elif kind == "on_tool_start":
+                    for sentence in router.flush_pending():
                         status = speech_status()
                         if status:
                             yield status
@@ -429,36 +509,40 @@ async def process_query(
                             "turn_id": turn_id,
                             **sentence,
                         }
-            elif kind == "on_tool_start":
-                for sentence in router.flush_pending():
-                    status = speech_status()
-                    if status:
-                        yield status
-                    remember(sentence)
-                    yield {
-                        "type": "speech.sentence",
-                        "turn_id": turn_id,
-                        **sentence,
+                    log_bus.emit("tool", "TOOL", f"► {event['name']}({str(event['data'].get('input', ''))[:80]})")
+                    labels = {
+                        "tavily_search": "正在搜索",
+                        "show_report": "正在整理报告",
+                        "read_report": "正在翻看报告",
                     }
-                log_bus.emit("tool", "TOOL", f"► {event['name']}({str(event['data'].get('input', ''))[:80]})")
-                labels = {
-                    "tavily_search": "正在搜索",
-                    "show_report": "正在整理报告",
-                    "read_report": "正在翻看报告",
-                }
-                yield {
-                    "type": "status",
-                    "state": "working",
-                    "label": labels.get(event["name"], "正在处理"),
-                }
-                yield {"type": "tool", "name": event["name"], "status": "start"}
-            elif kind == "on_tool_end":
-                output = event["data"].get("output")
-                output = getattr(output, "content", output)
-                log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
-                yield {"type": "tool", "name": event["name"], "status": "end"}
-            elif kind == "on_custom_event" and event.get("name") == "report":
-                yield event["data"]
+                    if event["name"] == "show_report" and report_status_pending:
+                        report_status_pending -= 1
+                    else:
+                        yield {
+                            "type": "status",
+                            "state": "working",
+                            "label": labels.get(event["name"], "正在处理"),
+                        }
+                    yield {"type": "tool", "name": event["name"], "status": "start"}
+                elif kind == "on_tool_end":
+                    output = event["data"].get("output")
+                    output = getattr(output, "content", output)
+                    log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
+                    last_tool_end_sentence_count = len(emitted_sentences)
+                    yield {"type": "tool", "name": event["name"], "status": "end"}
+                elif kind == "on_custom_event" and event.get("name") == "report":
+                    yield event["data"]
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await session_store.add_utterance(
+                thread_id,
+                turn_id,
+                "assistant",
+                "".join(emitted_sentences),
+                interrupted=False,
+            )
+            raise
 
         state = await graph.aget_state(config)
         summary = router.finish()
@@ -503,20 +587,19 @@ async def process_query(
 
         spoken_text = router.spoken_text
         messages = state.values.get("messages", []) if state.values else []
-        if messages and isinstance(messages[-1], AIMessage):
-            last_message = messages[-1]
-            if _text_of(last_message.content) != spoken_text or report_id:
-                checkpoint_text = spoken_text
-                if report_id:
-                    checkpoint_text += f"\n[完整内容已作为报告 {report_id} 上屏]"
-                await graph.aupdate_state(
-                    config,
-                    {
-                        "messages": [
-                            AIMessage(content=checkpoint_text, id=last_message.id)
-                        ]
-                    },
-                )
+        if report_id and messages and isinstance(messages[-1], AIMessage):
+            checkpoint_text = "".join(
+                emitted_sentences[last_tool_end_sentence_count:]
+            )
+            checkpoint_text += f"\n[完整内容已作为报告 {report_id} 上屏]"
+            await graph.aupdate_state(
+                config,
+                {
+                    "messages": [
+                        AIMessage(content=checkpoint_text, id=messages[-1].id)
+                    ]
+                },
+            )
         await session_store.add_utterance(
             thread_id, turn_id, "assistant", spoken_text, interrupted=False
         )

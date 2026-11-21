@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import os
 import sys
 import asyncio
@@ -15,7 +15,8 @@ from typing import Optional
 from core import log_bus  # real-time log broadcaster
 from core.agent.graph import process_query, init_graph, close_graph
 from core import session_store, speech_queue
-from core.speech import VOICE, synthesize
+from core.speech import synthesize
+from core.speakable import to_speakable
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,12 +51,22 @@ app.add_middleware(
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
+class ScreenState(BaseModel):
+    viewing_report_id: Optional[str] = None
+
+
+class Interrupted(BaseModel):
+    turn_id: str
+    spoken_sentence_ids: list[str] = Field(default_factory=list)
+
+
 class ChatRequest(BaseModel):
     message: str
     image_base64: Optional[str] = None  # raw base64 or full data: URL
     thread_id: str = "default_user"
-    screen_state: Optional[dict] = None
-    interrupted: Optional[dict] = None
+    screen_state: Optional[ScreenState] = None
+    interrupted: Optional[Interrupted] = None
+
 
 @app.get("/")
 async def root():
@@ -98,8 +109,8 @@ async def chat_endpoint(request: ChatRequest):
                 request.message,
                 request.thread_id,
                 request.image_base64,
-                request.screen_state,
-                request.interrupted,
+                request.screen_state.model_dump() if request.screen_state else None,
+                request.interrupted.model_dump() if request.interrupted else None,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:
@@ -116,7 +127,10 @@ class SpeechRequest(BaseModel):
 @app.post("/api/speech")
 async def speech_endpoint(req: SpeechRequest):
     """Synthesize speech and return base64 audio plus a timed viseme track for avatar lip-sync."""
-    return await synthesize(req.text)
+    text = to_speakable(req.text)
+    if not text:
+        raise HTTPException(status_code=400, detail="Speech text is empty after cleaning")
+    return await synthesize(text)
 
 
 @app.get("/api/speech/{sentence_id}")

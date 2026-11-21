@@ -49,6 +49,10 @@ async def init_store(path: str):
                 interrupted INTEGER DEFAULT 0,
                 created_at REAL NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_reports_thread_id
+                ON reports(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_utterances_thread_id_id
+                ON utterances(thread_id, id);
             """
         )
         await _connection.commit()
@@ -132,20 +136,30 @@ async def add_utterance(
         await db.commit()
 
 
-async def mark_interrupted(thread_id: str, turn_id: str, spoken_text: str):
+async def mark_interrupted(
+    thread_id: str, turn_id: str, spoken_text: str | None
+):
     async with _get_lock():
         db = _db()
-        cursor = await db.execute(
-            "UPDATE utterances SET text = ?, interrupted = 1 "
-            "WHERE id = (SELECT id FROM utterances WHERE thread_id = ? AND turn_id = ? "
-            "AND role = 'assistant' ORDER BY id DESC LIMIT 1)",
-            (spoken_text, thread_id, turn_id),
-        )
+        if spoken_text is None:
+            cursor = await db.execute(
+                "UPDATE utterances SET interrupted = 1 "
+                "WHERE id = (SELECT id FROM utterances WHERE thread_id = ? AND turn_id = ? "
+                "AND role = 'assistant' ORDER BY id DESC LIMIT 1)",
+                (thread_id, turn_id),
+            )
+        else:
+            cursor = await db.execute(
+                "UPDATE utterances SET text = ?, interrupted = 1 "
+                "WHERE id = (SELECT id FROM utterances WHERE thread_id = ? AND turn_id = ? "
+                "AND role = 'assistant' ORDER BY id DESC LIMIT 1)",
+                (spoken_text, thread_id, turn_id),
+            )
         if cursor.rowcount == 0:
             await db.execute(
                 "INSERT INTO utterances (thread_id, turn_id, role, text, interrupted, created_at) "
                 "VALUES (?, ?, 'assistant', ?, 1, ?)",
-                (thread_id, turn_id, spoken_text, time.time()),
+                (thread_id, turn_id, spoken_text or "", time.time()),
             )
         await db.commit()
 
@@ -160,3 +174,15 @@ async def recent_utterances(thread_id: str, limit: int = 50) -> list[dict]:
         rows = await cursor.fetchall()
         await cursor.close()
     return [_row_dict(row) for row in rows]
+
+
+async def latest_user_or_assistant_utterance(thread_id: str) -> dict | None:
+    async with _get_lock():
+        cursor = await _db().execute(
+            "SELECT * FROM utterances WHERE thread_id = ? "
+            "AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT 1",
+            (thread_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    return _row_dict(row) if row else None
