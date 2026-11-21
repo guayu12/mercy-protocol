@@ -17,6 +17,9 @@ _TABLE_SEPARATOR = re.compile(
 _FENCE_START = re.compile(r"(?m)^[ \t]*(?:```|~~~)")
 _REPEATED_PUNCTUATION = re.compile(r"([。！？!?…])\1+")
 _BOUNDARIES = set("。！？!?\n")
+_IMMEDIATE_BOUNDARIES = set("。！？\n")
+_ASCII_BOUNDARIES = set("!?")
+_ASCII_BOUNDARY_QUOTES = set("\"'“”‘’「」『』")
 _LONG_CLAUSE_MARKS = set("，,；;")
 
 
@@ -27,6 +30,35 @@ def _remove_emoji_like_symbols(text: str) -> str:
         if unicodedata.category(char) not in {"So", "Sk"}
         and char not in {"\u200d", "\ufe0e", "\ufe0f"}
         and not 0x1F1E6 <= ord(char) <= 0x1F1FF
+    )
+
+
+def _inside_unclosed_markdown_link(text: str) -> bool:
+    opening = text.rfind("[")
+    if opening < 0:
+        return False
+    closing = text.find("]", opening + 1)
+    if closing < 0:
+        return True
+    if text[closing + 1 : closing + 2] != "(":
+        return False
+    return ")" not in text[closing + 2 :]
+
+
+def _inside_url_run(text: str) -> bool:
+    matches = list(re.finditer(r"(?:https?://|www\.)", text, re.IGNORECASE))
+    return bool(
+        matches
+        and not any(char.isspace() for char in text[matches[-1].start() :])
+    )
+
+
+def _is_cjk_character(char: str) -> bool:
+    return (
+        "\u3400" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        or "\u3040" <= char <= "\u30ff"
+        or "\uac00" <= char <= "\ud7af"
     )
 
 
@@ -113,6 +145,19 @@ class SpeechRouter:
             or any(_TABLE_ROW.match(line) for line in self._scanned_text.splitlines())
         )
 
+    def _ascii_punctuation_is_boundary(self, next_char: str) -> bool:
+        if not (
+            next_char.isspace()
+            or next_char in _ASCII_BOUNDARY_QUOTES
+            or _is_cjk_character(next_char)
+        ):
+            return False
+        preceding_text = self._buffer[:-1]
+        return not (
+            _inside_unclosed_markdown_link(preceding_text)
+            or _inside_url_run(preceding_text)
+        )
+
     def feed(self, delta: str) -> list[dict]:
         """Consume a token delta and return any complete spoken sentences."""
         self.raw_full_text += delta
@@ -126,6 +171,12 @@ class SpeechRouter:
                 self._overflowed = True
                 break
 
+            if (
+                self._buffer
+                and self._buffer[-1] in _ASCII_BOUNDARIES
+                and self._ascii_punctuation_is_boundary(char)
+            ):
+                self._boundary_pending = True
             if self._boundary_pending and char not in _BOUNDARIES:
                 sentence = self._flush_buffer()
                 if self._overflowed:
@@ -143,7 +194,7 @@ class SpeechRouter:
                 self._overflowed = True
                 break
 
-            if char in _BOUNDARIES:
+            if char in _IMMEDIATE_BOUNDARIES:
                 self._boundary_pending = True
             elif len(self._buffer) > 60:
                 split_at = max(

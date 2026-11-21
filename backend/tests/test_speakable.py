@@ -32,6 +32,32 @@ def test_speech_router_splits_punctuation_across_token_boundaries():
     ]
 
 
+def test_speech_router_keeps_ascii_url_queries_in_one_clean_sentence():
+    examples = (
+        ("[文档](https://x.com/a?b=1) 可以查看。", "文档 可以查看。"),
+        ("访问 https://x.com/a?b=1 后继续。", "访问 后继续。"),
+        ("访问 https://x.com/a?文档=1 后继续。", "访问 后继续。"),
+    )
+    for raw_text, expected in examples:
+        sentences = _collect(SpeechRouter("t_url"), raw_text)
+        assert len(sentences) == 1
+        assert sentences[0]["text"] == expected
+        assert not any(mark in sentences[0]["text"] for mark in "[]?http")
+
+
+def test_speech_router_defers_ascii_boundary_until_next_delta():
+    router = SpeechRouter("t_ascii")
+    assert router.feed("Really?") == []
+    assert router.feed("你") == [{"id": "t_ascii.1", "text": "Really?"}]
+    assert router.finish()["sentences"] == [{"id": "t_ascii.2", "text": "你"}]
+
+    final_punctuation = SpeechRouter("t_final")
+    assert final_punctuation.feed("Really?") == []
+    assert final_punctuation.finish()["sentences"] == [
+        {"id": "t_final.1", "text": "Really?"}
+    ]
+
+
 def test_speech_router_splits_long_clauses_at_commas():
     router = SpeechRouter("t_long")
     sentences = _collect(router, "甲" * 61 + "，乙乙。")
