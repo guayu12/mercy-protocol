@@ -350,3 +350,35 @@ async def test_concurrent_remote_image_caches_serialize_eviction(tmp_path):
         assert all(Path(record["path"]).is_file() for record in records)
     finally:
         await media_store.close_store()
+
+
+@pytest.mark.asyncio
+async def test_register_message_links_trims_unbalanced_closers(monkeypatch):
+    registered = []
+
+    async def capture_link(*args, **kwargs):
+        registered.append(kwargs["url"])
+        return {}
+
+    monkeypatch.setattr(media_store, "register_media", capture_link)
+    await main._register_message_links(
+        "link-test",
+        "[video](https://example.com/a.mp4) "
+        "https://example.com/b.webm "
+        "（https://example.com/c.gif） "
+        "[balanced](https://example.com/folder(a)/d.mp4) "
+        "https://example.com/e.mp4?download=1 "
+        "https://example.com/f.jpg] "
+        "<https://example.com/g.png> "
+        '"https://example.com/h.webp"',
+    )
+    assert registered == [
+        "https://example.com/a.mp4",
+        "https://example.com/b.webm",
+        "https://example.com/c.gif",
+        "https://example.com/folder(a)/d.mp4",
+        "https://example.com/e.mp4?download=1",
+        "https://example.com/f.jpg",
+        "https://example.com/g.png",
+        "https://example.com/h.webp",
+    ]

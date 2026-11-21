@@ -140,7 +140,7 @@ async def chat_endpoint(request: ChatRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
-_MEDIA_LINK = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_MEDIA_LINK = re.compile(r"https?://[^\s<]+", re.IGNORECASE)
 _LINK_MIMES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -152,9 +152,25 @@ _LINK_MIMES = {
 }
 
 
+def _trim_link_url(url: str) -> str:
+    pairs = {")": "(", "]": "[", ">": "<"}
+    punctuation = ".,!?;:，。！？）】"
+    while url:
+        trailing = url[-1]
+        if trailing in punctuation:
+            url = url[:-1]
+        elif trailing in pairs and url.count(trailing) > url.count(pairs[trailing]):
+            url = url[:-1]
+        elif trailing in {"'", '"'} and url.count(trailing) % 2:
+            url = url[:-1]
+        else:
+            break
+    return url
+
+
 async def _register_message_links(thread_id: str, message: str) -> None:
     for match in _MEDIA_LINK.finditer(message):
-        url = match.group(0).rstrip(".,!?;:，。！？）】")
+        url = _trim_link_url(match.group(0))
         try:
             parsed = urlsplit(url)
             extension = Path(parsed.path).suffix.lower()
