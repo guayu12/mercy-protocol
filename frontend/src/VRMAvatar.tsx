@@ -58,10 +58,18 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
     useEffect(() => { engine?.setState(state); }, [engine, state]);
 
     useEffect(() => {
-        if (!engine || !speech) return;
-        engine.speak(speech.audioUrl, speech.visemes, () => onAudioEndRef.current?.());
-        return () => engine.stopSpeech();
-    }, [engine, speech]);
+        if (!speech) return;
+        if (engine) {
+            engine.speak(speech.audioUrl, speech.visemes, () => onAudioEndRef.current?.());
+            return () => engine.stopSpeech();
+        }
+        if (!error) return;
+        // Avatar unavailable: still play the reply audio.
+        const audio = new Audio(speech.audioUrl);
+        audio.onended = () => onAudioEndRef.current?.();
+        audio.play().catch(e => console.warn("[TTS] autoplay blocked:", e));
+        return () => { audio.onended = null; audio.pause(); };
+    }, [engine, error, speech]);
 
     return (
         <div ref={containerRef} className="absolute inset-0 w-full h-full overflow-hidden" style={{ zIndex: 5 }}>
