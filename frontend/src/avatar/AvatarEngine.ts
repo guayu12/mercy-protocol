@@ -105,6 +105,7 @@ export class AvatarEngine {
     private talkAction: THREE.AnimationAction | null = null;
     private idleIndex = 0;
     private talkHoldUntil = 0;
+    private baseStarted = false;
     private clips: Partial<Record<Gesture, THREE.AnimationClip>> = {};
     private gestureAction: THREE.AnimationAction | null = null;
     private fadingGesture: THREE.AnimationAction | null = null;
@@ -368,9 +369,9 @@ export class AvatarEngine {
         const idle = this.idleActions.length ? this.idleActions[this.idleIndex % this.idleActions.length] : null;
         const target = (t < this.talkHoldUntil && this.talkAction) || idle;
         if (target && !target.isRunning()) {
-            // First loop after load starts at full weight (nothing to blend from); later ones ramp in.
-            const first = !this.gestureAction && !this.idleActions.concat(this.talkAction ?? []).some(a => a.isRunning());
-            target.reset().setEffectiveWeight(first ? 1 : 0).play();
+            // Only the very first base loop starts at full weight (nothing to blend from); later ones ramp in.
+            target.reset().setEffectiveWeight(this.baseStarted ? 0 : 1).play();
+            this.baseStarted = true;
         }
         this.baseAction = target;
         const gesturing = this.gestureAction !== null || this.fadingGesture !== null;
