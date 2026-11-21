@@ -4,11 +4,17 @@ import re
 import unicodedata
 
 
-_FENCED_CODE = re.compile(r"```.*?(?:```|$)", re.DOTALL)
+_FENCED_CODE = re.compile(
+    r"(?ms)^[ \t]*(?:```|~~~)[^\n]*(?:\n|$).*?(?:^[ \t]*(?:```|~~~)[ \t]*(?:\n|$)|\Z)"
+)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEPARATOR = re.compile(
+    r"(?m)^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*$"
+)
+_FENCE_START = re.compile(r"(?m)^[ \t]*(?:```|~~~)")
 _REPEATED_PUNCTUATION = re.compile(r"([。！？!?…])\1+")
 _BOUNDARIES = set("。！？!?\n")
 _LONG_CLAUSE_MARKS = set("，,；;")
@@ -101,8 +107,10 @@ class SpeechRouter:
         return self._make_sentence(text)
 
     def _is_unsafe_markdown(self) -> bool:
-        return "```" in self._scanned_text or any(
-            _TABLE_ROW.match(line) for line in self._scanned_text.splitlines()
+        return bool(
+            _FENCE_START.search(self._scanned_text)
+            or _TABLE_SEPARATOR.search(self._scanned_text)
+            or any(_TABLE_ROW.match(line) for line in self._scanned_text.splitlines())
         )
 
     def feed(self, delta: str) -> list[dict]:

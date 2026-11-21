@@ -13,6 +13,7 @@ def test_to_speakable_removes_markdown_and_keeps_text():
     assert to_speakable("# 标题\n这是 **重要** 的 `内容`。") == "标题 这是 重要 的 内容。"
     assert to_speakable("运行 `print(1)`") == "运行 print(1)"
     assert to_speakable("保留这句。\n```python\nprint('hidden')\n```\n继续。") == "保留这句。 继续。"
+    assert to_speakable("保留这句。\n~~~python\nprint('hidden')\n~~~\n继续。") == "保留这句。 继续。"
     assert to_speakable("[a](http://x) 和 https://example.com") == "a 和"
     assert to_speakable("- 第一项\n- 第二项\n1. third item") == "第一项，第二项，third item。"
     assert to_speakable("* first\n* second\nuser_name") == "first，second。 user_name"
@@ -40,7 +41,13 @@ def test_speech_router_splits_long_clauses_at_commas():
 
 
 def test_speech_router_overflows_code_tables_and_long_text():
-    for text in ("```python\nx = 1\n```", "| a | b |\n|---|---|\n| 1 | 2 |", "字" * 301):
+    for text in (
+        "```python\nx = 1\n```",
+        "~~~python\nx = 1\n~~~",
+        "| a | b |\n|---|---|\n| 1 | 2 |",
+        "a | b\n--- | ---",
+        "字" * 301,
+    ):
         router = SpeechRouter("t_overflow")
         router.feed(text)
         result = router.finish()
