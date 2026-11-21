@@ -1,13 +1,29 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { VRM, VRMLoaderPlugin, VRMUtils, type VRMHumanBoneName } from "@pixiv/three-vrm";
 import { VISEMES, visemeTargets, type Viseme, type VisemeCue } from "./lipsync";
+import { LOOKS, applyMToonLook, createBackdrop, type LightingPreset } from "./look";
+
+export { LIGHTING_PRESETS, type LightingPreset } from "./look";
 
 export type AvatarState = "idle" | "listening" | "thinking" | "speaking";
 export const AVATAR_STATES: AvatarState[] = ["idle", "listening", "thinking", "speaking"];
 
-export type LightingPreset = "basic";
-export const LIGHTING_PRESETS: LightingPreset[] = ["basic"];
+export type Quality = "high" | "balanced";
+export const QUALITIES: Quality[] = ["high", "balanced"];
+
+/** face: thumbnail head shot; bust: head + shoulders; upper: waist up; auto picks from container size. */
+export type Framing = "auto" | "face" | "bust" | "upper";
+export const FRAMINGS: Framing[] = ["auto", "face", "bust", "upper"];
+const FRAMES = {
+    face: { viewH: 0.34, viewW: 0.3, faceFromTop: 0.5 },
+    bust: { viewH: 0.62, viewW: 0.62, faceFromTop: 0.36 },
+    upper: { viewH: 1.05, viewW: 0.75, faceFromTop: 0.24 },
+};
 
 export interface AvatarStats { fps: number; drawCalls: number; triangles: number; textures: number; geometries: number }
 
@@ -24,12 +40,23 @@ export class AvatarEngine {
     vrm: VRM | null = null;
     readonly renderer: THREE.WebGLRenderer;
     readonly scene = new THREE.Scene();
-    readonly camera = new THREE.PerspectiveCamera(28, 1, 0.1, 20);
+    readonly camera = new THREE.PerspectiveCamera(20, 1, 0.1, 30);
 
     private container: HTMLElement;
     private timer = new THREE.Timer();
     private ro: ResizeObserver;
-    private focus = new THREE.Vector3(0, 1.35, 0);
+    private face = new THREE.Vector3(0, 1.4, 0);
+    /** -1 for VRM0: rotateVRM0 turns the model 180deg, flipping x/z on normalized bones. */
+    private axis = 1;
+    private camBase = new THREE.Vector3();
+    private camAim = new THREE.Vector3();
+    private viewH = 1;
+    private framing: Framing = "auto";
+    private quality: Quality = "high";
+    private lighting: LightingPreset = "studio";
+    private composer: EffectComposer | null = null;
+    private bloom: UnrealBloomPass | null = null;
+    private backdrop = createBackdrop();
     private lookTarget = new THREE.Object3D();
     private pointer = new THREE.Vector2();
     private lights: THREE.Light[] = [];
@@ -55,14 +82,16 @@ export class AvatarEngine {
     /** Throws if WebGL is unavailable. */
     constructor(container: HTMLElement) {
         this.container = container;
-        this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "low-power" });
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "high-performance" });
+        this.renderer.info.autoReset = false;
         const s = this.renderer.domElement.style;
         s.position = "absolute"; s.inset = "0"; s.width = "100%"; s.height = "100%";
         container.appendChild(this.renderer.domElement);
 
         this.scene.add(this.lookTarget);
-        this.setLighting("basic");
+        this.scene.add(this.backdrop.mesh);
+        this.setLighting(this.lighting);
+        this.setQuality(this.quality);
 
         this.ro = new ResizeObserver(this.resize);
         this.ro.observe(container);
@@ -84,16 +113,19 @@ export class AvatarEngine {
         VRMUtils.removeUnnecessaryVertices(gltf.scene);
         VRMUtils.combineSkeletons(gltf.scene);
         VRMUtils.rotateVRM0(vrm);
+        this.axis = vrm.meta.metaVersion === "0" ? -1 : 1;
         vrm.scene.traverse(o => { o.frustumCulled = false; });
         this.scene.add(vrm.scene);
         if (vrm.lookAt) vrm.lookAt.target = this.lookTarget;
         this.vrm = vrm;
 
+        applyMToonLook(vrm, LOOKS[this.lighting]);
         const head = vrm.humanoid.getNormalizedBoneNode("head");
         if (head) {
             vrm.scene.updateMatrixWorld(true);
-            head.getWorldPosition(this.focus);
-            this.focus.y -= 0.12;
+            head.getWorldPosition(this.face);
+            this.face.y += 0.06;
+            this.placeLights();
             this.resize();
         }
     }
@@ -149,20 +181,61 @@ export class AvatarEngine {
         this.vrm?.expressionManager?.setValue(name, 0);
     }
 
-    setLighting(_preset: LightingPreset) {
-        for (const l of this.lights) this.scene.remove(l);
-        const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-        const key = new THREE.DirectionalLight(0xffffff, 1.2);
-        key.position.set(0.6, 1.5, 2);
-        this.lights = [ambient, key];
+    getLighting() { return this.lighting; }
+    getQuality() { return this.quality; }
+    getFraming() { return this.framing; }
+
+    setLighting(preset: LightingPreset) {
+        this.lighting = preset;
+        const look = LOOKS[preset];
+        for (const l of this.lights) { this.scene.remove(l); l.dispose(); }
+        this.lights = [new THREE.HemisphereLight(look.hemi.sky, look.hemi.ground, look.hemi.intensity)];
+        for (const spec of look.lights) {
+            const l = new THREE.DirectionalLight(spec.color, spec.intensity);
+            l.userData.offset = new THREE.Vector3(...spec.pos);
+            this.lights.push(l);
+        }
         for (const l of this.lights) this.scene.add(l);
+        this.placeLights();
+        this.renderer.toneMapping = look.toneMapping;
+        this.renderer.toneMappingExposure = look.exposure;
+        this.backdrop.set(look.backdrop);
+        if (this.vrm) applyMToonLook(this.vrm, look);
+        this.updateBloom();
     }
+
+    /** high: MSAA + bloom post chain at up to 2x pixel ratio; balanced: direct render at 1x. */
+    setQuality(quality: Quality) {
+        this.quality = quality;
+        this.composer?.dispose();
+        this.composer = null;
+        this.bloom = null;
+        if (quality === "high") {
+            this.renderer.setPixelRatio(Math.min(Math.max(window.devicePixelRatio, 1.5), 2));
+            const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+            const composer = new EffectComposer(this.renderer, rt);
+            composer.addPass(new RenderPass(this.scene, this.camera));
+            this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0, 0, 1);
+            composer.addPass(this.bloom);
+            composer.addPass(new OutputPass());
+            this.composer = composer;
+            this.updateBloom();
+        } else {
+            this.renderer.setPixelRatio(1);
+        }
+        this.resize();
+    }
+
+    setFraming(framing: Framing) { this.framing = framing; this.resize(); }
 
     dispose() {
         this.renderer.setAnimationLoop(null);
         this.stopSpeech();
         this.audio.removeEventListener("ended", this.endSpeech);
         this.timer.dispose();
+        this.composer?.dispose();
+        this.backdrop.mesh.geometry.dispose();
+        (this.backdrop.mesh.material as THREE.Material).dispose();
         this.ro.disconnect();
         window.removeEventListener("pointermove", this.onPointerMove);
         this.renderer.domElement.removeEventListener("pointerdown", this.react);
@@ -181,18 +254,66 @@ export class AvatarEngine {
         cb?.();
     };
 
+    private updateBloom() {
+        const b = LOOKS[this.lighting].bloom;
+        if (!this.bloom) return;
+        this.bloom.enabled = !!b;
+        if (b) { this.bloom.strength = b.strength; this.bloom.radius = b.radius; this.bloom.threshold = b.threshold; }
+    }
+
+    private placeLights() {
+        for (const l of this.lights) {
+            const off = l.userData.offset as THREE.Vector3 | undefined;
+            if (!off || !(l instanceof THREE.DirectionalLight)) continue;
+            l.position.copy(this.face).add(off);
+            l.target.position.copy(this.face);
+            l.target.updateMatrixWorld();
+        }
+    }
+
+    private resolveFraming(w: number, h: number): Exclude<Framing, "auto"> {
+        if (this.framing !== "auto") return this.framing;
+        if (h < 160) return "face";
+        return w / h >= 0.6 ? "bust" : "upper";
+    }
+
     private resize = () => {
         const w = this.container.clientWidth, h = this.container.clientHeight;
         if (!w || !h) return;
         this.renderer.setSize(w, h, false);
+        this.composer?.setPixelRatio(this.renderer.getPixelRatio());
+        this.composer?.setSize(w, h);
         const cam = this.camera;
         cam.aspect = w / h;
-        const viewHeight = 1.05; // metres of body visible vertically
-        const dist = viewHeight / 2 / Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
-        cam.position.set(this.focus.x, this.focus.y + 0.02, this.focus.z + Math.max(dist, 0.8 / cam.aspect));
-        cam.lookAt(this.focus);
         cam.updateProjectionMatrix();
+
+        const f = FRAMES[this.resolveFraming(w, h)];
+        const tanV = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
+        const viewH = Math.max(f.viewH, f.viewW / cam.aspect);
+        this.viewH = viewH;
+        const centerY = this.face.y - (0.5 - f.faceFromTop) * viewH;
+        this.camAim.set(this.face.x, centerY, this.face.z);
+        this.camBase.set(this.face.x, centerY, this.face.z + viewH / 2 / tanV);
+
+        // Backdrop fills the frustum 1.2 m behind the avatar.
+        const depth = this.camBase.z - (this.face.z - 1.2);
+        const bh = 2 * depth * tanV * 1.15;
+        this.backdrop.mesh.scale.set(bh * cam.aspect, bh, 1);
+        this.backdrop.uniforms.uAspect.value = cam.aspect;
+        this.backdrop.mesh.position.set(this.face.x, centerY, this.face.z - 1.2);
+        this.updateCamera(this.timer.getElapsed());
     };
+
+    /** Slow, sub-centimetre drift so the shot breathes without drawing attention. */
+    private updateCamera(t: number) {
+        const v = this.viewH;
+        this.camera.position.set(
+            this.camBase.x + Math.sin(t * 0.23) * 0.015 * v,
+            this.camBase.y + Math.sin(t * 0.31 + 1) * 0.008 * v,
+            this.camBase.z + Math.sin(t * 0.17 + 2) * 0.025 * v,
+        );
+        this.camera.lookAt(this.camAim);
+    }
 
     private onPointerMove = (e: PointerEvent) => {
         const r = this.container.getBoundingClientRect();
@@ -203,8 +324,12 @@ export class AvatarEngine {
         this.timer.update();
         const dt = Math.min(this.timer.getDelta(), 0.1);
         const t = this.timer.getElapsed();
+        this.renderer.info.reset();
+        this.updateCamera(t);
+        this.backdrop.uniforms.uTime.value = t;
         if (this.vrm) this.animate(this.vrm, t, dt);
-        this.renderer.render(this.scene, this.camera);
+        if (this.composer) this.composer.render(dt);
+        else this.renderer.render(this.scene, this.camera);
         this.sampleStats(t);
     };
 
@@ -219,22 +344,23 @@ export class AvatarEngine {
         const talk = this.mouth.aa + this.mouth.oh + this.mouth.ee * 0.6 + this.mouth.ih * 0.4 + this.mouth.ou * 0.5;
 
         const breath = Math.sin(t * 1.6);
+        const s = this.axis;
         const lu = bone("leftUpperArm"), ru = bone("rightUpperArm");
         const ll = bone("leftLowerArm"), rl = bone("rightLowerArm");
-        if (lu) lu.rotation.set(0, 0, -1.2 - breath * 0.02);
-        if (ru) ru.rotation.set(0, 0, 1.2 + breath * 0.02);
+        if (lu) lu.rotation.set(0, 0, s * (-1.2 - breath * 0.02));
+        if (ru) ru.rotation.set(0, 0, s * (1.2 + breath * 0.02));
         if (ll) ll.rotation.set(0, -0.25, 0);
         if (rl) rl.rotation.set(0, 0.25, 0);
         const chest = bone("chest") ?? bone("spine");
-        if (chest) chest.rotation.x = breath * 0.015 + pose.lean;
+        if (chest) chest.rotation.x = s * (breath * 0.015 + pose.lean);
         const spine = bone("spine");
         if (spine) spine.rotation.y = Math.sin(t * 0.5) * 0.04;
 
         const neck = bone("neck");
         if (neck) {
             const nod = reacting ? Math.sin((this.reactUntil - t) * 7) * 0.08 : Math.sin(t * 0.7) * 0.02;
-            neck.rotation.x = nod + pose.headPitch + talk * 0.03;
-            neck.rotation.z = Math.sin(t * 0.43) * 0.04 + pose.headTilt;
+            neck.rotation.x = s * (nod + pose.headPitch + talk * 0.03);
+            neck.rotation.z = s * (Math.sin(t * 0.43) * 0.04 + pose.headTilt);
         }
 
         const cam = this.camera.position;

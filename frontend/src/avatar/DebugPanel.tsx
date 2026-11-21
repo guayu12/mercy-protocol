@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AVATAR_STATES, LIGHTING_PRESETS, type AvatarEngine, type AvatarState, type LightingPreset } from "./AvatarEngine";
+import { AVATAR_STATES, FRAMINGS, LIGHTING_PRESETS, QUALITIES, type AvatarEngine, type AvatarState, type Framing, type LightingPreset, type Quality } from "./AvatarEngine";
 import { syntheticVisemes } from "./lipsync";
 
 const API_BASE = "http://127.0.0.1:8000";
@@ -11,7 +11,9 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
     const [open, setOpen] = useState(true);
     const [, refresh] = useReducer(x => x + 1, 0);
     const [overrides, setOverrides] = useState<Record<string, number>>({});
-    const [lighting, setLighting] = useState<LightingPreset>("basic");
+    const [lighting, setLighting] = useState<LightingPreset>(engine.getLighting());
+    const [quality, setQuality] = useState<Quality>(engine.getQuality());
+    const [framing, setFraming] = useState<Framing>(engine.getFraming());
     const [ttsBusy, setTtsBusy] = useState(false);
 
     useEffect(() => {
@@ -98,11 +100,21 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
                     </section>
 
                     <section>
-                        <div className="text-white/50 mb-1">LIGHTING</div>
-                        <select className="w-full bg-black border border-[#00e5ff]/40 rounded px-1" value={lighting}
-                            onChange={e => { const p = e.target.value as LightingPreset; setLighting(p); engine.setLighting(p); }}>
-                            {LIGHTING_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
-                        </select>
+                        <div className="text-white/50 mb-1">LOOK · QUALITY · FRAMING</div>
+                        <div className="grid grid-cols-3 gap-1">
+                            <select className="bg-black border border-[#00e5ff]/40 rounded px-1" value={lighting}
+                                onChange={e => { const p = e.target.value as LightingPreset; setLighting(p); engine.setLighting(p); }}>
+                                {LIGHTING_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                            <select className="bg-black border border-[#00e5ff]/40 rounded px-1" value={quality}
+                                onChange={e => { const q = e.target.value as Quality; setQuality(q); engine.setQuality(q); }}>
+                                {QUALITIES.map(q => <option key={q} value={q}>{q}</option>)}
+                            </select>
+                            <select className="bg-black border border-[#00e5ff]/40 rounded px-1" value={framing}
+                                onChange={e => { const f = e.target.value as Framing; setFraming(f); engine.setFraming(f); }}>
+                                {FRAMINGS.map(f => <option key={f} value={f}>{f}</option>)}
+                            </select>
+                        </div>
                     </section>
 
                     <section>
