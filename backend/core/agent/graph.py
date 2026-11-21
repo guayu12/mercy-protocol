@@ -434,8 +434,6 @@ async def process_query(
         await session_store.add_utterance(
             thread_id, turn_id, "user", query, interrupted=False
         )
-        yield {"type": "turn", "turn_id": turn_id}
-        yield {"type": "status", "state": "thinking", "label": "正在思考"}
         router = SpeechRouter(turn_id)
         speaking_started = False
         report_id = None
@@ -443,10 +441,27 @@ async def process_query(
         last_tool_end_sentence_count = 0
         reported_show_report_calls = set()
         report_status_pending = 0
+        assistant_utterance_saved = False
 
         def remember(sentence: dict):
             speech_queue.remember_sentence(turn_id, sentence["id"], sentence["text"])
             emitted_sentences.append(sentence["text"])
+
+        async def save_assistant_utterance(interrupted: bool):
+            nonlocal assistant_utterance_saved
+            if assistant_utterance_saved:
+                return
+            assistant_utterance_saved = True
+            save_task = asyncio.create_task(
+                session_store.add_utterance(
+                    thread_id,
+                    turn_id,
+                    "assistant",
+                    "".join(emitted_sentences),
+                    interrupted=interrupted,
+                )
+            )
+            await asyncio.shield(save_task)
 
         def speech_status():
             nonlocal speaking_started
@@ -459,6 +474,8 @@ async def process_query(
                      f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_base64 else ''}")
 
         try:
+            yield {"type": "turn", "turn_id": turn_id}
+            yield {"type": "status", "state": "thinking", "label": "正在思考"}
             async for event in graph.astream_events(
                 {"messages": [build_user_message(query, image_base64)], "context": ""},
                 config=config,
@@ -532,77 +549,75 @@ async def process_query(
                     yield {"type": "tool", "name": event["name"], "status": "end"}
                 elif kind == "on_custom_event" and event.get("name") == "report":
                     yield event["data"]
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            await session_store.add_utterance(
-                thread_id,
-                turn_id,
-                "assistant",
-                "".join(emitted_sentences),
-                interrupted=False,
-            )
-            raise
-
-        state = await graph.aget_state(config)
-        summary = router.finish()
-        for sentence in summary["sentences"]:
-            status = speech_status()
-            if status:
-                yield status
-            remember(sentence)
-            yield {"type": "speech.sentence", "turn_id": turn_id, **sentence}
-
-        if summary["overflow_markdown"]:
-            report = await session_store.create_report(
-                thread_id,
-                query[:20],
-                query,
-                summary["overflow_markdown"],
-            )
-            report_id = report["report_id"]
-            yield {
-                "type": "report.open",
-                "report_id": report_id,
-                "title": report["title"],
-                "query": query,
-            }
-            yield {
-                "type": "report.delta",
-                "report_id": report_id,
-                "markdown": report["markdown"],
-            }
-            yield {"type": "report.done", "report_id": report_id}
-            extra = router.add_sentence(
-                "详细内容我放在屏幕上了。"
-                if not router.spoken_text
-                else "后面的内容我放在屏幕上了。"
-            )
-            if extra:
+            state = await graph.aget_state(config)
+            summary = router.finish()
+            for sentence in summary["sentences"]:
                 status = speech_status()
                 if status:
                     yield status
-                remember(extra)
-                yield {"type": "speech.sentence", "turn_id": turn_id, **extra}
+                remember(sentence)
+                yield {"type": "speech.sentence", "turn_id": turn_id, **sentence}
 
-        spoken_text = router.spoken_text
-        messages = state.values.get("messages", []) if state.values else []
-        if report_id and messages and isinstance(messages[-1], AIMessage):
-            checkpoint_text = "".join(
-                emitted_sentences[last_tool_end_sentence_count:]
-            )
-            checkpoint_text += f"\n[完整内容已作为报告 {report_id} 上屏]"
-            await graph.aupdate_state(
-                config,
-                {
-                    "messages": [
-                        AIMessage(content=checkpoint_text, id=messages[-1].id)
-                    ]
-                },
-            )
-        await session_store.add_utterance(
-            thread_id, turn_id, "assistant", spoken_text, interrupted=False
-        )
-        log_bus.emit("flow", "FLOW", f"◈ reply ready → {len(spoken_text)} spoken chars")
-        yield {"type": "status", "state": "idle", "label": ""}
-        yield {"type": "done", "turn_id": turn_id, "spoken_text": spoken_text}
+            if summary["overflow_markdown"]:
+                report = await session_store.create_report(
+                    thread_id,
+                    query[:20],
+                    query,
+                    summary["overflow_markdown"],
+                )
+                report_id = report["report_id"]
+                yield {
+                    "type": "report.open",
+                    "report_id": report_id,
+                    "title": report["title"],
+                    "query": query,
+                }
+                yield {
+                    "type": "report.delta",
+                    "report_id": report_id,
+                    "markdown": report["markdown"],
+                }
+                yield {"type": "report.done", "report_id": report_id}
+                extra = router.add_sentence(
+                    "详细内容我放在屏幕上了。"
+                    if not router.spoken_text
+                    else "后面的内容我放在屏幕上了。"
+                )
+                if extra:
+                    status = speech_status()
+                    if status:
+                        yield status
+                    remember(extra)
+                    yield {"type": "speech.sentence", "turn_id": turn_id, **extra}
+
+            spoken_text = router.spoken_text
+            messages = state.values.get("messages", []) if state.values else []
+            if report_id and messages and isinstance(messages[-1], AIMessage):
+                checkpoint_text = "".join(
+                    emitted_sentences[last_tool_end_sentence_count:]
+                )
+                checkpoint_text += f"\n[完整内容已作为报告 {report_id} 上屏]"
+                await graph.aupdate_state(
+                    config,
+                    {
+                        "messages": [
+                            AIMessage(content=checkpoint_text, id=messages[-1].id)
+                        ]
+                    },
+                )
+            await save_assistant_utterance(interrupted=False)
+            log_bus.emit("flow", "FLOW", f"◈ reply ready → {len(spoken_text)} spoken chars")
+            yield {"type": "status", "state": "idle", "label": ""}
+            yield {"type": "done", "turn_id": turn_id, "spoken_text": spoken_text}
+        except asyncio.CancelledError:
+            await save_assistant_utterance(interrupted=True)
+            raise
+        except GeneratorExit:
+            await save_assistant_utterance(interrupted=True)
+            raise
+        except Exception:
+            await save_assistant_utterance(interrupted=False)
+            raise
+        finally:
+            if not assistant_utterance_saved:
+                await save_assistant_utterance(interrupted=True)

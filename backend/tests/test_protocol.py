@@ -352,6 +352,38 @@ async def test_stream_failure_persists_sentences_already_emitted(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_disconnect_persists_emitted_sentence_as_interrupted(monkeypatch, tmp_path):
+    connection = await _install_graph(
+        monkeypatch,
+        tmp_path,
+        [AIMessage(content="第一句。第二句")],
+    )
+    try:
+        generator = agent_graph.process_query(
+            "说两句", "protocol-disconnect"
+        )
+        first_sentence = None
+        async for event in generator:
+            if event["type"] == "speech.sentence":
+                first_sentence = event
+                break
+        assert first_sentence is not None
+
+        await generator.aclose()
+
+        assistants = [
+            item
+            for item in await session_store.recent_utterances("protocol-disconnect")
+            if item["role"] == "assistant"
+        ]
+        assert len(assistants) == 1
+        assert assistants[0]["text"] == first_sentence["text"]
+        assert assistants[0]["interrupted"] == 1
+    finally:
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
 async def test_next_turn_rewrites_checkpoint_to_spoken_interruption(
     monkeypatch, tmp_path
 ):
