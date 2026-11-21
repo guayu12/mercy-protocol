@@ -123,6 +123,31 @@ async def test_safe_fetch_validates_redirect_target_before_request():
 
 
 @pytest.mark.asyncio
+async def test_safe_fetch_sets_descriptive_user_agent():
+    user_agents = []
+
+    async def resolver(host, port):
+        return ["8.8.8.8"]
+
+    def handler(request):
+        user_agents.append(request.headers.get("user-agent"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/jpeg", "content-length": "4"},
+            request=request,
+        )
+
+    fetcher = SafeMediaFetcher(
+        resolver=resolver,
+        transport_factory=lambda: httpx.MockTransport(handler),
+    )
+    await fetcher.probe("https://media.test/image.jpg")
+    assert user_agents == [
+        "MercyProtocol/1.0 (+https://github.com/guayu12/mercy-protocol)"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_safe_fetch_connects_to_resolved_ip_and_keeps_tls_hostname():
     class RecordingStream:
         def __init__(self):

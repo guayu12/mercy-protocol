@@ -247,7 +247,13 @@ class SafeMediaFetcher:
                 write=READ_TIMEOUT,
                 pool=CONNECT_TIMEOUT,
             ),
-            headers={"Accept-Encoding": "identity"},
+            headers={
+                "Accept-Encoding": "identity",
+                "User-Agent": (
+                    "MercyProtocol/1.0 "
+                    "(+https://github.com/guayu12/mercy-protocol)"
+                ),
+            },
         )
 
     async def _request(
