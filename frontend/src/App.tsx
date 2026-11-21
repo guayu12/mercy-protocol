@@ -159,6 +159,8 @@ export function App() {
   const speechFetchesRef = useRef(new Map<string, SpeechFetch>());
   const speechFailuresRef = useRef(new Set<string>());
   const currentPlaybackRef = useRef<{ sentence: SpeechSentence; audio: Speech } | null>(null);
+  const speechWatchdogRef = useRef<number | null>(null);
+  const handleAudioEndRef = useRef<() => void>(() => undefined);
   const isPumpingRef = useRef(false);
   const audioEpochRef = useRef(0);
   const highlightTimersRef = useRef(new Map<string, number>());
@@ -228,10 +230,9 @@ export function App() {
 
     const epoch = audioEpochRef.current;
     isPumpingRef.current = true;
+    setSubtitle(sentence.text);
     try {
-      if (speechFailuresRef.current.has(sentence.id)) {
-        setSubtitle(sentence.text);
-      } else {
+      if (!speechFailuresRef.current.has(sentence.id)) {
         const audio = await getSpeechAudio(sentence.id);
         if (epoch !== audioEpochRef.current) return;
         speechCacheRef.current.delete(sentence.id);
@@ -245,6 +246,14 @@ export function App() {
         setIsAudioPlaying(true);
         setHasQueuedSpeech(true);
         setSpeech(audio);
+        const lastVisemeEnd = audio.visemes.reduce(
+          (latestEnd, cue) => Math.max(latestEnd, cue.end),
+          0,
+        );
+        speechWatchdogRef.current = window.setTimeout(() => {
+          speechWatchdogRef.current = null;
+          handleAudioEndRef.current();
+        }, (Math.max(lastVisemeEnd, 0.5) + 3) * 1000);
       }
     } catch (error) {
       if (!isAbortError(error)) setSubtitle(sentence.text);
@@ -278,8 +287,13 @@ export function App() {
   );
 
   const handleAudioEnd = useCallback(() => {
+    if (speechWatchdogRef.current !== null) {
+      window.clearTimeout(speechWatchdogRef.current);
+      speechWatchdogRef.current = null;
+    }
     const playback = currentPlaybackRef.current;
-    if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+    if (!playback) return;
+    URL.revokeObjectURL(playback.audio.audioUrl);
     currentPlaybackRef.current = null;
     setSpeech(null);
     setIsAudioPlaying(false);
@@ -291,6 +305,10 @@ export function App() {
       if (!requestControllerRef.current) activeTurnIdRef.current = null;
     }
   }, [pumpSpeechQueue]);
+
+  useEffect(() => {
+    handleAudioEndRef.current = handleAudioEnd;
+  }, [handleAudioEnd]);
 
   const interruptActiveTurn = useCallback(() => {
     const turnId = activeTurnIdRef.current;
@@ -323,6 +341,10 @@ export function App() {
     speechCacheRef.current.clear();
     speechFailuresRef.current.clear();
     speechQueueRef.current = [];
+    if (speechWatchdogRef.current !== null) {
+      window.clearTimeout(speechWatchdogRef.current);
+      speechWatchdogRef.current = null;
+    }
     const playback = currentPlaybackRef.current;
     if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
     currentPlaybackRef.current = null;
@@ -502,6 +524,10 @@ export function App() {
       for (const audio of speechCacheRef.current.values()) URL.revokeObjectURL(audio.audioUrl);
       const playback = currentPlaybackRef.current;
       if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+      if (speechWatchdogRef.current !== null) {
+        window.clearTimeout(speechWatchdogRef.current);
+        speechWatchdogRef.current = null;
+      }
       for (const timer of highlightTimersRef.current.values()) window.clearTimeout(timer);
     },
     [],
