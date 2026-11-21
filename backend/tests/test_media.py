@@ -1,3 +1,6 @@
+import asyncio
+from pathlib import Path
+
 import httpcore
 import httpx
 import pytest
@@ -305,3 +308,45 @@ async def test_report_media_rewrite_and_prompt_omit_urls(tmp_path, monkeypatch):
     assert "https://" not in captured["prompt"]
     await media_store.close_store()
     await session_store.close_store()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_remote_image_caches_serialize_eviction(tmp_path):
+    await media_store.init_store(str(tmp_path / "session.db"))
+    old = await media_store.register_media(
+        "cache-test", "image", "search", "image/jpeg", "old",
+        url="https://media.test/old.jpg",
+    )
+    first = await media_store.register_media(
+        "cache-test", "image", "search", "image/jpeg", "first",
+        url="https://media.test/first.jpg",
+    )
+    second = await media_store.register_media(
+        "cache-test", "image", "search", "image/jpeg", "second",
+        url="https://media.test/second.jpg",
+    )
+    old_path = media_store.cache_directory() / old["media_id"]
+    old_path.write_bytes(b"o" * 9)
+    await media_store.set_cached_path(old["media_id"], str(old_path), 9)
+
+    download_count = 0
+    both_downloading = asyncio.Event()
+
+    class Fetcher:
+        async def download_to_file(self, url, destination, max_bytes):
+            nonlocal download_count
+            download_count += 1
+            if download_count == 2:
+                both_downloading.set()
+            await both_downloading.wait()
+            Path(destination).write_bytes(b"n" * 4)
+            return {"content_type": "image/jpeg"}
+
+    try:
+        records = await asyncio.gather(
+            media_store.cache_remote_image(first["media_id"], Fetcher(), 10),
+            media_store.cache_remote_image(second["media_id"], Fetcher(), 10),
+        )
+        assert all(Path(record["path"]).is_file() for record in records)
+    finally:
+        await media_store.close_store()
