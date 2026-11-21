@@ -311,7 +311,10 @@ async def test_report_media_rewrite_and_prompt_omit_urls(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_remote_image_caches_serialize_eviction(tmp_path):
+async def test_concurrent_remote_image_caches_serialize_eviction(tmp_path, monkeypatch):
+    monkeypatch.setattr(media_store, "_store_lock", asyncio.Lock())
+    monkeypatch.setattr(media_store, "_cache_eviction_lock", asyncio.Lock())
+    monkeypatch.setattr(media_store, "_cache_locks", {})
     await media_store.init_store(str(tmp_path / "session.db"))
     old = await media_store.register_media(
         "cache-test", "image", "search", "image/jpeg", "old",
