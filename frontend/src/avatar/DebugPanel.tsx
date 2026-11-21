@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AVATAR_STATES, LIGHTING_PRESETS, type AvatarEngine, type AvatarState, type LightingPreset } from "./AvatarEngine";
 import { syntheticVisemes } from "./lipsync";
@@ -28,6 +28,15 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
         });
     };
 
+    const ttsUrl = useRef<string | null>(null);
+    const releaseTts = () => {
+        if (ttsUrl.current) URL.revokeObjectURL(ttsUrl.current);
+        ttsUrl.current = null;
+    };
+    useEffect(() => releaseTts, []);
+
+    const stop = () => { engine.stopSpeech(); releaseTts(); engine.setState("idle"); };
+
     const playTts = async () => {
         setTtsBusy(true);
         try {
@@ -38,9 +47,11 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
             });
             const { audio, mime, visemes } = await res.json();
             const bytes = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
+            releaseTts();
             const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+            ttsUrl.current = url;
             engine.setState("speaking");
-            engine.speak(url, visemes, () => { URL.revokeObjectURL(url); engine.setState("idle"); });
+            engine.speak(url, visemes, () => { releaseTts(); engine.setState("idle"); });
         } catch (e) {
             console.warn("[Debug] TTS failed:", e);
         } finally {
@@ -82,7 +93,7 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
                                 engine.speakSilent(cues, duration, () => engine.setState("idle"));
                             }}>vowels (no TTS)</button>
                             <button className={btn} disabled={ttsBusy} onClick={playTts}>{ttsBusy ? "…" : "TTS sentence"}</button>
-                            <button className={btn} onClick={() => { engine.stopSpeech(); engine.setState("idle"); }}>stop</button>
+                            <button className={btn} onClick={stop}>stop</button>
                         </div>
                     </section>
 
