@@ -555,3 +555,98 @@ async def test_interruption_rewrites_only_the_last_spoken_tool_segment(
         assert assistant["interrupted"] == 1
     finally:
         await _close_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_tool_start_advances_interruption_segment_before_tool_finishes(
+    monkeypatch, tmp_path
+):
+    report_call = {
+        "name": "show_report",
+        "args": {"title": "摘要", "markdown": "第一条\n第二条"},
+        "id": "slow_report",
+        "type": "tool_call",
+    }
+    connection = await _install_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            AIMessage(content="我先整理一下。", tool_calls=[report_call]),
+            AIMessage(content="报告已经整理好了。"),
+        ],
+    )
+    original_create_report = session_store.create_report
+    report_started = asyncio.Event()
+
+    async def slow_create_report(*args, **kwargs):
+        report_started.set()
+        await asyncio.sleep(5)
+        return await original_create_report(*args, **kwargs)
+
+    monkeypatch.setattr(session_store, "create_report", slow_create_report)
+    thread_id = "protocol-tool-start-disconnect"
+    generator = agent_graph.process_query("做个摘要", thread_id)
+    first_sentence = None
+    turn_id = None
+    try:
+        async for event in generator:
+            if event["type"] == "turn":
+                turn_id = event["turn_id"]
+            elif event["type"] == "speech.sentence":
+                first_sentence = event
+            elif (
+                event["type"] == "tool"
+                and event["name"] == "show_report"
+                and event["status"] == "start"
+            ):
+                await asyncio.wait_for(report_started.wait(), timeout=1)
+                break
+
+        assert first_sentence is not None
+        await generator.aclose()
+
+        interruption = agent_graph.process_query(
+            "刚才说到哪？",
+            thread_id,
+            interrupted={
+                "turn_id": turn_id,
+                "spoken_sentence_ids": [first_sentence["id"]],
+            },
+        )
+        assert (await anext(interruption))["type"] == "turn"
+        await interruption.aclose()
+
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        last_ai_message = next(
+            message
+            for message in reversed(state.values["messages"])
+            if isinstance(message, AIMessage)
+        )
+        assert last_ai_message.content == "（还没开口就被用户打断了）"
+    finally:
+        await generator.aclose()
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_disconnect_before_speech_does_not_persist_empty_assistant(
+    monkeypatch, tmp_path
+):
+    connection = await _install_graph(
+        monkeypatch, tmp_path, [AIMessage(content="稍后再说。")]
+    )
+    generator = agent_graph.process_query(
+        "稍后", "protocol-empty-disconnect"
+    )
+    try:
+        assert (await anext(generator))["type"] == "turn"
+        await generator.aclose()
+        utterances = await session_store.recent_utterances(
+            "protocol-empty-disconnect"
+        )
+        assert not any(item["role"] == "assistant" for item in utterances)
+    finally:
+        await generator.aclose()
+        await _close_graph(connection)

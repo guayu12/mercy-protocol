@@ -547,6 +547,8 @@ async def process_query(
                             "turn_id": turn_id,
                             **sentence,
                         }
+                    segment_index += 1
+                    speech_queue.advance_turn_segment(turn_id)
                     speaking_started = False
                     log_bus.emit("tool", "TOOL", f"► {event['name']}({str(event['data'].get('input', ''))[:80]})")
                     labels = {
@@ -568,8 +570,6 @@ async def process_query(
                     output = getattr(output, "content", output)
                     log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
                     last_tool_end_sentence_count = len(emitted_sentences)
-                    segment_index += 1
-                    speech_queue.advance_turn_segment(turn_id)
                     yield {"type": "tool", "name": event["name"], "status": "end"}
                 elif kind == "on_custom_event" and event.get("name") == "report":
                     yield event["data"]
