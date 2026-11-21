@@ -205,6 +205,55 @@ async def test_upload_sniffing_and_overflow_cleanup(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upload_and_stage_delete_enforce_origin_allowlist(tmp_path, monkeypatch):
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+    await media_store.init_store(str(tmp_path / "session.db"))
+    transport = httpx.ASGITransport(app=main.app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            rejected_upload = await client.post(
+                "/api/upload",
+                headers={"Origin": "https://evil.example"},
+                data={"thread_id": "origin-test"},
+                files={"file": ("ok.jpg", b"\xff\xd8\xffdata", "image/jpeg")},
+            )
+            allowed_upload = await client.post(
+                "/api/upload",
+                headers={"Origin": "http://localhost:1420"},
+                data={"thread_id": "origin-test"},
+                files={"file": ("ok.jpg", b"\xff\xd8\xffdata", "image/jpeg")},
+            )
+            assert rejected_upload.status_code == 403
+            assert allowed_upload.status_code == 200
+
+            media_id = allowed_upload.json()["media_id"]
+            item = {
+                "media_id": media_id,
+                "kind": "image",
+                "mime": "image/jpeg",
+                "src": f"/api/media/{media_id}",
+                "caption": "ok.jpg",
+            }
+            await media_store.set_stage("origin-test", [item], "展示图片", "normal")
+            rejected_delete = await client.delete(
+                "/api/session/origin-test/stage",
+                headers={"Origin": "https://evil.example"},
+            )
+            assert rejected_delete.status_code == 403
+            assert await media_store.get_stage("origin-test") is not None
+
+            monkeypatch.setenv("ALLOWED_ORIGINS", "https://override.example")
+            override_delete = await client.delete(
+                "/api/session/origin-test/stage",
+                headers={"Origin": "https://override.example"},
+            )
+            assert override_delete.status_code == 204
+            assert await media_store.get_stage("origin-test") is None
+    finally:
+        await media_store.close_store()
+
+
+@pytest.mark.asyncio
 async def test_uploaded_media_supports_range_and_nosniff(tmp_path):
     await media_store.init_store(str(tmp_path / "session.db"))
     transport = httpx.ASGITransport(app=main.app)

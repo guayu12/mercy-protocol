@@ -47,6 +47,13 @@ DEFAULT_CORS_ORIGINS = [
     "http://tauri.localhost",  # Tauri v2 on Windows (Surface)
     "https://tauri.localhost",
 ]
+DEFAULT_MEDIA_MUTATION_ORIGINS = {
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+}
 _cors_env = os.environ.get("CORS_ORIGINS")
 
 app.add_middleware(
@@ -78,6 +85,20 @@ class ChatRequest(BaseModel):
     attachments: list[str] = Field(default_factory=list)
     screen_state: Optional[ScreenState] = None
     interrupted: Optional[Interrupted] = None
+
+
+def _require_allowed_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if origin is None:
+        return
+    configured = os.environ.get("ALLOWED_ORIGINS")
+    allowed = (
+        {value.strip() for value in configured.split(",") if value.strip()}
+        if configured is not None
+        else DEFAULT_MEDIA_MUTATION_ORIGINS
+    )
+    if origin not in allowed:
+        raise HTTPException(status_code=403, detail="Origin not allowed")
 
 
 @app.get("/")
@@ -190,7 +211,10 @@ async def _register_message_links(thread_id: str, message: str) -> None:
 
 
 @app.post("/api/upload")
-async def upload_media(thread_id: str = Form(...), file: UploadFile = File(...)):
+async def upload_media(
+    request: Request, thread_id: str = Form(...), file: UploadFile = File(...)
+):
+    _require_allowed_origin(request)
     try:
         record = await media_store.register_upload(thread_id, file)
     except media_store.UnsupportedUpload as error:
@@ -334,7 +358,8 @@ async def session_endpoint(thread_id: str):
 
 
 @app.delete("/api/session/{thread_id}/stage", status_code=204)
-async def delete_session_stage(thread_id: str):
+async def delete_session_stage(thread_id: str, request: Request):
+    _require_allowed_origin(request)
     await media_store.clear_stage(thread_id)
     return Response(status_code=204)
 
