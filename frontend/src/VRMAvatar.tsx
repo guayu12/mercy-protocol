@@ -36,6 +36,8 @@ export const VRMAvatar = forwardRef<VRMAvatarHandle, VRMAvatarProps>(function VR
 ) {
     const [error, setError] = useState<string | null>(null);
     const [engine, setEngine] = useState<AvatarEngine | null>(null);
+    // Read by the imperative handle so gesture() works inside onLoaded, before the re-render.
+    const engineRef = useRef<AvatarEngine | null>(null);
     const [showDebug, setShowDebug] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -62,18 +64,19 @@ export const VRMAvatar = forwardRef<VRMAvatarHandle, VRMAvatarProps>(function VR
         let disposed = false;
         eng.load(MODEL_URL).then(() => {
             if (disposed) return;
+            engineRef.current = eng;
             setEngine(eng);
             onLoadedRef.current?.();
         }).catch(err => {
             console.error("[VRM] Load failed:", err);
             if (!disposed) { setError(String(err?.message || err)); onLoadedRef.current?.(); }
         });
-        return () => { disposed = true; setEngine(null); eng.dispose(); };
+        return () => { disposed = true; engineRef.current = null; setEngine(null); eng.dispose(); };
     }, []);
 
     useEffect(() => { engine?.setState(state); }, [engine, state]);
     useEffect(() => { engine?.setEmotion(emotion); }, [engine, emotion]);
-    useImperativeHandle(ref, () => ({ gesture: name => engine?.gesture(name) }), [engine]);
+    useImperativeHandle(ref, () => ({ gesture: name => engineRef.current?.gesture(name) }), []);
 
     useEffect(() => {
         if (!speech) return;
