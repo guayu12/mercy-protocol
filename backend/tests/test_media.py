@@ -182,6 +182,29 @@ async def test_safe_fetch_connects_to_resolved_ip_and_keeps_tls_hostname():
     assert backend.stream.server_hostname == "media.test"
 
 
+def test_mp4_sniffing_checks_major_and_compatible_brands():
+    def ftyp(major, *compatible):
+        return (
+            b"\x00\x00\x00\x18ftyp"
+            + major
+            + b"\x00\x00\x00\x00"
+            + b"".join(compatible)
+        )
+
+    assert media_store.sniff_media(ftyp(b"isom")) == ("video", "video/mp4")
+    assert media_store.sniff_media(ftyp(b"free", b"mp42")) == (
+        "video",
+        "video/mp4",
+    )
+    for rejected in (
+        ftyp(b"heic", b"mif1"),
+        ftyp(b"heix", b"hevc"),
+        ftyp(b"avif", b"avis"),
+        ftyp(b"qt  "),
+    ):
+        assert media_store.sniff_media(rejected) is None
+
+
 @pytest.mark.asyncio
 async def test_upload_sniffing_and_overflow_cleanup(tmp_path, monkeypatch):
     await media_store.init_store(str(tmp_path / "session.db"))

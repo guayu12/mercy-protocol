@@ -17,6 +17,18 @@ _cache_eviction_lock = asyncio.Lock()
 
 IMAGE_LIMIT = 20 * 1024 * 1024
 VIDEO_LIMIT = 200 * 1024 * 1024
+MP4_BRANDS = {
+    b"isom",
+    b"iso2",
+    b"iso4",
+    b"iso5",
+    b"iso6",
+    b"mp41",
+    b"mp42",
+    b"avc1",
+    b"dash",
+    b"M4V ",
+}
 
 
 class UnsupportedUpload(Exception):
@@ -55,8 +67,14 @@ def sniff_media(header: bytes) -> tuple[str, str] | None:
         return "image", "image/gif"
     if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
         return "image", "image/webp"
-    if len(header) >= 8 and header[4:8] == b"ftyp":
-        return "video", "video/mp4"
+    if len(header) >= 16 and header[4:8] == b"ftyp":
+        brands = {header[8:12]}
+        brands.update(
+            header[index:index + 4]
+            for index in range(16, len(header) - 3, 4)
+        )
+        if brands & MP4_BRANDS:
+            return "video", "video/mp4"
     if header.startswith(b"\x1a\x45\xdf\xa3"):
         return "video", "video/webm"
     return None
@@ -179,7 +197,7 @@ async def register_media(
 
 
 async def register_upload(thread_id: str, upload) -> dict:
-    header = await upload.read(16)
+    header = await upload.read(16 + 128)
     detected = sniff_media(header)
     if detected is None:
         raise UnsupportedUpload("Unsupported media format")
