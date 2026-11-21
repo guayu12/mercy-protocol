@@ -10,3 +10,11 @@ opaque RGB textures are JPEG q92, the rest are re-optimized PNG. Geometry, mater
 
 To use your own character, export a VRM (e.g. from [VRoid Studio](https://vroid.com/en/studio)) and replace `avatar.vrm`.
 VRM 0.x and 1.0 files both work.
+
+# motions/
+
+| File | Source | License |
+|---|---|---|
+| `motions/idle_loop.vrma` | [pixiv/ChatVRM](https://github.com/pixiv/ChatVRM) `public/idle_loop.vrma` (archived repo) | [MIT](https://github.com/pixiv/ChatVRM/blob/main/LICENSE), (c) pixiv Inc. |
+
+Gestures `greet` / `think` are keyframed in code (`src/avatar/motion.ts`); `nod` / `shake` are procedural. No other motion assets are shipped.

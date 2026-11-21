@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AVATAR_STATES, FRAMINGS, LIGHTING_PRESETS, QUALITIES, type AvatarEngine, type AvatarState, type Framing, type LightingPreset, type Quality } from "./AvatarEngine";
+import { AVATAR_STATES, EMOTIONS, FRAMINGS, GESTURES, LIGHTING_PRESETS, QUALITIES, type AvatarEngine, type AvatarState, type Emotion, type Framing, type LightingPreset, type Quality } from "./AvatarEngine";
 import { syntheticVisemes } from "./lipsync";
 
 const API_BASE = "http://127.0.0.1:8000";
@@ -12,6 +12,8 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
     const [, refresh] = useReducer(x => x + 1, 0);
     const [overrides, setOverrides] = useState<Record<string, number>>({});
     const [lighting, setLighting] = useState<LightingPreset>(engine.getLighting());
+    const [emotion, setEmotion] = useState<Emotion>(engine.getEmotion());
+    const [emotionWeight, setEmotionWeight] = useState(engine.emotionWeight);
     const [quality, setQuality] = useState<Quality>(engine.getQuality());
     const [framing, setFraming] = useState<Framing>(engine.getFraming());
     const [ttsBusy, setTtsBusy] = useState(false);
@@ -96,6 +98,26 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
                             }}>vowels (no TTS)</button>
                             <button className={btn} disabled={ttsBusy} onClick={playTts}>{ttsBusy ? "…" : "TTS sentence"}</button>
                             <button className={btn} onClick={stop}>stop</button>
+                        </div>
+                    </section>
+
+                    <section>
+                        <div className="text-white/50 mb-1">EMOTION · motion: {engine.motionSource}</div>
+                        <div className="flex flex-wrap gap-1">
+                            {EMOTIONS.map(e => (
+                                <button key={e} className={`${btn} ${emotion === e ? active : ""}`}
+                                    onClick={() => { setEmotion(e); engine.setEmotion(e); }}>{e}</button>
+                            ))}
+                        </div>
+                        <label className="flex items-center gap-1 mt-1">
+                            <span className="w-14">weight</span>
+                            <input type="range" min={0} max={1} step={0.05} value={emotionWeight} className="flex-1"
+                                onChange={e => { const w = +e.target.value; setEmotionWeight(w); engine.emotionWeight = w; }} />
+                            <span className="w-8 text-right">{emotionWeight.toFixed(2)}</span>
+                        </label>
+                        <div className="text-white/50 mt-2 mb-1">GESTURE</div>
+                        <div className="flex flex-wrap gap-1">
+                            {GESTURES.map(g => <button key={g} className={btn} onClick={() => engine.gesture(g)}>{g}</button>)}
                         </div>
                     </section>
 

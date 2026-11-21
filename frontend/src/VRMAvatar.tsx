@@ -1,25 +1,39 @@
-import { useEffect, useRef, useState } from "react";
-import { AvatarEngine, type AvatarState } from "./avatar/AvatarEngine";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { AvatarEngine, type AvatarState, type Emotion, type Gesture } from "./avatar/AvatarEngine";
 import { DebugPanel } from "./avatar/DebugPanel";
 import type { VisemeCue } from "./avatar/lipsync";
 
 export type { Viseme, VisemeCue } from "./avatar/lipsync";
-export type { AvatarState } from "./avatar/AvatarEngine";
+export type { AvatarState, Emotion, Gesture } from "./avatar/AvatarEngine";
 
 // See public/vrm/LICENSE.md for the model's licence
 const MODEL_URL = "/vrm/avatar.vrm";
 const DEBUG_ENABLED = import.meta.env.DEV || new URLSearchParams(location.search).has("debug");
 
-export interface Speech { audioUrl: string; visemes: VisemeCue[] }
+export interface Speech {
+    audioUrl: string;
+    visemes: VisemeCue[];
+    /** Emotion for this sentence; falls back to the `emotion` prop. */
+    emotion?: Emotion;
+}
+
+export interface VRMAvatarHandle {
+    /** One-shot gesture; ignored until the model has loaded. */
+    gesture(name: Gesture): void;
+}
 
 interface VRMAvatarProps {
     onLoaded?: () => void;
     speech?: Speech | null;
     onAudioEnd?: () => void;
     state?: AvatarState;
+    /** Base emotion when not speaking (and while speaking if the sentence has none). Default neutral. */
+    emotion?: Emotion;
 }
 
-export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMAvatarProps) {
+export const VRMAvatar = forwardRef<VRMAvatarHandle, VRMAvatarProps>(function VRMAvatar(
+    { onLoaded, speech, onAudioEnd, state = "idle", emotion = "neutral" }, ref,
+) {
     const [error, setError] = useState<string | null>(null);
     const [engine, setEngine] = useState<AvatarEngine | null>(null);
     const [showDebug, setShowDebug] = useState(false);
@@ -58,11 +72,13 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
     }, []);
 
     useEffect(() => { engine?.setState(state); }, [engine, state]);
+    useEffect(() => { engine?.setEmotion(emotion); }, [engine, emotion]);
+    useImperativeHandle(ref, () => ({ gesture: name => engine?.gesture(name) }), [engine]);
 
     useEffect(() => {
         if (!speech) return;
         if (engine) {
-            engine.speak(speech.audioUrl, speech.visemes, () => onAudioEndRef.current?.());
+            engine.speak(speech.audioUrl, speech.visemes, () => onAudioEndRef.current?.(), speech.emotion);
             return () => engine.stopSpeech();
         }
         if (!error) return;
@@ -88,4 +104,4 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
             )}
         </div>
     );
-}
+});
