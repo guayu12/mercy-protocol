@@ -7,6 +7,7 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { VRM, VRMLoaderPlugin, VRMUtils, type VRMHumanBoneName } from "@pixiv/three-vrm";
 import { VISEMES, visemeTargets, type Viseme, type VisemeCue } from "./lipsync";
 import { LOOKS, applyMToonLook, createBackdrop, type LightingPreset } from "./look";
+import { VRMLookAtQuaternionProxy } from "@pixiv/three-vrm-animation";
 import {
     EMOTION_EXPRESSIONS, EMOTION_KEYS, EMOTION_POSES, gestureClips, loadVRMAClip,
     type Emotion, type EmotionKey, type Gesture,
@@ -152,6 +153,11 @@ export class AvatarEngine {
         for (const name of EMOTION_KEYS) {
             const ex = vrm.expressionManager?.getExpression(name);
             if (ex) ex.overrideMouth = "none";
+        }
+        if (vrm.lookAt) {
+            const proxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
+            proxy.name = "VRMLookAtQuaternionProxy";
+            vrm.scene.add(proxy);
         }
         this.mixer = new THREE.AnimationMixer(vrm.scene);
         this.clips = gestureClips(vrm, this.axis);

@@ -74,18 +74,18 @@ const ARMS_REST: Key[1] = {
 };
 
 export function gestureClips(vrm: VRM, axis: number): Partial<Record<Gesture, THREE.AnimationClip>> {
-    const greetUp: Key[1] = { rightUpperArm: [0, 0.3, 0.45], rightLowerArm: [0, 0.3, -2.0] };
+    const greetUp: Key[1] = { rightUpperArm: [0, 0.9, 0.95], rightLowerArm: [0, 0.2, -2.3] };
     const greet = keyClip(vrm, "greet", [
         [0, ARMS_REST],
         [0.35, { ...ARMS_REST, ...greetUp }],
-        [0.6, { rightLowerArm: [0, 0.3, -1.7] }],
-        [0.85, { rightLowerArm: [0, 0.3, -2.2] }],
-        [1.1, { rightLowerArm: [0, 0.3, -1.7] }],
-        [1.35, { rightLowerArm: [0, 0.3, -2.2] }],
+        [0.6, { rightLowerArm: [0, 0.2, -2.0] }],
+        [0.85, { rightLowerArm: [0, 0.2, -2.55] }],
+        [1.1, { rightLowerArm: [0, 0.2, -2.0] }],
+        [1.35, { rightLowerArm: [0, 0.2, -2.55] }],
         [1.6, { ...ARMS_REST, ...greetUp }],
         [2.1, ARMS_REST],
     ], axis);
-    const chin: Key[1] = { rightUpperArm: [0, 0.6, 1.35], rightLowerArm: [0, 2.3, 0], rightHand: [0, 0, -0.3] };
+    const chin: Key[1] = { rightUpperArm: [0, 0.9, 1.25], rightLowerArm: [0, 2.5, 0], rightHand: [0, 0, -0.3] };
     const think = keyClip(vrm, "think", [
         [0, { ...ARMS_REST, rightHand: [0, 0, 0] }],
         [0.5, { ...ARMS_REST, ...chin }],
