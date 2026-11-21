@@ -21,6 +21,14 @@ def test_to_speakable_removes_markdown_and_keeps_text():
     assert to_speakable("中 English 123 😀 继续") == "中 English 123 继续"
 
 
+def test_to_speakable_requires_matching_fence_character_and_length():
+    assert to_speakable("```markdown\n~~~\nexample\n```\n后面这句要念") == "后面这句要念"
+    assert (
+        to_speakable("````\nexample\n```\nstill code\n`````\n后面这句要念")
+        == "后面这句要念"
+    )
+
+
 def test_speech_router_splits_punctuation_across_token_boundaries():
     router = SpeechRouter("t_test")
     sentences = _collect(router, "你好。世界！你呢？")

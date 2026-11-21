@@ -5,7 +5,9 @@ import unicodedata
 
 
 _FENCED_CODE = re.compile(
-    r"(?ms)^[ \t]*(?:```|~~~)[^\n]*(?:\n|$).*?(?:^[ \t]*(?:```|~~~)[ \t]*(?:\n|$)|\Z)"
+    r"(?ms)^[ \t]*(?P<fence_run>(?P<fence_char>`|~)(?P=fence_char){2,})"
+    r"[^\n]*(?:\n|$).*?"
+    r"(?:^[ \t]*(?P=fence_run)(?P=fence_char)*[ \t]*(?:\n|$)|\Z)"
 )
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
