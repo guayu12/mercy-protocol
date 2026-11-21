@@ -21,6 +21,7 @@ import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
 import { Stage, type MediaStageData, type StageItem } from "./Stage";
 import { API_BASE } from "./api";
+import { isMediaRef, mediaUrl } from "./mediaHelpers.js";
 import "./App.css";
 
 const ASSISTANT_NAME = "Aura";
@@ -81,7 +82,7 @@ type ChatEvent =
 type BackendState = "idle" | "thinking" | "working";
 
 const markdownUrlTransform: UrlTransform = (url) =>
-  /^media:m_[A-Za-z0-9_-]+$/.test(url) ? url : defaultUrlTransform(url);
+  isMediaRef(url) ? url : defaultUrlTransform(url);
 
 const markdownComponents: Components = {
   a: ({ children, href }) => (
@@ -90,10 +91,10 @@ const markdownComponents: Components = {
     </a>
   ),
   img: ({ alt, src }) =>
-    src?.startsWith("media:m_") ? (
+    isMediaRef(src ?? "") ? (
       <img
         className="report-media-image"
-        src={`${API_BASE}/api/media/${src.slice("media:".length)}`}
+        src={mediaUrl(src.slice("media:".length))}
         alt={alt || ""}
         loading="lazy"
       />
