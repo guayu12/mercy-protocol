@@ -85,7 +85,7 @@ flowchart LR
     LG <--> TAV
     LG -- "Structured Events" --> BUS
     BUS -- "GET /api/logs (SSE)" --> SSE_C
-    UI -- "GET /api/tts?text=..." --> TTS
+    UI -- "POST /api/speech" --> TTS
     TTS -- "audio + viseme track (JSON)" --> L2D
 ```
 
