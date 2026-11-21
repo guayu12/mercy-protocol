@@ -272,8 +272,7 @@ async def test_upload_rejects_excessive_content_length_before_parsing():
 
 
 @pytest.mark.asyncio
-async def test_upload_and_stage_delete_enforce_origin_allowlist(tmp_path, monkeypatch):
-    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+async def test_upload_and_stage_delete_enforce_cors_origin_list(tmp_path):
     await media_store.init_store(str(tmp_path / "session.db"))
     transport = httpx.ASGITransport(app=main.app)
     try:
@@ -286,12 +285,22 @@ async def test_upload_and_stage_delete_enforce_origin_allowlist(tmp_path, monkey
             )
             allowed_upload = await client.post(
                 "/api/upload",
-                headers={"Origin": "http://localhost:1420"},
+                headers={"Origin": "http://localhost:5173"},
+                data={"thread_id": "origin-test"},
+                files={"file": ("ok.jpg", b"\xff\xd8\xffdata", "image/jpeg")},
+            )
+            missing_origin_upload = await client.post(
+                "/api/upload",
                 data={"thread_id": "origin-test"},
                 files={"file": ("ok.jpg", b"\xff\xd8\xffdata", "image/jpeg")},
             )
             assert rejected_upload.status_code == 403
             assert allowed_upload.status_code == 200
+            assert (
+                allowed_upload.headers["access-control-allow-origin"]
+                == "http://localhost:5173"
+            )
+            assert missing_origin_upload.status_code == 200
 
             media_id = allowed_upload.json()["media_id"]
             item = {
@@ -309,13 +318,69 @@ async def test_upload_and_stage_delete_enforce_origin_allowlist(tmp_path, monkey
             assert rejected_delete.status_code == 403
             assert await media_store.get_stage("origin-test") is not None
 
-            monkeypatch.setenv("ALLOWED_ORIGINS", "https://override.example")
-            override_delete = await client.delete(
+            allowed_delete = await client.delete(
                 "/api/session/origin-test/stage",
-                headers={"Origin": "https://override.example"},
+                headers={"Origin": "http://127.0.0.1:5173"},
             )
-            assert override_delete.status_code == 204
+            assert allowed_delete.status_code == 204
+            assert (
+                allowed_delete.headers["access-control-allow-origin"]
+                == "http://127.0.0.1:5173"
+            )
+
+            await media_store.set_stage("origin-test", [item], "展示图片", "normal")
+            missing_origin_delete = await client.delete("/api/session/origin-test/stage")
+            assert missing_origin_delete.status_code == 204
             assert await media_store.get_stage("origin-test") is None
+    finally:
+        await media_store.close_store()
+
+
+def test_default_cors_origins_include_tauri_clients():
+    assert {
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    }.issubset(main.DEFAULT_CORS_ORIGINS)
+
+
+@pytest.mark.asyncio
+async def test_custom_cors_origin_controls_upload(tmp_path, monkeypatch):
+    custom_origin = "http://example.test:3000"
+    monkeypatch.setenv("CORS_ORIGINS", custom_origin)
+    origins = main._effective_cors_origins()
+    assert origins == [custom_origin]
+    monkeypatch.setattr(main, "CORS_ORIGINS", origins)
+
+    custom_app = main.FastAPI()
+    custom_app.add_middleware(
+        main.CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type", "Range"],
+    )
+    custom_app.add_api_route("/api/upload", main.upload_media, methods=["POST"])
+    await media_store.init_store(str(tmp_path / "session.db"))
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=custom_app), base_url="http://test"
+        ) as client:
+            allowed = await client.post(
+                "/api/upload",
+                headers={"Origin": custom_origin},
+                data={"thread_id": "custom-origin-test"},
+                files={"file": ("ok.jpg", b"\xff\xd8\xffdata", "image/jpeg")},
+            )
+            rejected = await client.post(
+                "/api/upload",
+                headers={"Origin": "http://foreign.test:3000"},
+                data={"thread_id": "custom-origin-test"},
+                files={"file": ("ok.jpg", b"\xff\xd8\xffdata", "image/jpeg")},
+            )
+        assert allowed.status_code == 200
+        assert allowed.headers["access-control-allow-origin"] == custom_origin
+        assert rejected.status_code == 403
     finally:
         await media_store.close_store()
 

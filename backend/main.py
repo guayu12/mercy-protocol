@@ -65,18 +65,20 @@ DEFAULT_CORS_ORIGINS = [
     "http://tauri.localhost",  # Tauri v2 on Windows (Surface)
     "https://tauri.localhost",
 ]
-DEFAULT_MEDIA_MUTATION_ORIGINS = {
-    "http://localhost:1420",
-    "http://127.0.0.1:1420",
-    "tauri://localhost",
-    "http://tauri.localhost",
-    "https://tauri.localhost",
-}
-_cors_env = os.environ.get("CORS_ORIGINS")
+
+
+def _effective_cors_origins() -> list[str]:
+    configured = os.environ.get("CORS_ORIGINS")
+    if not configured:
+        return DEFAULT_CORS_ORIGINS
+    return [origin.strip() for origin in configured.split(",") if origin.strip()]
+
+
+CORS_ORIGINS = _effective_cors_origins()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else DEFAULT_CORS_ORIGINS,
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Range"],
@@ -109,13 +111,7 @@ def _require_allowed_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     if origin is None:
         return
-    configured = os.environ.get("ALLOWED_ORIGINS")
-    allowed = (
-        {value.strip() for value in configured.split(",") if value.strip()}
-        if configured is not None
-        else DEFAULT_MEDIA_MUTATION_ORIGINS
-    )
-    if origin not in allowed:
+    if origin not in CORS_ORIGINS:
         raise HTTPException(status_code=403, detail="Origin not allowed")
 
 
