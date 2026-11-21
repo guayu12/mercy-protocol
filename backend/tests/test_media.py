@@ -8,7 +8,12 @@ from langchain_core.messages import HumanMessage
 
 from core import media_store, session_store
 from core.agent import graph
-from core.safe_fetch import SafeMediaFetcher, UnsafeAddress, ValidatingNetworkBackend
+from core.safe_fetch import (
+    SafeHTTPXTransport,
+    SafeMediaFetcher,
+    UnsafeAddress,
+    ValidatingNetworkBackend,
+)
 import main
 
 
@@ -41,6 +46,54 @@ async def test_safe_fetch_rejects_mixed_public_and_private_dns():
 
     with pytest.raises(UnsafeAddress):
         await ValidatingNetworkBackend(resolver=resolver).connect_tcp("media.test", 443)
+
+
+@pytest.mark.asyncio
+async def test_safe_fetch_maps_httpcore_errors_and_media_endpoint_returns_502(
+    tmp_path, monkeypatch
+):
+    class FailingPool:
+        async def handle_async_request(self, request):
+            raise httpcore.ConnectError("upstream unavailable")
+
+        async def aclose(self):
+            return None
+
+    async def resolver(host, port):
+        return ["8.8.8.8"]
+
+    def transport_factory():
+        transport = SafeHTTPXTransport(resolver=resolver)
+        transport._pool = FailingPool()
+        return transport
+
+    transport = transport_factory()
+    with pytest.raises(httpx.ConnectError):
+        await transport.handle_async_request(
+            httpx.Request("GET", "https://media.test/image.jpg")
+        )
+    await transport.aclose()
+
+    await media_store.init_store(str(tmp_path / "session.db"))
+    await media_store.register_media(
+        "upstream-failure",
+        "image",
+        "link",
+        "image/jpeg",
+        "image.jpg",
+        url="https://media.test/image.jpg",
+    )
+    monkeypatch.setattr(
+        main,
+        "safe_media_fetcher",
+        SafeMediaFetcher(resolver=resolver, transport_factory=transport_factory),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=main.app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/media/" + (await media_store.list_media("upstream-failure"))[0]["media_id"])
+    assert response.status_code == 502
+    await media_store.close_store()
 
 
 @pytest.mark.asyncio

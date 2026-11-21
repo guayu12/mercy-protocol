@@ -29,6 +29,32 @@ class DownloadTooLarge(SafeFetchError):
     pass
 
 
+_HTTPCORE_TO_HTTPX = (
+    (httpcore.ConnectTimeout, httpx.ConnectTimeout),
+    (httpcore.ReadTimeout, httpx.ReadTimeout),
+    (httpcore.WriteTimeout, httpx.WriteTimeout),
+    (httpcore.PoolTimeout, httpx.PoolTimeout),
+    (httpcore.ConnectError, httpx.ConnectError),
+    (httpcore.ReadError, httpx.ReadError),
+    (httpcore.WriteError, httpx.WriteError),
+    (httpcore.RemoteProtocolError, httpx.RemoteProtocolError),
+    (httpcore.LocalProtocolError, httpx.LocalProtocolError),
+    (httpcore.UnsupportedProtocol, httpx.UnsupportedProtocol),
+    (httpcore.ProxyError, httpx.ProxyError),
+    (httpcore.ProtocolError, httpx.ProtocolError),
+    (httpcore.NetworkError, httpx.NetworkError),
+    (httpcore.TimeoutException, httpx.TimeoutException),
+)
+_HTTPCORE_ERRORS = tuple(error_type for error_type, _ in _HTTPCORE_TO_HTTPX)
+
+
+def _as_httpx_error(error: Exception, request: httpx.Request) -> httpx.TransportError:
+    for core_type, httpx_type in _HTTPCORE_TO_HTTPX:
+        if isinstance(error, core_type):
+            return httpx_type(str(error), request=request)
+    return httpx.TransportError(str(error), request=request)
+
+
 def _is_public_address(value: str) -> bool:
     address = ipaddress.ip_address(value.split("%", 1)[0])
     if isinstance(address, ipaddress.IPv6Address):
@@ -125,12 +151,16 @@ class ValidatingNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 class _CoreResponseStream(httpx.AsyncByteStream):
-    def __init__(self, stream):
+    def __init__(self, stream, request: httpx.Request):
         self._stream = stream
+        self._request = request
 
     async def __aiter__(self):
-        async for chunk in self._stream:
-            yield chunk
+        try:
+            async for chunk in self._stream:
+                yield chunk
+        except _HTTPCORE_ERRORS as error:
+            raise _as_httpx_error(error, self._request) from error
 
     async def aclose(self) -> None:
         await self._stream.aclose()
@@ -150,11 +180,14 @@ class SafeHTTPXTransport(httpx.AsyncBaseTransport):
             content=request.stream,
             extensions=request.extensions,
         )
-        core_response = await self._pool.handle_async_request(core_request)
+        try:
+            core_response = await self._pool.handle_async_request(core_request)
+        except _HTTPCORE_ERRORS as error:
+            raise _as_httpx_error(error, request) from error
         return httpx.Response(
             status_code=core_response.status,
             headers=core_response.headers,
-            stream=_CoreResponseStream(core_response.stream),
+            stream=_CoreResponseStream(core_response.stream, request),
             extensions=core_response.extensions,
             request=request,
         )
