@@ -15,6 +15,6 @@ VRM 0.x and 1.0 files both work.
 
 | File | Source | License |
 |---|---|---|
-| `motions/idle_loop.vrma` | [pixiv/ChatVRM](https://github.com/pixiv/ChatVRM) `public/idle_loop.vrma` (archived repo) | [MIT](https://github.com/pixiv/ChatVRM/blob/main/LICENSE), (c) pixiv Inc. |
+| `motions/idle_loop.vrma` | [pixiv/ChatVRM](https://github.com/pixiv/ChatVRM) `public/idle_loop.vrma` (archived repo) | MIT, Copyright (c) 2023 pixiv Inc. — full text in [`motions/LICENSE-ChatVRM.txt`](motions/LICENSE-ChatVRM.txt) |
 
 Gestures `greet` / `think` are keyframed in code (`src/avatar/motion.ts`); `nod` / `shake` are procedural. No other motion assets are shipped.

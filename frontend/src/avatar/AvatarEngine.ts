@@ -97,6 +97,7 @@ export class AvatarEngine {
     private baseAction: THREE.AnimationAction | null = null;
     private clips: Partial<Record<Gesture, THREE.AnimationClip>> = {};
     private gestureAction: THREE.AnimationAction | null = null;
+    private fadingGesture: THREE.AnimationAction | null = null;
     private procGesture: { name: "nod" | "shake"; t0: number } | null = null;
     private qTmp = new THREE.Quaternion();
     private eTmp = new THREE.Euler();
@@ -344,6 +345,7 @@ export class AvatarEngine {
         if (left <= GESTURE_FADE || !a.isRunning()) {
             if (this.baseAction) { this.baseAction.enabled = true; this.baseAction.fadeIn(GESTURE_FADE); }
             a.fadeOut(Math.max(left, 0.01));
+            this.fadingGesture = a;
             this.gestureAction = null;
         }
     }
@@ -443,7 +445,7 @@ export class AvatarEngine {
         const target = POSES[this.state], ep = EMOTION_POSES[emotion];
         const k = Math.min(1, dt * 4);
         for (const key of Object.keys(this.pose) as (keyof Pose)[]) {
-            const goal = target[key] + ((ep as unknown as Record<string, number>)[key] ?? 0);
+            const goal = target[key] + (key in ep ? ep[key as keyof typeof ep] : 0);
             this.pose[key] += (goal - this.pose[key]) * k;
         }
         const pose = this.pose;
@@ -463,7 +465,11 @@ export class AvatarEngine {
         };
 
         const breath = Math.sin(t * 1.6);
-        if (!this.baseAction && !this.gestureAction) {
+        if (this.fadingGesture && !(this.fadingGesture.isRunning() && this.fadingGesture.getEffectiveWeight() > 0)) {
+            this.fadingGesture = null;
+        }
+        // Without the VRMA base loop, let a gesture finish fading before procedural arms take over.
+        if (!this.baseAction && !this.gestureAction && !this.fadingGesture) {
             const lu = bone("leftUpperArm"), ru = bone("rightUpperArm");
             const ll = bone("leftLowerArm"), rl = bone("rightLowerArm");
             if (lu) lu.rotation.set(0, 0, s * (-1.2 - breath * 0.02));
