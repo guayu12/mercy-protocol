@@ -16,9 +16,6 @@ venv/
 data/
 backend/~/
 
-# Live2D model (licensed asset, download separately — see README)
-frontend/public/live2d/
-
 # Local AI tool configs
 .agents/
 .claude/

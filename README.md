@@ -1,6 +1,6 @@
 # Mercy Protocol
 
-> A local-first, multimodal personal AI assistant with a holographic HUD, an interactive Live2D avatar, a LangGraph agent engine, and real-time backend telemetry.
+> A local-first, multimodal personal AI assistant with a holographic HUD, an interactive VRM avatar, a LangGraph agent engine, and real-time backend telemetry.
 
 ![Main Console](docs/screenshots/1_main_dashboard.png)
 
@@ -10,7 +10,7 @@
 - **Hybrid memory** — async SQLite checkpointer (short-term) + ChromaDB vector store with OpenAI `text-embedding-3-small` (long-term RAG)
 - **Multimodal vision** — attached images go natively to the agent model as `image_url` content blocks
 - **Streaming replies** — `/api/chat` streams tokens over SSE; LLM, vision and embeddings all use the OpenAI API (no local inference)
-- **Live2D avatar** — WebGL rendering, hit-area interactions, audio-driven lip-sync
+- **VRM avatar** — three.js rendering, idle motion, eye tracking, viseme lip-sync timed from TTS word boundaries
 - **Voice I/O** — browser speech recognition + `edge-tts` streaming TTS
 - **Live telemetry** — every backend step streamed to the UI over SSE (`/api/logs`)
 - **Desktop or web** — run in a browser via Vite, or as a transparent always-on-top Tauri v2 window
@@ -30,9 +30,9 @@ See [docs/feature-overview.md](docs/feature-overview.md) for the full walkthroug
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/                # React 19 + Vite + Tailwind v4 + Tauri v2 (:1420)
-│   ├── src/                 # App.tsx (HUD), Live2DAvatar.tsx
+│   ├── src/                 # App.tsx (HUD), VRMAvatar.tsx
 │   ├── src-tauri/           # Rust desktop shell
-│   └── public/live2d/       # Live2D model (not committed, see below)
+│   └── public/vrm/          # avatar.vrm (pixiv sample, redistributable)
 └── docs/
     ├── feature-overview.md
     ├── plans/               # Design & implementation plans
@@ -60,15 +60,11 @@ cp .env.example .env        # then fill in your API keys / model names
 Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_BASE_URL`.
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
 
-### 2. Live2D model
+### 2. Avatar model
 
-The Live2D sample model (Shizuku) is subject to the [Live2D Free Material License](https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html) and is not included in this repository. Download it into `frontend/public/live2d/`:
+The frontend loads `frontend/public/vrm/avatar.vrm`, pixiv's VRM 1.0 sample model, which is licensed for redistribution, modification and commercial use (see `frontend/public/vrm/LICENSE.md`). To use your own character, export a VRM 1.0 file (e.g. from [VRoid Studio](https://vroid.com/en/studio)) and replace that file.
 
-```bash
-npx degit guansss/pixi-live2d-display/test/assets/shizuku frontend/public/live2d
-```
-
-The frontend loads `/live2d/shizuku.model.json`; you can swap in any Cubism 2 model with the same layout.
+Lip-sync: `POST /api/speech` returns the edge-tts audio plus a viseme track (`aa/ih/ou/ee/oh` with start/end times), built from edge-tts word boundaries and pypinyin finals.
 
 ### 3. Frontend
 
@@ -83,7 +79,7 @@ npm run tauri dev           # or: native desktop window
 
 | Layer | Stack |
 | :--- | :--- |
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, Framer Motion, Pixi.js v6 + pixi-live2d-display |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, Framer Motion, three.js + @pixiv/three-vrm |
 | Desktop | Tauri v2 (Rust) |
-| Backend | FastAPI, LangGraph, LangChain OpenAI, edge-tts, langchain-tavily |
+| Backend | FastAPI, LangGraph, LangChain OpenAI, edge-tts, pypinyin, langchain-tavily |
 | Storage | SQLite (LangGraph checkpointer), ChromaDB |
