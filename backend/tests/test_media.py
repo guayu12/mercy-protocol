@@ -230,6 +230,23 @@ async def test_upload_sniffing_and_overflow_cleanup(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upload_rejects_excessive_content_length_before_parsing():
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        request = client.build_request(
+            "POST",
+            "/api/upload",
+            headers={"Content-Type": "multipart/form-data; boundary=test"},
+            content=b"not a multipart body",
+        )
+        request.headers["Content-Length"] = str(
+            media_store.VIDEO_LIMIT + main.UPLOAD_MULTIPART_OVERHEAD + 1
+        )
+        response = await client.send(request)
+    assert response.status_code == 413
+
+
+@pytest.mark.asyncio
 async def test_upload_and_stage_delete_enforce_origin_allowlist(tmp_path, monkeypatch):
     monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
     await media_store.init_store(str(tmp_path / "session.db"))

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Ensure backend directory is in path
@@ -37,6 +37,24 @@ async def lifespan(app: FastAPI):
     await session_store.close_store()
 
 app = FastAPI(title="Mercy Protocol — AI Judicial Interface", version="2.0.0", lifespan=lifespan)
+
+UPLOAD_MULTIPART_OVERHEAD = 1024 * 1024
+
+
+@app.middleware("http")
+async def reject_oversized_upload_request(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/api/upload":
+        try:
+            content_length = int(request.headers.get("content-length", "0"))
+        except ValueError:
+            content_length = 0
+        if content_length > media_store.VIDEO_LIMIT + UPLOAD_MULTIPART_OVERHEAD:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": "Upload exceeds size limit"},
+            )
+    return await call_next(request)
+
 
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:1420",   # Vite dev server (tauri dev)
