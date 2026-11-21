@@ -1690,13 +1690,15 @@ textarea:focus-visible {
   object-fit: contain;
 }
 
-#app[data-layout="evidence"] #workspace,
-#app[data-layout="focus_evidence"] #workspace {
-  grid-template-columns: 52px minmax(0, 1fr) 336px;
-}
+@media (min-width: 1101px) {
+  #app[data-layout="evidence"] #workspace,
+  #app[data-layout="focus_evidence"] #workspace {
+    grid-template-columns: 52px minmax(0, 1fr) 336px;
+  }
 
-#app[data-layout="focus_evidence"] #workspace {
-  grid-template-columns: 52px minmax(0, 1fr) 304px;
+  #app[data-layout="focus_evidence"] #workspace {
+    grid-template-columns: 52px minmax(0, 1fr) 304px;
+  }
 }
 
 #app[data-layout="evidence"] #left-rail .left-full,
@@ -1927,10 +1929,6 @@ textarea:focus-visible {
 }
 
 @media (max-width: 1100px) {
-  #app[data-layout="evidence"] #workspace {
-    grid-template-columns: 52px minmax(0, 1fr) 280px;
-  }
-
   #app[data-layout="evidence"] .evidence-stage {
     flex-basis: 42%;
   }
