@@ -369,7 +369,7 @@ export class AvatarEngine {
         const target = (t < this.talkHoldUntil && this.talkAction) || idle;
         if (target && !target.isRunning()) {
             // First loop after load starts at full weight (nothing to blend from); later ones ramp in.
-            const first = !this.idleActions.concat(this.talkAction ?? []).some(a => a.isRunning());
+            const first = !this.gestureAction && !this.idleActions.concat(this.talkAction ?? []).some(a => a.isRunning());
             target.reset().setEffectiveWeight(first ? 1 : 0).play();
         }
         this.baseAction = target;
@@ -381,7 +381,7 @@ export class AvatarEngine {
             const w = a.getEffectiveWeight();
             const next = goal > w ? Math.min(goal, w + step) : Math.max(goal, w - step);
             a.setEffectiveWeight(next);
-            if (next <= 0) a.stop();
+            if (next <= 0 && a !== target) a.stop();
         }
     }
 
