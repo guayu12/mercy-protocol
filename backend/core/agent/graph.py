@@ -1,15 +1,19 @@
+import base64
+import io
 import os
+import re
 import time
 import asyncio
 import secrets
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables FIRST — before any module reads them
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv(os.path.join(BACKEND_DIR, ".env"))
-from typing import TypedDict, Annotated, AsyncIterator, Optional
+from typing import TypedDict, Annotated, AsyncIterator, Optional, Literal
 import aiosqlite
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -24,7 +28,8 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from core.memory.memory_manager import MemoryManager
 from core import log_bus  # ← real-time log broadcaster
-from core import session_store, speech_queue
+from core import media_store, session_store, speech_queue
+from core.safe_fetch import safe_media_fetcher
 from core.speakable import SpeechRouter
 
 # 1. Initialize Memory
@@ -61,7 +66,67 @@ async def save_memory(fact: str) -> str:
     return f"Saved to permanent memory: {fact}"
 
 # Web Search Tool (requires TAVILY_API_KEY in .env)
-web_search = TavilySearch(max_results=3, description="Search the web for current events, facts, or any information you do not know.")
+web_search = TavilySearch(
+    max_results=3,
+    include_images=True,
+    include_image_descriptions=True,
+    description="Search the web for current events, facts, or any information you do not know.",
+)
+
+
+def _without_urls(value: str) -> str:
+    return re.sub(r"https?://[^\s)\]>]+", "", value, flags=re.IGNORECASE).strip()
+
+
+@tool
+async def tavily_search(query: str, config: RunnableConfig) -> str:
+    """Search the web and return text results plus registered, described images."""
+    result = await web_search.ainvoke({"query": query}, config=config)
+    if not isinstance(result, dict):
+        return str(result)
+    if result.get("error"):
+        return str(result["error"])
+
+    sections = []
+    if result.get("answer"):
+        sections.append(_without_urls(str(result["answer"])))
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        title = _without_urls(str(item.get("title", "")))
+        content = _without_urls(str(item.get("content", "")))
+        if title or content:
+            sections.append(f"{title}\n{content}".strip())
+
+    thread_id = config.get("configurable", {}).get("thread_id", "default_user")
+    image_lines = []
+    image_mimes = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }
+    for image in result.get("images", []):
+        if not isinstance(image, dict):
+            continue
+        description = _without_urls(str(image.get("description") or "")).strip()
+        url = image.get("url") or image.get("image_url")
+        if not description or not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            continue
+        extension = Path(url.split("?", 1)[0]).suffix.lower()
+        record = await media_store.register_media(
+            thread_id,
+            "image",
+            "search",
+            image_mimes.get(extension, "image/jpeg"),
+            description,
+            url=url,
+        )
+        image_lines.append(f"可展示图片：{record['media_id']}：{description}")
+    if image_lines:
+        sections.append("\n".join(image_lines))
+    return "\n\n".join(sections) if sections else "没有找到可用的文字结果。"
 
 @tool
 def create_local_directory(dir_name: str) -> str:
@@ -71,8 +136,13 @@ def create_local_directory(dir_name: str) -> str:
     raw_base = os.environ.get("AURA_WORKSPACE_DIR", "~/Desktop/AuraWorkspace")
     base_dir = os.path.expanduser(raw_base)
     os.makedirs(base_dir, exist_ok=True)
-    
-    target_path = os.path.join(base_dir, dir_name)
+    base_path = os.path.realpath(base_dir)
+    target_path = os.path.realpath(os.path.join(base_dir, dir_name))
+    try:
+        if os.path.commonpath((base_path, target_path)) != base_path:
+            return "Failed to create directory: target must remain inside the workspace."
+    except ValueError:
+        return "Failed to create directory: target must remain inside the workspace."
     log_bus.emit("tool", "TOOL", f"create_local_directory: {target_path}")
     try:
         os.makedirs(target_path, exist_ok=True)
@@ -80,12 +150,32 @@ def create_local_directory(dir_name: str) -> str:
     except Exception as e:
         return f"Failed to create directory: {str(e)}"
 
+
+async def _rewrite_report_media(markdown: str, thread_id: str) -> tuple[str, list[str]]:
+    pattern = re.compile(r"!\[([^\]]*)\]\(media:(m_[A-Za-z0-9_-]+)\)")
+    parts = []
+    removed = []
+    cursor = 0
+    for match in pattern.finditer(markdown):
+        parts.append(markdown[cursor : match.start()])
+        record = await media_store.get_media(match.group(2), thread_id)
+        if record:
+            parts.append(match.group(0))
+        else:
+            parts.append(match.group(1))
+            removed.append(match.group(2))
+        cursor = match.end()
+    parts.append(markdown[cursor:])
+    return "".join(parts), removed
+
+
 @tool
 async def show_report(title: str, markdown: str, config: RunnableConfig) -> str:
     """Put a document on screen. ANY table, code, list of links, step-by-step document, or content longer than about three sentences MUST use this tool and never be included in the spoken reply."""
     configurable = config.get("configurable", {})
     thread_id = configurable.get("thread_id", "default_user")
     query = configurable.get("turn_query", "")
+    markdown, removed_media_ids = await _rewrite_report_media(markdown, thread_id)
     report = await session_store.create_report(thread_id, title, query, markdown)
     report_id = report["report_id"]
     await adispatch_custom_event(
@@ -101,10 +191,103 @@ async def show_report(title: str, markdown: str, config: RunnableConfig) -> str:
     await adispatch_custom_event(
         "report", {"type": "report.done", "report_id": report_id}, config=config
     )
-    return (
+    result = (
         f"已上屏，报告编号 {report_id}。用户现在能看到它，"
         "口头只需概括要点并询问意见。"
     )
+    if removed_media_ids:
+        result += " 已移除不属于当前会话的媒体编号：" + "、".join(removed_media_ids)
+    return result
+
+
+@tool
+async def show_media(
+    media_ids: list[str],
+    caption: str,
+    config: RunnableConfig,
+    focus: Literal["normal", "primary"] = "normal",
+) -> str:
+    """Show up to six registered media items on the evidence stage."""
+    if len(media_ids) > 6:
+        return "一次最多展示六项媒体。"
+    thread_id = config.get("configurable", {}).get("thread_id", "default_user")
+    allowed_images = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    allowed_videos = {"video/mp4", "video/webm"}
+    limits = {"image": media_store.IMAGE_LIMIT, "video": media_store.VIDEO_LIMIT}
+    failures = []
+
+    async def validate(media_id: str):
+        record = await media_store.get_media(media_id, thread_id)
+        if record is None:
+            return None, "不存在或不属于当前会话"
+        if record["origin"] == "upload":
+            path = Path(record["path"] or "")
+            if not path.is_file():
+                return None, "上传文件不存在"
+            size = path.stat().st_size
+            if size > limits[record["kind"]]:
+                return None, "媒体超过大小限制"
+            mime = record["mime"]
+        else:
+            if not record["url"]:
+                return None, "媒体地址不可用"
+            try:
+                result = await asyncio.wait_for(
+                    safe_media_fetcher.probe(record["url"]), timeout=3
+                )
+            except asyncio.TimeoutError:
+                return None, "验证超时"
+            except Exception:
+                return None, "无法安全访问媒体"
+            if result["status"] not in {200, 206}:
+                return None, f"远程服务器返回 HTTP {result['status']}"
+            mime = result["content_type"]
+            if result["length"] is not None and result["length"] > limits[record["kind"]]:
+                return None, "媒体超过大小限制"
+        allowed = allowed_images if record["kind"] == "image" else allowed_videos
+        if mime not in allowed:
+            return None, "媒体类型不受支持"
+        await media_store.update_media_probe(media_id, mime, result["length"] if record["origin"] != "upload" else None)
+        return {
+            "media_id": media_id,
+            "kind": record["kind"],
+            "mime": mime,
+            "src": f"/api/media/{media_id}",
+            "caption": record["caption"],
+        }, None
+
+    checked = await asyncio.gather(*(validate(media_id) for media_id in media_ids))
+    items = []
+    for media_id, (item, reason) in zip(media_ids, checked):
+        if item:
+            items.append(item)
+        else:
+            failures.append(f"{media_id}：{reason}")
+    if not items:
+        details = "；".join(failures) or "没有提供媒体编号"
+        return f"没有可展示的媒体。{details}"
+
+    await media_store.set_stage(thread_id, items, caption, focus)
+    await adispatch_custom_event(
+        "stage",
+        {"type": "stage.show", "caption": caption, "focus": focus, "items": items},
+        config=config,
+    )
+    result = f"展示台已更新，显示 {len(items)} 项。"
+    if failures:
+        result += " 未展示：" + "；".join(failures)
+    return result
+
+
+@tool
+async def clear_stage(config: RunnableConfig) -> str:
+    """Close the evidence stage when the current topic moves on."""
+    thread_id = config.get("configurable", {}).get("thread_id", "default_user")
+    await media_store.clear_stage(thread_id)
+    await adispatch_custom_event(
+        "stage", {"type": "stage.clear"}, config=config
+    )
+    return "展示台已关闭。"
 
 
 @tool
@@ -138,9 +321,11 @@ tools = [
     check_weather,
     get_current_time,
     save_memory,
-    web_search,
+    tavily_search,
     create_local_directory,
     show_report,
+    show_media,
+    clear_stage,
     read_report,
     highlight_report,
 ]
@@ -177,6 +362,124 @@ def _has_image(content) -> bool:
     return isinstance(content, list) and any(
         isinstance(b, dict) and b.get("type") == "image_url" for b in content
     )
+
+async def _media_screen_context(thread_id: str, screen_state: dict) -> str:
+    stage = await media_store.get_stage(thread_id)
+    stage_items = stage["items"] if stage else []
+    stage_ids = [item["media_id"] for item in stage_items]
+    records = await media_store.list_media(thread_id, 20, stage_ids)
+    kind_labels = {"image": "图片", "video": "视频"}
+    origin_labels = {"upload": "上传", "search": "搜索", "link": "链接"}
+    media_lines = [
+        f"{record['media_id']} · {kind_labels[record['kind']]} · "
+        f"{origin_labels[record['origin']]} · {_without_urls(record['caption'])}"
+        for record in records
+    ]
+    if stage:
+        stage_line = "展示台：" + "、".join(
+            f"{item['media_id']} · {_without_urls(item.get('caption', ''))}"
+            for item in stage_items
+        )
+        current_id = screen_state.get("stage_current_media_id")
+        if current_id in stage_ids:
+            stage_line += f"\n用户正在看 {current_id}"
+    else:
+        stage_line = "展示台：关闭"
+    return (
+        "已登记媒体：\n"
+        + ("\n".join(media_lines) if media_lines else "暂无已登记媒体。")
+        + "\n"
+        + stage_line
+    )
+
+
+def _image_data_url(path: str) -> str | None:
+    from PIL import Image
+
+    image_path = Path(path)
+    if not image_path.is_file():
+        return None
+    try:
+        with Image.open(image_path) as source:
+            source.seek(0)
+            image = source.copy()
+            image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+            has_alpha = "A" in image.getbands() or "transparency" in source.info
+            if has_alpha:
+                image_format = "PNG"
+                image = image.convert("RGBA")
+                mime = "image/png"
+            else:
+                image_format = "JPEG"
+                image = image.convert("RGB")
+                mime = "image/jpeg"
+            output = io.BytesIO()
+            if image_format == "JPEG":
+                image.save(output, format=image_format, quality=85)
+            else:
+                image.save(output, format=image_format)
+    except Exception as error:
+        log_bus.emit("warn", "MEDIA", f"could not decode uploaded image: {error}")
+        return None
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+async def _prepare_user_media(
+    query: str,
+    thread_id: str,
+    attachments: list[str] | None,
+    image_base64: str | None,
+) -> tuple[str, list[str]]:
+    image_urls = []
+    video_ids = []
+    if image_base64:
+        try:
+            encoded = (
+                image_base64.split(",", 1)[1]
+                if image_base64.startswith("data:")
+                else image_base64
+            )
+            legacy_data = base64.b64decode(encoded)
+            legacy = await media_store.register_legacy_image(thread_id, legacy_data)
+            data_url = await asyncio.to_thread(_image_data_url, legacy["path"])
+            if data_url:
+                image_urls.append(data_url)
+        except Exception as error:
+            log_bus.emit("warn", "MEDIA", f"ignored legacy image attachment: {error}")
+
+    try:
+        cache_limit = max(0, int(os.environ.get("MEDIA_CACHE_MAX_MB", "500"))) * 1024 * 1024
+    except ValueError:
+        cache_limit = 500 * 1024 * 1024
+    for media_id in attachments or []:
+        record = await media_store.get_media(media_id, thread_id)
+        if record is None:
+            continue
+        if record["kind"] == "video":
+            video_ids.append(media_id)
+            continue
+        try:
+            if record["origin"] != "upload":
+                record = await media_store.cache_remote_image(
+                    media_id, safe_media_fetcher, cache_limit
+                )
+            data_url = await asyncio.to_thread(
+                _image_data_url, record.get("path") or ""
+            )
+            if data_url:
+                image_urls.append(data_url)
+        except Exception as error:
+            log_bus.emit("warn", "MEDIA", f"ignored image attachment {media_id}: {error}")
+
+    if video_ids:
+        notices = [
+            f"［用户上传了视频 {media_id}，你看不到画面内容］"
+            for media_id in video_ids
+        ]
+        query = "\n".join([query, *notices]).strip()
+    return query, image_urls
+
 
 # 5. Define Graph Nodes
 async def agent_node(state: AgentState, config: RunnableConfig):
@@ -232,6 +535,7 @@ async def agent_node(state: AgentState, config: RunnableConfig):
             f"用户当前正在看：{screen_state['viewing_report_id'] or '无'}"
         )
     screen_block = "\n".join(screen_lines)
+    media_block = await _media_screen_context(thread_id, screen_state)
     assistant_name = os.environ.get("ASSISTANT_NAME", "Aura")
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -250,6 +554,10 @@ async def agent_node(state: AgentState, config: RunnableConfig):
 
 屏幕状态：
 {screen_block}
+
+{media_block}
+
+媒体与展示台规则：只能通过 show_media 展示上面列出的媒体编号；只有图片本身是当前主题时才使用 focus=primary；话题转移后调用 clear_stage。视频只能展示，你看不到视频画面，绝不能描述其内容。搜索图片只知道已提供的描述；本轮上传的图片可直接分析。
 """)
     full_messages = [sys_prompt] + list(messages)
     input_tokens_est = sum(len(_text_of(m.content)) // 4 for m in full_messages)
@@ -319,15 +627,27 @@ async def close_graph():
     _conn = None
     app_graph = None
 
-def build_user_message(query: str, image_base64: Optional[str] = None) -> HumanMessage:
-    """Build a HumanMessage; images become native image_url content blocks."""
-    if not image_base64:
+def build_user_message(
+    query: str,
+    image_base64: Optional[str] = None,
+    image_data_urls: list[str] | None = None,
+) -> HumanMessage:
+    """Build a HumanMessage with native image_url content blocks."""
+    images = list(image_data_urls or [])
+    if image_base64:
+        images.append(
+            image_base64
+            if image_base64.startswith("data:")
+            else f"data:image/jpeg;base64,{image_base64}"
+        )
+    if not images:
         return HumanMessage(content=query)
-    url = image_base64 if image_base64.startswith("data:") else f"data:image/jpeg;base64,{image_base64}"
-    return HumanMessage(content=[
-        {"type": "text", "text": query},
-        {"type": "image_url", "image_url": {"url": url}},
-    ])
+    content = [{"type": "text", "text": query}]
+    content.extend(
+        {"type": "image_url", "image_url": {"url": image_url}}
+        for image_url in images
+    )
+    return HumanMessage(content=content)
 
 _thread_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -336,7 +656,7 @@ async def _close_pending_tool_calls(graph, config):
     disconnect), answer the dangling tool calls so OpenAI accepts the history."""
     state = await graph.aget_state(config)
     messages = state.values.get("messages", []) if state.values else []
-    if not state.next or not messages or not isinstance(messages[-1], AIMessage):
+    if not messages or not isinstance(messages[-1], AIMessage):
         return
     pending = getattr(messages[-1], "tool_calls", None) or []
     if not pending:
@@ -355,11 +675,15 @@ async def process_query(
     image_base64: Optional[str] = None,
     screen_state: Optional[dict] = None,
     interrupted: Optional[dict] = None,
+    attachments: Optional[list[str]] = None,
 ) -> AsyncIterator[dict]:
     """Run one turn and stream status, spoken sentences, reports, tools and completion."""
     # Serialize turns per thread so concurrent requests don't overwrite each other's checkpoints
     async with _thread_locks[thread_id]:
         graph = await init_graph()
+        query, image_data_urls = await _prepare_user_media(
+            query, thread_id, attachments, image_base64
+        )
         turn_id = f"t_{secrets.token_hex(4)}"
         config = {
             "configurable": {
@@ -492,13 +816,13 @@ async def process_query(
             return None
 
         log_bus.emit("flow", "FLOW",
-                     f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_base64 else ''}")
+                     f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_data_urls else ''}")
 
         try:
             yield {"type": "turn", "turn_id": turn_id}
             yield {"type": "status", "state": "thinking", "label": "正在思考"}
             async for event in graph.astream_events(
-                {"messages": [build_user_message(query, image_base64)], "context": ""},
+                {"messages": [build_user_message(query, image_data_urls=image_data_urls)], "context": ""},
                 config=config,
                 version="v2",
             ):
@@ -571,7 +895,7 @@ async def process_query(
                     log_bus.emit("tool", "TOOL", f"✓ {event['name']} → {str(output)[:80]}")
                     last_tool_end_sentence_count = len(emitted_sentences)
                     yield {"type": "tool", "name": event["name"], "status": "end"}
-                elif kind == "on_custom_event" and event.get("name") == "report":
+                elif kind == "on_custom_event" and event.get("name") in {"report", "stage"}:
                     yield event["data"]
             state = await graph.aget_state(config)
             summary = router.finish()

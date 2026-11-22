@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from core import session_store, speech_queue
+from core import media_store, session_store, speech_queue
 from core.agent import graph as agent_graph
 
 
@@ -41,7 +41,9 @@ class ScriptedChatModel(GenericFakeChatModel):
 
 async def _install_graph(monkeypatch, tmp_path, responses):
     speech_queue.clear()
-    await session_store.init_store(str(tmp_path / "session.db"))
+    store_path = str(tmp_path / "session.db")
+    await session_store.init_store(store_path)
+    await media_store.init_store(store_path)
     connection = await agent_graph.aiosqlite.connect(str(tmp_path / "checkpoints.db"))
     checkpointer = AsyncSqliteSaver(connection)
     await checkpointer.setup()
@@ -61,6 +63,7 @@ async def _install_graph(monkeypatch, tmp_path, responses):
 
 
 async def _close_graph(connection):
+    await media_store.close_store()
     await session_store.close_store()
     await connection.close()
     agent_graph.app_graph = None
