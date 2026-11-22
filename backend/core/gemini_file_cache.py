@@ -10,6 +10,19 @@ GEMINI_FILE_MAX_AGE_SECONDS = 48 * 60 * 60
 CLEANUP_INTERVAL_SECONDS = 60
 
 
+def _cleanup_media_tmp_files() -> None:
+    try:
+        temporary_directory = media_store.media_directory() / "tmp"
+        for path in temporary_directory.iterdir():
+            try:
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 async def cleanup_gemini_files(*, delete_all: bool = False) -> None:
     for record in await media_store.list_gemini_files():
         media_id = record["media_id"]
@@ -28,6 +41,7 @@ async def cleanup_gemini_files(*, delete_all: bool = False) -> None:
 
 
 async def gemini_file_cleanup_loop() -> None:
+    _cleanup_media_tmp_files()
     try:
         await cleanup_gemini_files(delete_all=True)
     except asyncio.CancelledError:

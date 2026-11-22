@@ -67,6 +67,9 @@ plus `MODEL_VIDEO=gemini:gemini-3.8-flash`). PDFs are upload-only, limited to
 50 MB and Google's 1,000-page limit. Each call reads a window of up to
 `PDF_MAX_PAGES=300` pages (about 520 image tokens per page, or 156,000 tokens
 for a full window); use `start_page` to continue through a longer document.
+The model's reported total page count is only trustworthy when pages were
+actually read; an out-of-range page window returns no content, and the app
+refuses to answer in that case.
 On the Gemini free tier, Google may use uploaded videos and files to improve
 its products, and people may review them; the paid tier does not use this
 content for product improvement or human review. Mercy does not change behavior

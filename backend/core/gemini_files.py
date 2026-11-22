@@ -24,6 +24,7 @@ PROCESSING_TIMEOUT = 180
 HTTP_TIMEOUT = httpx.Timeout(connect=20, read=120, write=120, pool=20)
 
 _analyze_locks: dict[str, asyncio.Lock] = {}
+_analyze_lock_refs: dict[str, int] = {}
 
 
 class GeminiError(Exception):
@@ -67,9 +68,22 @@ class GeminiAnswer:
 
 @asynccontextmanager
 async def analyze_lock(media_id: str):
-    lock = _analyze_locks.setdefault(media_id, asyncio.Lock())
-    async with lock:
-        yield
+    lock = _analyze_locks.get(media_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _analyze_locks[media_id] = lock
+        _analyze_lock_refs[media_id] = 0
+    _analyze_lock_refs[media_id] += 1
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = _analyze_lock_refs[media_id] - 1
+        if remaining == 0:
+            _analyze_lock_refs.pop(media_id)
+            _analyze_locks.pop(media_id)
+        else:
+            _analyze_lock_refs[media_id] = remaining
 
 
 @asynccontextmanager
@@ -345,7 +359,7 @@ async def ask(
             "total_output_tokens": usage_data.get("total_output_tokens"),
             "total_thought_tokens": usage_data.get("total_thought_tokens"),
             "input_tokens_by_modality": usage_data.get(
-                "input_tokens_by_modality", {}
+                "input_tokens_by_modality", []
             ),
         }
         status = data.get("status")
@@ -367,7 +381,7 @@ async def delete_file(
                 _file_url(name),
                 headers={"x-goog-api-key": _api_key()},
             )
-            if 200 <= response.status_code < 300:
+            if 200 <= response.status_code < 300 or response.status_code == 404:
                 return True
             if response.status_code == 429:
                 kind = _quota_kind(response)
