@@ -596,6 +596,7 @@ export function App() {
         sessionRestoredRef.current = true;
         const restoredReports = (session.reports ?? []).map((report) => ({
           ...report,
+          complete: true,
           link_policy: report.link_policy ?? "open",
         }));
         const restoredMessages = (session.utterances ?? [])
