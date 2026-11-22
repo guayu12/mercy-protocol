@@ -31,6 +31,7 @@ ROLE_TIMEOUTS = {
 }
 DEFAULT_VIDEO_MAX_MINUTES = 30
 DEFAULT_GEMINI_FILE_RETENTION_SECONDS = 900
+DEFAULT_PDF_MAX_PAGES = 300
 
 
 class ModelConfigError(ValueError):
@@ -181,6 +182,10 @@ def gemini_file_retention_seconds() -> int:
     )
 
 
+def pdf_max_pages() -> int:
+    return _integer_setting("PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, minimum=1)
+
+
 def validate_config() -> None:
     for suffix in ("_FALLBACK", "_MAX_FALLBACK"):
         var_name = f"MODEL_VIDEO{suffix}"
@@ -208,6 +213,7 @@ def validate_config() -> None:
         _legacy_spec("conversation")
     video_max_minutes()
     gemini_file_retention_seconds()
+    pdf_max_pages()
 
 
 def get_llm(

@@ -42,6 +42,14 @@ class GeminiFileUnavailable(GeminiError):
         super().__init__()
 
 
+class GeminiRejected(GeminiError):
+    def __init__(self):
+        Exception.__init__(
+            self,
+            "Gemini rejected the supplied document.",
+        )
+
+
 @dataclass(frozen=True)
 class GeminiFile:
     name: str
@@ -124,9 +132,16 @@ async def _request(
         raise GeminiError() from None
 
 
-def _check_response(response: httpx.Response, *, file_request: bool = False) -> None:
+def _check_response(
+    response: httpx.Response,
+    *,
+    file_request: bool = False,
+    reject_400: bool = False,
+) -> None:
     if response.status_code == 429:
         raise GeminiQuotaExceeded(_quota_kind(response)) from None
+    if reject_400 and response.status_code == 400:
+        raise GeminiRejected() from None
     if file_request and response.status_code in {403, 404}:
         raise GeminiFileUnavailable() from None
     if not 200 <= response.status_code < 300:
@@ -276,10 +291,18 @@ async def ask(
     model: str,
     *,
     client: httpx.AsyncClient | None = None,
+    processing: dict | None = None,
 ) -> GeminiAnswer:
     async with _client_context(client) as request_client:
         api_key = _api_key()
         input_type = "video" if file.mime.lower().startswith("video/") else "document"
+        media_input = {
+            "type": input_type,
+            "uri": file.uri,
+            "mime_type": file.mime,
+        }
+        if processing is not None:
+            media_input["processing"] = processing
         response = await _request(
             request_client,
             "POST",
@@ -289,16 +312,16 @@ async def ask(
                 "model": model,
                 "store": False,
                 "input": [
-                    {
-                        "type": input_type,
-                        "uri": file.uri,
-                        "mime_type": file.mime,
-                    },
+                    media_input,
                     {"type": "text", "text": prompt},
                 ],
             },
         )
-        _check_response(response, file_request=True)
+        _check_response(
+            response,
+            file_request=True,
+            reject_400=processing is not None,
+        )
         data = _json(response)
         steps = data.get("steps", [])
         output_text = []

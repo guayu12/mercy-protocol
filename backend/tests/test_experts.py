@@ -166,6 +166,7 @@ def test_build_tools_and_prompt_guidance_are_role_gated(monkeypatch):
         "investigate",
         "inspect_image",
         "analyze_video",
+        "analyze_document",
     } & {item.name for item in agent_graph.build_tools()}
 
     monkeypatch.setenv("MODEL_REPORT", "openai:report-model")
@@ -186,6 +187,9 @@ def test_build_tools_and_prompt_guidance_are_role_gated(monkeypatch):
     assert "analyze_video" in {
         item.name for item in agent_graph.build_tools()
     }
+    assert "analyze_document" in {
+        item.name for item in agent_graph.build_tools()
+    }
 
 
 @pytest.mark.asyncio
@@ -197,7 +201,12 @@ async def test_prompt_contains_only_bound_expert_guidance(tmp_path, monkeypatch)
     monkeypatch.setattr(
         agent_graph,
         "tools",
-        agent_graph.base_tools + [experts.write_report, experts.analyze_video],
+        agent_graph.base_tools
+        + [
+            experts.write_report,
+            experts.analyze_video,
+            experts.analyze_document,
+        ],
     )
     try:
         await agent_graph.agent_node(
@@ -210,9 +219,10 @@ async def test_prompt_contains_only_bound_expert_guidance(tmp_path, monkeypatch)
         assert "需要调查、核实或综合多个来源时" not in prompt
         assert "需要看清某张已登记图片的细节时" not in prompt
         assert "搜索图片只知道已提供的描述" in prompt
-        assert "调用 analyze_video 前" in prompt
+        assert "调用 analyze_video 或 analyze_document 前" in prompt
         assert "Gemini 免费层" in prompt
-        assert "拿到结果前绝不能描述视频" in prompt
+        assert "拿到结果前不要描述视频" in prompt
+        assert "调用 analyze_document 并传媒体编号和具体问题" in prompt
         assert "用户开了深度模式" not in prompt
 
         await session_store.set_flag("gemini_notice_given", "true")
@@ -223,7 +233,7 @@ async def test_prompt_contains_only_bound_expert_guidance(tmp_path, monkeypatch)
             turn_config("prompt-test-after-notice"),
         )
         later_prompt = later_model.inputs[-1][0][0].content
-        assert "调用 analyze_video 前" in later_prompt
+        assert "调用 analyze_video 或 analyze_document 前" in later_prompt
         assert "Gemini 免费层" not in later_prompt
     finally:
         await close_stores()

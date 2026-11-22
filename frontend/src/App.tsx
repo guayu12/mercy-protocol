@@ -17,7 +17,7 @@ import ReactMarkdown, {
 import remarkGfm from "remark-gfm";
 import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
-import { Stage, type MediaStageData, type StageItem } from "./Stage";
+import { Stage, type MediaStageData } from "./Stage";
 import { API_BASE } from "./api";
 import {
   markdownUrlTransform,
@@ -36,11 +36,23 @@ type DialogueMessage = {
   content: string;
   createdAt: number;
   turnId?: string;
-  attachments?: Array<{ media_id: string; kind: "image" | "video"; filename: string }>;
+  attachments?: Array<{
+    media_id: string;
+    kind: "image" | "video" | "document";
+    filename: string;
+  }>;
   interrupted?: boolean;
 };
 
-type UploadedAttachment = StageItem & { filename: string; previewUrl: string };
+type UploadedAttachment = {
+  media_id: string;
+  kind: "image" | "video" | "document";
+  mime: string;
+  src: string;
+  caption: string;
+  filename: string;
+  previewUrl: string | null;
+};
 
 type ReportSource = { number: number; title: string; url: string };
 
@@ -924,7 +936,9 @@ export function App() {
     const text = message || "请帮我看看这份媒体。";
     setQuery("");
     setAttachments([]);
-    pendingAttachments.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+    pendingAttachments.forEach((attachment) => {
+      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    });
     setMessages((previous) => [
       ...previous,
       {
@@ -1026,7 +1040,11 @@ export function App() {
           const body = await response.json().catch(() => null);
           throw new Error(body?.detail ?? `上传失败：${response.status}`);
         }
-        const uploaded = (await response.json()) as { media_id: string; kind: "image" | "video"; mime: string };
+        const uploaded = (await response.json()) as {
+          media_id: string;
+          kind: "image" | "video" | "document";
+          mime: string;
+        };
         setAttachments((previous) => [
           ...previous,
           {
@@ -1034,7 +1052,8 @@ export function App() {
             src: `/api/media/${uploaded.media_id}`,
             caption: file.name,
             filename: file.name,
-            previewUrl: URL.createObjectURL(file),
+            previewUrl:
+              uploaded.kind === "image" ? URL.createObjectURL(file) : null,
           },
         ]);
       } catch (error) {
@@ -1046,7 +1065,7 @@ export function App() {
   const handleRemoveAttachment = (mediaId: string) => {
     setAttachments((previous) => {
       const removed = previous.find((item) => item.media_id === mediaId);
-      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return previous.filter((item) => item.media_id !== mediaId);
     });
   };
@@ -1352,8 +1371,13 @@ export function App() {
             <div className="attachment-list" aria-label="待发送附件">
               {attachments.map((attachment) => (
                 <div className="image-preview-chip" key={attachment.media_id}>
-                  {attachment.kind === "image" ? (
+                  {attachment.kind === "image" && attachment.previewUrl ? (
                     <img src={attachment.previewUrl} alt="" />
+                  ) : attachment.kind === "document" ? (
+                    <span className="document-chip-icon">
+                      <FileText size={14} />
+                      文档
+                    </span>
                   ) : (
                     <span className="video-chip-icon">视频</span>
                   )}
@@ -1369,7 +1393,7 @@ export function App() {
           <div id="input-bar">
             <input
               type="file"
-              accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"
+              accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.pdf,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,application/pdf"
               multiple
               ref={fileInputRef}
               onChange={handleImageSelect}
@@ -1378,8 +1402,8 @@ export function App() {
             <button
               className="composer-icon-btn"
               type="button"
-              aria-label="上传图片或视频"
-              title="上传图片或视频"
+              aria-label="上传图片、视频或文档"
+              title="上传图片、视频或文档"
               onClick={() => fileInputRef.current?.click()}
             >
               <ImageIcon size={19} />
@@ -1493,9 +1517,14 @@ export function App() {
                               src={`${API_BASE}/api/media/${attachment.media_id}`}
                               alt={attachment.filename}
                             />
-                          ) : (
+                          ) : attachment.kind === "video" ? (
                             <div className="dialogue-video" key={attachment.media_id}>
                               视频 · {attachment.filename}
+                            </div>
+                          ) : (
+                            <div className="dialogue-document" key={attachment.media_id}>
+                              <FileText size={14} />
+                              <span>{attachment.filename}</span>
                             </div>
                           ),
                         )}

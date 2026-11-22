@@ -62,18 +62,22 @@ Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_
 The backend binds to `127.0.0.1` by default; set `BACKEND_HOST` in `.env` to override it.
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
 
-Gemini video analysis is optional (`GEMINI_API_KEY` or `GOOGLE_API_KEY` plus
-`MODEL_VIDEO=gemini:gemini-3.8-flash`). On the Gemini free tier, Google may use
-uploaded videos and files to improve its products, and people may review them;
-the paid tier does not use this content for product improvement or human review.
-Mercy does not change behavior based on tier: quota exhaustion is reported to
-the user as a rate-limit error and is never retried. Gemini's Files API has a
-2 GB per-file free-tier limit and Google automatically deletes files after 48
-hours. Mercy deletes an analyzed video after 15 minutes without another
-question by default (`GEMINI_FILE_RETENTION_SECONDS`, set it to `0` to delete
-immediately); files left by an abnormal exit are cleaned on the next startup.
-The paid-tier Gemini 3.8 Flash input price reference is $0.75 per 1 million
-tokens through 2026-12-31 and $1.50 per 1 million tokens starting 2027-01-01.
+Gemini video and PDF analysis is optional (`GEMINI_API_KEY` or `GOOGLE_API_KEY`
+plus `MODEL_VIDEO=gemini:gemini-3.8-flash`). PDFs are upload-only, limited to
+50 MB and Google's 1,000-page limit. Each call reads a window of up to
+`PDF_MAX_PAGES=300` pages (about 520 image tokens per page, or 156,000 tokens
+for a full window); use `start_page` to continue through a longer document.
+On the Gemini free tier, Google may use uploaded videos and files to improve
+its products, and people may review them; the paid tier does not use this
+content for product improvement or human review. Mercy does not change behavior
+based on tier: quota exhaustion is reported to the user and is never retried.
+Gemini's Files API free-tier limit is 2 GB per file, and Google automatically
+deletes files after 48 hours. Mercy deletes analyzed videos and documents after
+15 minutes without another question by default (`GEMINI_FILE_RETENTION_SECONDS`,
+set it to `0` to delete immediately); files left by an abnormal exit are cleaned
+on the next startup. The paid-tier Gemini 3.8 Flash input price reference is
+$0.75 per 1 million tokens through 2026-12-31 and $1.50 per 1 million tokens
+starting 2027-01-01.
 
 ### 2. Avatar model
 

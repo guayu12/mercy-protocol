@@ -22,6 +22,7 @@ def clear_model_environment(monkeypatch):
         "OPENAI_BASE_URL",
         "VIDEO_MAX_MINUTES",
         "GEMINI_FILE_RETENTION_SECONDS",
+        "PDF_MAX_PAGES",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -111,6 +112,14 @@ def test_video_limit_and_gemini_retention_defaults(monkeypatch):
     assert models.gemini_file_retention_seconds() == 900
     monkeypatch.setenv("VIDEO_MAX_MINUTES", "not-an-integer")
     with pytest.raises(models.ModelConfigError, match="VIDEO_MAX_MINUTES"):
+        models.validate_config()
+
+
+def test_pdf_max_pages_default_and_validation(monkeypatch):
+    clear_model_environment(monkeypatch)
+    assert models.pdf_max_pages() == 300
+    monkeypatch.setenv("PDF_MAX_PAGES", "0")
+    with pytest.raises(models.ModelConfigError, match="PDF_MAX_PAGES"):
         models.validate_config()
 
 
@@ -260,11 +269,16 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
             "document": False,
         }
         monkeypatch.setattr(
-            main, "graph_tools", [SimpleNamespace(name="analyze_video")]
+            main,
+            "graph_tools",
+            [
+                SimpleNamespace(name="analyze_video"),
+                SimpleNamespace(name="analyze_document"),
+            ],
         )
         capabilities = await client.get("/api/capabilities")
         assert capabilities.json() == {
             "max_tier": False,
             "video": True,
-            "document": False,
+            "document": True,
         }

@@ -2040,10 +2040,39 @@ textarea:focus-visible {
   font-size: 10px;
 }
 
+.document-chip-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-size: 10px;
+}
+
 .dialogue-video {
   margin-top: 8px;
   color: var(--text-secondary);
   font-size: 11px;
+}
+
+.dialogue-document {
+  display: flex;
+  width: max-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.dialogue-document span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 1100px) {

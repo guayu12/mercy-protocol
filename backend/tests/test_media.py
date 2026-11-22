@@ -1,5 +1,7 @@
 import asyncio
+import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpcore
 import httpx
@@ -230,6 +232,101 @@ def test_mp4_sniffing_checks_major_and_compatible_brands():
         ftyp(b"qt  "),
     ):
         assert media_store.sniff_media(rejected) is None
+    assert media_store.sniff_media(b"%PDF-1.7") == (
+        "document",
+        "application/pdf",
+    )
+
+
+@pytest.mark.asyncio
+async def test_old_media_schema_migrates_idempotently_and_preserves_rows(tmp_path):
+    database_path = tmp_path / "legacy.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE media (
+                media_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('image', 'video')),
+                origin TEXT NOT NULL CHECK (origin IN ('upload', 'search', 'link')),
+                url TEXT,
+                path TEXT,
+                mime TEXT NOT NULL,
+                bytes INTEGER,
+                caption TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                last_used_at REAL NOT NULL
+            );
+            CREATE INDEX idx_media_thread_created
+                ON media(thread_id, created_at);
+            CREATE UNIQUE INDEX idx_media_thread_url
+                ON media(thread_id, url) WHERE url IS NOT NULL;
+            """
+        )
+        connection.executemany(
+            "INSERT INTO media VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "m_legacy_upload",
+                    "legacy",
+                    "image",
+                    "upload",
+                    None,
+                    "/legacy/image.jpg",
+                    "image/jpeg",
+                    10,
+                    "image.jpg",
+                    1.0,
+                    2.0,
+                ),
+                (
+                    "m_legacy_url",
+                    "legacy",
+                    "video",
+                    "link",
+                    "https://media.test/legacy.mp4",
+                    None,
+                    "video/mp4",
+                    None,
+                    "legacy.mp4",
+                    3.0,
+                    4.0,
+                ),
+            ],
+        )
+
+    await media_store.init_store(str(database_path))
+    try:
+        assert (await media_store.get_media("m_legacy_upload"))["caption"] == "image.jpg"
+        legacy_url = await media_store.get_media("m_legacy_url")
+        assert legacy_url["url"] == "https://media.test/legacy.mp4"
+        document = await media_store.register_media(
+            "legacy",
+            "document",
+            "upload",
+            "application/pdf",
+            "legacy.pdf",
+            path="/legacy/document.pdf",
+            byte_count=20,
+        )
+        assert document["kind"] == "document"
+        await media_store.init_store(str(database_path))
+        assert (await media_store.get_media("m_legacy_upload"))["caption"] == "image.jpg"
+        assert (await media_store.get_media(document["media_id"]))["kind"] == "document"
+        with sqlite3.connect(database_path) as connection:
+            schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='media'"
+            ).fetchone()
+            indexes = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='media'"
+                ).fetchall()
+            }
+        assert "'document'" in schema[0]
+        assert {"idx_media_thread_created", "idx_media_thread_url"} <= indexes
+    finally:
+        await media_store.close_store()
 
 
 @pytest.mark.asyncio
@@ -252,6 +349,105 @@ async def test_upload_sniffing_and_overflow_cleanup(tmp_path, monkeypatch):
     assert oversized.status_code == 413
     assert list(media_store.media_directory().iterdir()) == [media_store.cache_directory()]
     await media_store.close_store()
+
+
+@pytest.mark.asyncio
+async def test_pdf_upload_is_magic_sniffed_limited_and_served_as_attachment(
+    tmp_path, monkeypatch
+):
+    assert media_store.DOCUMENT_LIMIT == 50 * 1024 * 1024
+    monkeypatch.setattr(media_store, "DOCUMENT_LIMIT", 1024)
+    await media_store.init_store(str(tmp_path / "session.db"))
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        renamed_text = await client.post(
+            "/api/upload",
+            data={"thread_id": "pdf-test"},
+            files={"file": ("not-really.pdf", b"plain text", "application/pdf")},
+        )
+        oversized = await client.post(
+            "/api/upload",
+            data={"thread_id": "pdf-test"},
+            files={
+                "file": (
+                    "large.pdf",
+                    b"%PDF-1.7\n" + b"x" * 2048,
+                    "application/pdf",
+                )
+            },
+        )
+        uploaded = await client.post(
+            "/api/upload",
+            data={"thread_id": "pdf-test"},
+            files={
+                "file": ("safe-name.pdf", b"%PDF-1.7\nbody\n", "application/pdf")
+            },
+        )
+        assert renamed_text.status_code == 415
+        assert oversized.status_code == 413
+        assert uploaded.status_code == 200
+        assert uploaded.json()["kind"] == "document"
+        assert uploaded.json()["mime"] == "application/pdf"
+        response = await client.get(f"/api/media/{uploaded.json()['media_id']}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"] == 'attachment; filename="safe-name.pdf"'
+    assert response.headers["x-content-type-options"] == "nosniff"
+    await media_store.close_store()
+
+
+@pytest.mark.asyncio
+async def test_document_attachment_is_not_image_or_stage_media(tmp_path, monkeypatch):
+    database_path = tmp_path / "session.db"
+    await media_store.init_store(str(database_path))
+    document = await media_store.register_media(
+        "document-context",
+        "document",
+        "upload",
+        "application/pdf",
+        "notes.pdf",
+        path="/tmp/notes.pdf",
+    )
+    try:
+        monkeypatch.setattr(
+            graph,
+            "tools",
+            graph.base_tools + [SimpleNamespace(name="analyze_document")],
+        )
+        query, image_urls = await graph._prepare_user_media(
+            "请阅读", "document-context", [document["media_id"]], None
+        )
+        assert query.endswith(
+            f"［用户上传了文档 {document['media_id']}（notes.pdf），"
+            "需要了解内容时用 analyze_document］"
+        )
+        assert image_urls == []
+
+        monkeypatch.setattr(graph, "tools", graph.base_tools)
+        query, image_urls = await graph._prepare_user_media(
+            "请阅读", "document-context", [document["media_id"]], None
+        )
+        assert query.endswith(
+            f"［用户上传了文档 {document['media_id']}（notes.pdf），你读不到内容］"
+        )
+        assert image_urls == []
+
+        await media_store.set_stage(
+            "document-context",
+            [{"kind": "document", "media_id": document["media_id"]}],
+            "阅读",
+            "normal",
+        )
+        restored = await media_store.get_stage("document-context")
+        assert restored["items"] == []
+        with sqlite3.connect(database_path) as connection:
+            items_json = connection.execute(
+                "SELECT items_json FROM stage_state WHERE thread_id = ?",
+                ("document-context",),
+            ).fetchone()[0]
+        assert items_json == "[]"
+    finally:
+        await media_store.close_store()
 
 
 @pytest.mark.asyncio
@@ -534,6 +730,22 @@ async def test_show_media_partial_and_all_failure(tmp_path, monkeypatch):
     await graph.clear_stage.ainvoke({}, config=config)
     assert await media_store.get_stage("show-test") is None
     assert events[-1]["type"] == "stage.clear"
+    events.clear()
+    document = await media_store.register_media(
+        "show-test",
+        "document",
+        "upload",
+        "application/pdf",
+        "document.pdf",
+        path="/tmp/document.pdf",
+    )
+    result = await graph.show_media.ainvoke(
+        {"media_ids": [document["media_id"]], "caption": "不能展示"},
+        config=config,
+    )
+    assert "文档不会展示在展示台上" in result
+    assert events == []
+    assert (await media_store.get_stage("show-test")) is None
     await media_store.close_store()
 
 
@@ -557,6 +769,19 @@ async def test_report_media_rewrite_and_prompt_omit_urls(tmp_path, monkeypatch):
     assert f"![图](media:{record['media_id']})" in markdown
     assert "外部" in markdown and "media:m_foreign" not in markdown
     assert removed == ["m_foreign"]
+    document = await media_store.register_media(
+        "prompt-test",
+        "document",
+        "upload",
+        "application/pdf",
+        "notes.pdf",
+        path="/tmp/notes.pdf",
+    )
+    markdown, removed = await graph.rewrite_report_media(
+        f"![文档](media:{document['media_id']})", "prompt-test"
+    )
+    assert markdown == "文档"
+    assert removed == [document["media_id"]]
     item = {
         "media_id": record["media_id"],
         "kind": "image",
@@ -586,6 +811,7 @@ async def test_report_media_rewrite_and_prompt_omit_urls(tmp_path, monkeypatch):
     assert "展示台：" in captured["prompt"]
     assert f"用户正在看 {record['media_id']}" in captured["prompt"]
     assert "https://" not in captured["prompt"]
+    assert f"{document['media_id']} · 文档 · 上传 · notes.pdf" in captured["prompt"]
     await media_store.close_store()
     await session_store.close_store()
 

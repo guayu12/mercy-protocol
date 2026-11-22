@@ -28,6 +28,14 @@ async def cleanup_gemini_files(*, delete_all: bool = False) -> None:
 
 
 async def gemini_file_cleanup_loop() -> None:
+    try:
+        await cleanup_gemini_files(delete_all=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Gemini file startup cleanup sweep failed"
+        )
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
         try:

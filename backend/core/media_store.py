@@ -17,6 +17,7 @@ _cache_eviction_lock = asyncio.Lock()
 
 IMAGE_LIMIT = 20 * 1024 * 1024
 VIDEO_LIMIT = 200 * 1024 * 1024
+DOCUMENT_LIMIT = 50 * 1024 * 1024
 MP4_BRANDS = {
     b"isom",
     b"iso2",
@@ -59,6 +60,8 @@ def cache_directory() -> Path:
 
 
 def sniff_media(header: bytes) -> tuple[str, str] | None:
+    if header.startswith(b"%PDF-"):
+        return "document", "application/pdf"
     if header.startswith(b"\xff\xd8\xff"):
         return "image", "image/jpeg"
     if header.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -85,6 +88,62 @@ def _safe_filename(filename: str | None) -> str:
     return "".join(char for char in name if char.isprintable() and char not in "/\\")[:160]
 
 
+async def _migrate_media_table(connection: aiosqlite.Connection) -> None:
+    cursor = await connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media'"
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    schema = str(row["sql"] or "").lower() if row is not None else ""
+    if "'document'" in schema:
+        return
+
+    await connection.execute("BEGIN IMMEDIATE")
+    try:
+        await connection.execute(
+            """
+            CREATE TABLE media_new (
+                media_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'document')),
+                origin TEXT NOT NULL CHECK (origin IN ('upload', 'search', 'link')),
+                url TEXT,
+                path TEXT,
+                mime TEXT NOT NULL,
+                bytes INTEGER,
+                caption TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                last_used_at REAL NOT NULL
+            )
+            """
+        )
+        await connection.execute(
+            """
+            INSERT INTO media_new (
+                media_id, thread_id, kind, origin, url, path, mime, bytes,
+                caption, created_at, last_used_at
+            )
+            SELECT
+                media_id, thread_id, kind, origin, url, path, mime, bytes,
+                caption, created_at, last_used_at
+            FROM media
+            """
+        )
+        await connection.execute("DROP TABLE media")
+        await connection.execute("ALTER TABLE media_new RENAME TO media")
+        await connection.execute(
+            "CREATE INDEX idx_media_thread_created ON media(thread_id, created_at)"
+        )
+        await connection.execute(
+            "CREATE UNIQUE INDEX idx_media_thread_url "
+            "ON media(thread_id, url) WHERE url IS NOT NULL"
+        )
+        await connection.commit()
+    except Exception:
+        await connection.rollback()
+        raise
+
+
 async def init_store(path: str) -> None:
     global _connection, _media_root
     database_path = Path(path).resolve()
@@ -101,7 +160,7 @@ async def init_store(path: str) -> None:
             CREATE TABLE IF NOT EXISTS media (
                 media_id TEXT PRIMARY KEY,
                 thread_id TEXT NOT NULL,
-                kind TEXT NOT NULL CHECK (kind IN ('image', 'video')),
+                kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'document')),
                 origin TEXT NOT NULL CHECK (origin IN ('upload', 'search', 'link')),
                 url TEXT,
                 path TEXT,
@@ -111,10 +170,6 @@ async def init_store(path: str) -> None:
                 created_at REAL NOT NULL,
                 last_used_at REAL NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_media_thread_created
-                ON media(thread_id, created_at);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_media_thread_url
-                ON media(thread_id, url) WHERE url IS NOT NULL;
             CREATE TABLE IF NOT EXISTS gemini_files (
                 media_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -132,6 +187,15 @@ async def init_store(path: str) -> None:
                 updated_at REAL NOT NULL
             );
             """
+        )
+        await _migrate_media_table(_connection)
+        await _connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_media_thread_created "
+            "ON media(thread_id, created_at)"
+        )
+        await _connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_thread_url "
+            "ON media(thread_id, url) WHERE url IS NOT NULL"
         )
         await _connection.commit()
 
@@ -161,6 +225,8 @@ async def register_media(
     path: str | None = None,
     byte_count: int | None = None,
 ) -> dict:
+    if kind == "document" and (origin != "upload" or url is not None):
+        raise ValueError("Documents can only be uploaded")
     now = time.time()
     async with _lock():
         db = _db()
@@ -211,7 +277,11 @@ async def register_upload(thread_id: str, upload) -> dict:
     if detected is None:
         raise UnsupportedUpload("Unsupported media format")
     kind, mime = detected
-    limit = IMAGE_LIMIT if kind == "image" else VIDEO_LIMIT
+    limit = {
+        "image": IMAGE_LIMIT,
+        "video": VIDEO_LIMIT,
+        "document": DOCUMENT_LIMIT,
+    }[kind]
     media_id = f"m_{secrets.token_urlsafe(16)}"
     path = _media_root / media_id
     total = 0
@@ -322,7 +392,21 @@ async def get_stage(thread_id: str) -> dict | None:
     if row is None:
         return None
     result = dict(row)
-    result["items"] = json.loads(result.pop("items_json"))
+    original_items = json.loads(result.pop("items_json"))
+    items = [
+        item
+        for item in original_items
+        if isinstance(item, dict) and item.get("kind") != "document"
+    ]
+    if len(items) != len(original_items):
+        async with _lock():
+            await _db().execute(
+                "UPDATE stage_state SET items_json = ?, updated_at = ? "
+                "WHERE thread_id = ?",
+                (json.dumps(items, ensure_ascii=False), time.time(), thread_id),
+            )
+            await _db().commit()
+    result["items"] = items
     return result
 
 
