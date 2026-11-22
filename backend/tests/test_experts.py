@@ -1448,7 +1448,7 @@ async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch)
         "curl https://api.test/v1\n"
         "```\n"
         "用 `curl https://api.test/v1` 调用\n"
-        "正文见 结束。\n"
+        "正文见  结束。\n"
         "\n\n本次没有搜到可用来源，内容未经核实。\n"
     )
     try:
