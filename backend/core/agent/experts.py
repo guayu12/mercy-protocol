@@ -329,6 +329,15 @@ async def _emit_report_done(
         state.done = True
 
 
+def _report_stream_was_truncated(response) -> bool:
+    metadata = getattr(response, "response_metadata", None) or {}
+    return (
+        metadata.get("finish_reason") == "length"
+        or metadata.get("status") == "incomplete"
+        or metadata.get("incomplete_details") is not None
+    )
+
+
 async def _stream_report(
     state: ReportStream,
     thread_id: str,
@@ -389,10 +398,7 @@ async def _stream_report(
         if suffix:
             await _buffer_report_text(state, suffix, thread_id, event_config)
             await _flush_report_buffer(state, thread_id, event_config)
-        if (
-            getattr(state.response, "response_metadata", {}).get("finish_reason")
-            == "length"
-        ):
+        if _report_stream_was_truncated(state.response):
             state.incomplete = True
             await _buffer_report_text(
                 state, INTERRUPTED_MARKER, thread_id, event_config

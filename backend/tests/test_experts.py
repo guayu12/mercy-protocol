@@ -371,8 +371,16 @@ async def test_report_error_emits_incomplete_marker_without_leaking_exception(
 
 
 @pytest.mark.asyncio
-async def test_report_finish_reason_length_marks_stream_incomplete(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "response_metadata",
+    [
+        {"finish_reason": "length"},
+        {"status": "incomplete"},
+        {"incomplete_details": {"reason": "max_output_tokens"}},
+    ],
+)
+async def test_report_stream_metadata_marks_stream_incomplete(
+    tmp_path, monkeypatch, response_metadata
 ):
     await init_stores(tmp_path)
 
@@ -380,9 +388,7 @@ async def test_report_finish_reason_length_marks_stream_incomplete(
         async def astream(self, messages, config=None):
             self.inputs.append((messages, config))
             yield AIMessageChunk(content="报告正文。\n")
-            yield AIMessageChunk(
-                content="", response_metadata={"finish_reason": "length"}
-            )
+            yield AIMessageChunk(content="", response_metadata=response_metadata)
 
     model = TruncatedModel()
     monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
@@ -393,12 +399,14 @@ async def test_report_finish_reason_length_marks_stream_incomplete(
             events.append(data)
 
     monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    thread_id = f"truncated-{len(response_metadata)}-{next(iter(response_metadata))}"
+    turn_id = f"{thread_id}-turn"
     try:
         result = await experts.write_report.ainvoke(
             {"title": "截断报告", "brief": "写一份"},
-            config=turn_config("length-report", "length-report-turn"),
+            config=turn_config(thread_id, turn_id),
         )
-        report = (await session_store.list_reports("length-report"))[0]
+        report = (await session_store.list_reports(thread_id))[0]
         deltas = [
             event["markdown"] for event in events if event["type"] == "report.delta"
         ]
@@ -409,7 +417,7 @@ async def test_report_finish_reason_length_marks_stream_incomplete(
         assert events[-1]["type"] == "report.done"
         assert "内容不完整" in result
     finally:
-        experts.clear_turn_budget("length-report-turn")
+        experts.clear_turn_budget(turn_id)
         await close_stores()
 
 
