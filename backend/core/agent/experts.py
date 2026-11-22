@@ -603,9 +603,9 @@ async def write_report(
 @tool
 async def investigate(question: str, config: RunnableConfig) -> str:
     """Delegate research that needs several sources or fact-checking to the research expert, who searches the web and puts a cited report on screen by itself. question: the full research question including constraints."""
-    async with _image_inspection_budget(config) as allowed:
+    async with _delegation_budget(config) as allowed:
         if not allowed:
-            return IMAGE_INSPECTION_LIMIT_TEXT
+            return DELEGATION_LIMIT_TEXT
         configurable, thread_id, turn_query = _config_context(config)
         tier = configurable.get("model_tier", "normal")
         child = _child_config(config)
@@ -738,9 +738,9 @@ async def inspect_image(
     if record["kind"] != "image":
         return f"{media_id} 不是图片，不能用 inspect_image。"
 
-    async with _delegation_budget(config) as allowed:
+    async with _image_inspection_budget(config) as allowed:
         if not allowed:
-            return DELEGATION_LIMIT_TEXT
+            return IMAGE_INSPECTION_LIMIT_TEXT
         try:
             if record["origin"] != "upload":
                 record = await media_store.cache_remote_image(
