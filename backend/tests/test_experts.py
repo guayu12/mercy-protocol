@@ -1470,6 +1470,67 @@ async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_investigate_nested_fence_closes_only_matching_length(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    research_model = SearchModel([AIMessage(content="资料已足够")])
+    report_model = StreamModel(
+        [
+            "````md\n",
+            "```\n",
+            "curl https://a.test\n",
+            "```\n",
+            "````\n",
+            "见 https://b.test 结尾",
+        ]
+    )
+
+    monkeypatch.setattr(
+        experts,
+        "expert_llm",
+        lambda role, tier, max_tokens=None, *, fallback=False: (
+            report_model if max_tokens is not None else research_model
+        ),
+    )
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    turn_id = "investigate-nested-fence-turn"
+    thread_id = "investigate-nested-fence"
+    expected = (
+        "````md\n"
+        "```\n"
+        "curl https://a.test\n"
+        "```\n"
+        "````\n"
+        "见  结尾"
+        "\n\n本次没有搜到可用来源，内容未经核实。\n"
+    )
+    try:
+        await experts.investigate.ainvoke(
+            {"question": "检查嵌套代码围栏"},
+            config=turn_config(thread_id, turn_id),
+        )
+        report = (await session_store.list_reports(thread_id))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+
+        assert report["markdown"] == expected
+        assert "curl https://a.test\n" in report["markdown"]
+        assert "b.test" not in report["markdown"]
+        assert report["markdown"] == "".join(deltas)
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_investigate_strips_titled_and_reference_links_and_parenthesized_urls(
     tmp_path, monkeypatch
 ):

@@ -249,7 +249,8 @@ class ReportStream:
     done: bool = False
     response: object | None = None
     strip_external_links: bool = False
-    code_fence: str | None = None
+    code_fence_char: str | None = None
+    code_fence_length: int = 0
 
     @property
     def text(self) -> str:
@@ -280,24 +281,46 @@ def _strip_external_links_from_text(markdown: str) -> str:
 _INLINE_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)")
 
 
+def _fence_line(line: str) -> tuple[str, int, str] | None:
+    indent = len(line) - len(line.lstrip(" "))
+    if indent > 3:
+        return None
+    content = line[indent:].rstrip("\r\n")
+    if not content or content[0] not in "`~":
+        return None
+    marker = content[0]
+    length = len(content) - len(content.lstrip(marker))
+    return marker, length, content[length:]
+
+
 def _strip_external_links_outside_code(
     markdown: str, state: ReportStream
 ) -> str:
     output = []
     for line in markdown.splitlines(keepends=True):
-        stripped = line.lstrip()
-        if state.code_fence:
+        fence_line = _fence_line(line)
+        if state.code_fence_char:
             output.append(line)
-            if stripped.startswith(state.code_fence):
-                state.code_fence = None
+            if (
+                fence_line is not None
+                and fence_line[0] == state.code_fence_char
+                and fence_line[1] >= state.code_fence_length
+                and not fence_line[2].strip()
+            ):
+                state.code_fence_char = None
+                state.code_fence_length = 0
             continue
 
-        fence = next(
-            (marker for marker in ("```", "~~~") if stripped.startswith(marker)),
-            None,
-        )
-        if fence:
-            state.code_fence = fence
+        if (
+            fence_line is not None
+            and fence_line[1] >= 3
+            and not (
+                fence_line[0] == "`"
+                and "`" in fence_line[2]
+            )
+        ):
+            state.code_fence_char = fence_line[0]
+            state.code_fence_length = fence_line[1]
             output.append(line)
             continue
 
