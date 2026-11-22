@@ -287,10 +287,13 @@ async def _emit_report_delta(
 def _unclosed_image_start(markdown: str) -> int | None:
     cursor = 0
     while (start := markdown.find("![", cursor)) >= 0:
-        link_start = markdown.find("](", start + 2)
-        if link_start < 0:
+        alt_end = markdown.find("]", start + 2)
+        if alt_end < 0:
             return start
-        link_end = markdown.find(")", link_start + 2)
+        if alt_end + 1 >= len(markdown) or markdown[alt_end + 1] != "(":
+            cursor = alt_end + 1
+            continue
+        link_end = markdown.find(")", alt_end + 2)
         if link_end < 0:
             return start
         cursor = link_end + 1

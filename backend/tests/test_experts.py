@@ -310,6 +310,46 @@ async def test_report_stream_rewrites_multiline_media_alt_by_ownership(
         await close_stores()
 
 
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ["let v = vec![1, ", "2];\n"],
+        ["```rust\nlet v = vec![\n", "  1,\n", "];\n```\n"],
+    ],
+)
+@pytest.mark.asyncio
+async def test_report_stream_preserves_code_bang_brackets_byte_identically(
+    chunks, tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    markdown = "".join(chunks)
+    model = StreamModel(chunks)
+    events = []
+    monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    turn_id = "code-literal-turn"
+    try:
+        await experts.write_report.ainvoke(
+            {"title": "代码", "brief": "原样保留代码"},
+            config=turn_config("code-literals", turn_id),
+        )
+        report = (await session_store.list_reports("code-literals"))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+
+        assert "".join(deltas) == markdown
+        assert report["markdown"] == markdown
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
 @pytest.mark.asyncio
 async def test_based_on_report_ownership_is_checked_before_budget(tmp_path, monkeypatch):
     await init_stores(tmp_path)
