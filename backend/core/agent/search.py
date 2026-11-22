@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from langchain_core.runnables import RunnableConfig
 from langchain_tavily import TavilySearch
@@ -33,7 +34,7 @@ async def format_search_result(
     result: dict,
     thread_id: str,
     numbered_from: int | None = None,
-) -> tuple[str, list[tuple[str, str]]]:
+) -> tuple[str, list[tuple[int, str, str]]]:
     if result.get("error"):
         return str(result["error"]), []
 
@@ -42,26 +43,28 @@ async def format_search_result(
     if result.get("answer"):
         sections.append(_without_urls(str(result["answer"])))
 
-    next_number = numbered_from
+    number_results = numbered_from is not None
+    next_number = numbered_from or 1
     for item in result.get("results", []):
         if not isinstance(item, dict):
             continue
-        title = _without_urls(str(item.get("title", "")))
+        title = re.sub(r"\s+", " ", _without_urls(str(item.get("title", ""))))
         content = _without_urls(str(item.get("content", "")))
         raw_url = item.get("url")
         url = (
-            raw_url
+            raw_url.strip()
             if isinstance(raw_url, str)
-            and raw_url.startswith(("http://", "https://"))
+            and raw_url.strip().startswith(("http://", "https://"))
             else ""
         )
+        result_number = next_number
         section = f"{title}\n{content}".strip()
-        if next_number is not None:
-            section = f"[{next_number}] {section}".strip()
-            next_number += 1
+        if number_results:
+            section = f"[{result_number}] {section}".strip()
+        next_number += 1
         if section:
             sections.append(section)
-        sources.append((title, url))
+        sources.append((result_number, title or url, quote(url, safe=":/?#[]@!$&'*,;=%")))
 
     image_lines = []
     image_mimes = {

@@ -1300,7 +1300,7 @@ async def test_search_sources_stay_aligned_across_numbered_searches():
             "results": [
                 {
                     "content": "第一条结果正文",
-                    "url": "https://example.test/first",
+                    "url": "https://example.test/first_(report)",
                 }
             ]
         },
@@ -1311,7 +1311,7 @@ async def test_search_sources_stay_aligned_across_numbered_searches():
         {
             "results": [
                 {
-                    "title": "第二条结果",
+                    "title": "第二条\n[研究]  标题",
                     "content": "第二条正文",
                 }
             ]
@@ -1323,7 +1323,17 @@ async def test_search_sources_stay_aligned_across_numbered_searches():
     sources = first_sources + second_sources
     appendix = experts._append_sources(sources)
     assert "[1] 第一条结果正文" in first_text
-    assert "[2] 第二条结果\n第二条正文" in second_text
-    assert sources == [("", "https://example.test/first"), ("第二条结果", "")]
-    assert "1. [https://example.test/first](https://example.test/first)" in appendix
-    assert "2. 第二条结果\n" in appendix
+    assert "[2] 第二条 [研究] 标题\n第二条正文" in second_text
+    assert sources == [
+        (
+            1,
+            "https://example.test/first_(report)",
+            "https://example.test/first_%28report%29",
+        ),
+        (2, "第二条 [研究] 标题", ""),
+    ]
+    assert (
+        "1. [https://example.test/first_(report)]"
+        "(https://example.test/first_%28report%29)"
+    ) in appendix
+    assert "2. 第二条 \\[研究\\] 标题\n" in appendix

@@ -200,15 +200,16 @@ def clear_turn_budget(turn_id: str) -> None:
     _turn_budgets.pop(turn_id, None)
 
 
-def _append_sources(sources: list[tuple[str, str]]) -> str:
+def _append_sources(sources: list[tuple[int, str, str]]) -> str:
     if not sources:
         return ""
     formatted = []
-    for index, (title, url) in enumerate(sources, start=1):
+    for number, title, url in sources:
+        title = " ".join(title.split()).replace("[", r"\[").replace("]", r"\]")
         if url:
-            formatted.append(f"{index}. [{title or url}]({url})\n")
+            formatted.append(f"{number}. [{title or url}]({url})\n")
         else:
-            formatted.append(f"{index}. {title or '（无链接）'}\n")
+            formatted.append(f"{number}. {title or '（无链接）'}\n")
     return "\n\n## 来源\n" + "".join(formatted)
 
 
@@ -566,7 +567,7 @@ async def investigate(question: str, config: RunnableConfig) -> str:
         configurable, thread_id, turn_query = _config_context(config)
         tier = configurable.get("model_tier", "normal")
         child = _child_config(config)
-        sources: list[tuple[str, str]] = []
+        sources: list[tuple[int, str, str]] = []
         numbered_results: list[str] = []
         try:
             deadline = asyncio.get_running_loop().time() + 300
@@ -627,7 +628,9 @@ async def investigate(question: str, config: RunnableConfig) -> str:
                         search_raw(query, child), timeout=remaining
                     )
                     text, found_sources = await format_search_result(
-                        raw, thread_id, numbered_from=len(sources) + 1
+                        raw,
+                        thread_id,
+                        numbered_from=(sources[-1][0] + 1 if sources else 1),
                     )
                     sources.extend(found_sources)
                     numbered_results.append(text)
