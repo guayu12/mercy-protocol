@@ -24,7 +24,6 @@ from core.agent.search import (
     _without_urls,
     format_search_result,
     format_sources,
-    report_full_text,
     tavily_raw,
 )
 from core.models import ModelSpec, get_llm, get_model_spec, is_transient
@@ -735,7 +734,7 @@ async def _run_report_tool(
     sources: list[dict] | None = None,
 ) -> str:
     _, thread_id, turn_query = _config_context(config)
-    state = ReportStream(strip_external_links=tool_name == "investigate")
+    state = ReportStream(strip_external_links=link_policy == "sources_only")
     child = _child_config(config)
 
     async def run():
@@ -805,11 +804,25 @@ async def write_report(
         if not allowed:
             return DELEGATION_LIMIT_TEXT
         task = brief
+        link_policy = "open"
+        sources = None
         if based_on:
             task += (
-                f"\n\n需要修订的报告 {based_on_report_id}《{based_on['title']}》全文：\n"
-                f"<<<\n{report_full_text(based_on)}\n>>>"
+                f"\n\n需要修订的报告 {based_on_report_id}《{based_on['title']}》正文：\n"
+                f"<<<\n{based_on['markdown']}\n>>>"
             )
+            if based_on.get("link_policy") == "sources_only":
+                link_policy = "sources_only"
+                sources = based_on.get("sources")
+                source_titles = "\n".join(
+                    f"[{source['number']}] {source['title']}"
+                    for source in sources or []
+                )
+                task += (
+                    "\n\n原报告来源编号与标题：\n"
+                    f"{source_titles}\n"
+                    "修订时请保留原有 [n] 编号。"
+                )
         assistant_name = os.environ.get("ASSISTANT_NAME", "Aura")
         return await _run_report_tool(
             tool_name="write_report",
@@ -821,6 +834,8 @@ async def write_report(
             title=title,
             config=config,
             timeout=180,
+            link_policy=link_policy,
+            sources=sources,
         )
 
 

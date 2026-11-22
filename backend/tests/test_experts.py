@@ -384,8 +384,11 @@ async def test_based_on_report_ownership_is_checked_before_budget(tmp_path, monk
             config=turn_config("not-owner", "revision-turn"),
         )
         human = model.inputs[0][0][1].content
+        reports = await session_store.list_reports("not-owner")
         assert "需要修订的报告" in human
         assert "需要保留的全文" in human
+        assert reports[-1]["link_policy"] == "open"
+        assert reports[-1]["sources"] is None
     finally:
         await close_stores()
 
@@ -411,8 +414,15 @@ async def test_revising_sources_only_report_includes_citations_in_expert_context
             }
         ],
     )
-    model = StreamModel(["修订完成。"])
+    model = StreamModel(["变体 [官网](https://copied.test/path)。"])
     monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
     try:
         await experts.write_report.ainvoke(
             {
@@ -423,11 +433,24 @@ async def test_revising_sources_only_report_includes_citations_in_expert_context
             config=turn_config(thread_id, turn_id),
         )
         human = model.inputs[0][0][1].content
+        report = (await session_store.list_reports(thread_id))[-1]
+        open_event = next(
+            event
+            for event in events
+            if event["type"] == "report.open"
+            and event["report_id"] == report["report_id"]
+        )
+        assert report["link_policy"] == original["link_policy"]
+        assert report["sources"] == original["sources"]
+        assert open_event["link_policy"] == "sources_only"
+        assert open_event["sources"] == original["sources"]
         assert "需要修订的报告" in human
         assert "# 报告正文" in human
-        assert "## 来源" in human
-        assert "官方来源" in human
-        assert "https://source.test/report" in human
+        assert "[1] 官方来源" in human
+        assert "保留原有 [n] 编号" in human
+        assert re.search(r"https?://", human) is None
+        assert "官网" in report["markdown"]
+        assert "copied.test" not in report["markdown"]
     finally:
         experts.clear_turn_budget(turn_id)
         await close_stores()
