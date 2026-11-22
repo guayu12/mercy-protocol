@@ -1,7 +1,5 @@
 import base64
-import io
 import os
-import re
 import time
 import asyncio
 import secrets
@@ -23,7 +21,6 @@ from langchain_core.messages import (
     ToolMessage,
     message_chunk_to_message,
 )
-from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks import adispatch_custom_event
@@ -35,8 +32,26 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from core.memory.memory_manager import MemoryManager
 from core import log_bus  # ← real-time log broadcaster
 from core import media_store, session_store, speech_queue
-from core.models import ModelConfigError, get_llm, get_model_spec, validate_config
-from core.agent.search import format_search_result, tavily_raw
+from core.models import (
+    ModelConfigError,
+    get_llm,
+    get_model_spec,
+    role_available,
+    validate_config,
+)
+from core.agent.experts import (
+    clear_turn_budget,
+    inspect_image,
+    investigate,
+    write_report,
+)
+from core.agent.media_utils import cache_limit_bytes, image_data_url_from_path
+from core.agent.report_utils import rewrite_report_media
+from core.agent.search import (
+    _without_urls,
+    format_search_result,
+    tavily_raw,
+)
 from core.safe_fetch import safe_media_fetcher
 from core.speakable import SpeechRouter
 
@@ -106,31 +121,13 @@ def create_local_directory(dir_name: str) -> str:
         return f"Failed to create directory: {str(e)}"
 
 
-async def _rewrite_report_media(markdown: str, thread_id: str) -> tuple[str, list[str]]:
-    pattern = re.compile(r"!\[([^\]]*)\]\(media:(m_[A-Za-z0-9_-]+)\)")
-    parts = []
-    removed = []
-    cursor = 0
-    for match in pattern.finditer(markdown):
-        parts.append(markdown[cursor : match.start()])
-        record = await media_store.get_media(match.group(2), thread_id)
-        if record:
-            parts.append(match.group(0))
-        else:
-            parts.append(match.group(1))
-            removed.append(match.group(2))
-        cursor = match.end()
-    parts.append(markdown[cursor:])
-    return "".join(parts), removed
-
-
 @tool
 async def show_report(title: str, markdown: str, config: RunnableConfig) -> str:
     """Put a document on screen. ANY table, code, list of links, step-by-step document, or content longer than about three sentences MUST use this tool and never be included in the spoken reply."""
     configurable = config.get("configurable", {})
     thread_id = configurable.get("thread_id", "default_user")
     query = configurable.get("turn_query", "")
-    markdown, removed_media_ids = await _rewrite_report_media(markdown, thread_id)
+    markdown, removed_media_ids = await rewrite_report_media(markdown, thread_id)
     report = await session_store.create_report(thread_id, title, query, markdown)
     report_id = report["report_id"]
     await adispatch_custom_event(
@@ -272,7 +269,7 @@ async def highlight_report(
     return "已在屏幕上高亮。"
 
 
-tools = [
+base_tools = [
     check_weather,
     get_current_time,
     save_memory,
@@ -285,6 +282,18 @@ tools = [
     highlight_report,
 ]
 
+def build_tools():
+    configured_tools = list(base_tools)
+    if role_available("report"):
+        configured_tools.append(write_report)
+    if role_available("research"):
+        configured_tools.append(investigate)
+    if role_available("vision"):
+        configured_tools.append(inspect_image)
+    return configured_tools
+
+
+tools = build_tools()
 conversation_model = get_llm("conversation")
 llm_with_tools = conversation_model.bind_tools(tools) if conversation_model else None
 fallback_model = get_llm("conversation", fallback=True)
@@ -329,35 +338,11 @@ async def _media_screen_context(thread_id: str, screen_state: dict) -> str:
 
 
 def _image_data_url(path: str) -> str | None:
-    from PIL import Image
-
-    image_path = Path(path)
-    if not image_path.is_file():
-        return None
     try:
-        with Image.open(image_path) as source:
-            source.seek(0)
-            image = source.copy()
-            image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
-            has_alpha = "A" in image.getbands() or "transparency" in source.info
-            if has_alpha:
-                image_format = "PNG"
-                image = image.convert("RGBA")
-                mime = "image/png"
-            else:
-                image_format = "JPEG"
-                image = image.convert("RGB")
-                mime = "image/jpeg"
-            output = io.BytesIO()
-            if image_format == "JPEG":
-                image.save(output, format=image_format, quality=85)
-            else:
-                image.save(output, format=image_format)
+        return image_data_url_from_path(path)
     except Exception as error:
         log_bus.emit("warn", "MEDIA", f"could not decode uploaded image: {error}")
         return None
-    encoded = base64.b64encode(output.getvalue()).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
 
 
 async def _prepare_user_media(
@@ -383,10 +368,7 @@ async def _prepare_user_media(
         except Exception as error:
             log_bus.emit("warn", "MEDIA", f"ignored legacy image attachment: {error}")
 
-    try:
-        cache_limit = max(0, int(os.environ.get("MEDIA_CACHE_MAX_MB", "500"))) * 1024 * 1024
-    except ValueError:
-        cache_limit = 500 * 1024 * 1024
+    cache_limit = cache_limit_bytes()
     for media_id in attachments or []:
         record = await media_store.get_media(media_id, thread_id)
         if record is None:
@@ -659,6 +641,7 @@ async def process_query(
     # Serialize turns per thread so concurrent requests don't overwrite each other's checkpoints
     async with _thread_locks[thread_id]:
         graph = await init_graph()
+        original_query = query
         query, image_data_urls = await _prepare_user_media(
             query, thread_id, attachments, image_base64
         )
@@ -666,7 +649,8 @@ async def process_query(
         config = {
             "configurable": {
                 "thread_id": thread_id,
-                "turn_query": query,
+                "turn_query": original_query,
+                "turn_id": turn_id,
                 "screen_state": screen_state or {},
             }
         }
@@ -805,6 +789,12 @@ async def process_query(
                 version="v2",
             ):
                 kind = event["event"]
+                if kind in {
+                    "on_tool_start",
+                    "on_tool_end",
+                    "on_chat_model_stream",
+                } and "mercy_expert" in (event.get("tags") or []):
+                    continue
                 if kind == "on_chat_model_stream":
                     if event.get("metadata", {}).get("langgraph_node") != "agent":
                         continue
@@ -857,6 +847,9 @@ async def process_query(
                         "tavily_search": "正在搜索",
                         "show_report": "正在整理报告",
                         "read_report": "正在翻看报告",
+                        "write_report": "正在写报告",
+                        "investigate": "正在调查",
+                        "inspect_image": "正在看图",
                     }
                     if event["name"] == "show_report" and report_status_pending:
                         report_status_pending -= 1
@@ -945,5 +938,6 @@ async def process_query(
             await save_assistant_utterance(interrupted=False)
             raise
         finally:
+            clear_turn_budget(turn_id)
             if not assistant_utterance_saved:
                 await save_assistant_utterance(interrupted=True)
