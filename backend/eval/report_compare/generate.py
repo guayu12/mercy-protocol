@@ -3,7 +3,7 @@ import sys
 
 usage: venv/bin/python generate.py --chain luna|terra --runs 2 --out DIR   (cwd = backend/)
 """
-import argparse, asyncio, json, os, secrets, sys, time
+import argparse, asyncio, json, os, secrets, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--chain", choices=["luna", "terra"], required=True)

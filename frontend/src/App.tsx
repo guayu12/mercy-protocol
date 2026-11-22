@@ -598,6 +598,11 @@ export function App() {
             turn_id: string;
             role: "user" | "assistant";
             text: string;
+            attachments?: Array<{
+              media_id: string;
+              kind: "image" | "video" | "document";
+              filename: string;
+            }>;
             interrupted?: boolean;
             created_at: number;
           }>;
@@ -618,6 +623,7 @@ export function App() {
             turnId: utterance.turn_id,
             role: utterance.role,
             content: utterance.text,
+            attachments: utterance.attachments ?? [],
             interrupted: utterance.interrupted,
             createdAt: utterance.created_at,
           }));
@@ -1504,7 +1510,9 @@ export function App() {
                             : "系统"}
                       </span>
                       <time>{timeLabel(message.createdAt)}</time>
-                      {message.interrupted && <span className="interrupted-tag">已打断</span>}
+                      {message.interrupted ? (
+                        <span className="interrupted-tag">已打断</span>
+                      ) : null}
                     </div>
                     {(message.content || message.attachments?.length) && (
                       <div className="dialogue-bubble">

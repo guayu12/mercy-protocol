@@ -21,6 +21,11 @@ def test_to_speakable_removes_markdown_and_keeps_text():
     assert to_speakable("中 English 123 😀 继续") == "中 English 123 继续"
 
 
+def test_to_speakable_removes_hidden_zero_width_characters_but_keeps_joiner():
+    assert to_speakable("M\u200bE\u200cR\u2060C\ufeffY") == "MERCY"
+    assert to_speakable("a\u200db") == "a\u200db"
+
+
 def test_to_speakable_requires_matching_fence_character_and_length():
     assert to_speakable("```markdown\n~~~\nexample\n```\n后面这句要念") == "后面这句要念"
     assert (

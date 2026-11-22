@@ -1127,6 +1127,22 @@ async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_ca
     await init_stores(tmp_path)
     started = asyncio.Event()
     cancelled = asyncio.Event()
+    persist_started = asyncio.Event()
+    allow_persist = asyncio.Event()
+    persisted = asyncio.Event()
+    second_graph_started = asyncio.Event()
+
+    original_update = session_store.update_report_markdown
+
+    async def delayed_update(report_id, markdown):
+        if "（生成中断）" in markdown:
+            persist_started.set()
+            await allow_persist.wait()
+        await original_update(report_id, markdown)
+        if "（生成中断）" in markdown:
+            persisted.set()
+
+    monkeypatch.setattr(session_store, "update_report_markdown", delayed_update)
 
     class WaitingComposer(StreamModel):
         async def astream(self, messages, config=None):
@@ -1169,15 +1185,59 @@ async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_ca
         tmp_path, monkeypatch, toolset, conversation
     )
     thread_id = "investigate-disconnect"
+
+    class ObservedLock(asyncio.Lock):
+        def __init__(self):
+            super().__init__()
+            self.acquire_calls = 0
+            self.second_acquire_started = asyncio.Event()
+
+        async def acquire(self):
+            self.acquire_calls += 1
+            if self.acquire_calls == 2:
+                self.second_acquire_started.set()
+            return await super().acquire()
+
+    lock = ObservedLock()
+    monkeypatch.setitem(agent_graph._thread_locks, thread_id, lock)
+    init_graph = agent_graph.init_graph
+    init_graph_calls = 0
+
+    async def tracked_init_graph():
+        nonlocal init_graph_calls
+        init_graph_calls += 1
+        if init_graph_calls == 2:
+            second_graph_started.set()
+            assert persisted.is_set()
+        return await init_graph()
+
+    monkeypatch.setattr(agent_graph, "init_graph", tracked_init_graph)
     generator = agent_graph.process_query("调查问题", thread_id)
     events = []
+    close_task = None
+    next_turn_task = None
+
+    async def collect_next_turn():
+        return [
+            event
+            async for event in agent_graph.process_query("继续", thread_id)
+        ]
+
     try:
         async for event in generator:
             events.append(event)
             if event["type"] == "report.delta":
                 break
         await asyncio.wait_for(started.wait(), timeout=1)
-        await generator.aclose()
+        close_task = asyncio.create_task(generator.aclose())
+        await asyncio.wait_for(persist_started.wait(), timeout=1)
+        next_turn_task = asyncio.create_task(collect_next_turn())
+        await asyncio.wait_for(lock.second_acquire_started.wait(), timeout=1)
+        assert not second_graph_started.is_set()
+        assert not persisted.is_set()
+        allow_persist.set()
+        await asyncio.wait_for(close_task, timeout=1)
+        await asyncio.wait_for(persisted.wait(), timeout=1)
         await asyncio.wait_for(cancelled.wait(), timeout=1)
         report = (await session_store.list_reports(thread_id))[0]
         emitted = "".join(
@@ -1186,10 +1246,7 @@ async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_ca
         assert composer.cancelled
         assert report["markdown"] == emitted + "\n\n（生成中断）\n"
 
-        next_events = [
-            event
-            async for event in agent_graph.process_query("继续", thread_id)
-        ]
+        next_events = await next_turn_task
         assert next_events[-1]["type"] == "done"
         state = await agent_graph.app_graph.aget_state(
             {"configurable": {"thread_id": thread_id}}
@@ -1202,6 +1259,11 @@ async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_ca
             for message in messages
         )
     finally:
+        allow_persist.set()
+        if close_task is not None and not close_task.done():
+            await asyncio.wait_for(close_task, timeout=1)
+        if next_turn_task is not None and not next_turn_task.done():
+            await asyncio.wait_for(next_turn_task, timeout=1)
         await generator.aclose()
         await close_process_graph(connection)
 
