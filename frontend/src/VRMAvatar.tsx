@@ -102,7 +102,9 @@ export const VRMAvatar = forwardRef<VRMAvatarHandle, VRMAvatarProps>(function VR
             {DEBUG_ENABLED && engine && (
                 showDebug
                     ? <DebugPanel engine={engine} />
-                    : <button className="absolute top-10 left-3 z-40 px-1.5 py-0.5 rounded bg-black/60 border border-[#00e5ff]/40 text-[9px] font-mono text-cyan-200"
+                    // Bottom-left, above the subtitle bar; inline so it wins over the host's positioning rules.
+                    : <button className="absolute z-40 px-1.5 py-0.5 rounded bg-black/60 border text-[9px] font-mono"
+                        style={{ top: "auto", bottom: "6.5rem", left: "0.75rem", borderColor: "rgba(229,169,109,0.45)", color: "#e5a96d" }}
                         onClick={() => setShowDebug(true)} data-testid="avatar-debug-toggle">DBG</button>
             )}
         </div>
