@@ -53,6 +53,38 @@ def test_parse_spec_rejects_unknown_provider():
         models.parse_spec("MODEL_TEST", "other:gpt-x")
 
 
+@pytest.mark.parametrize(
+    "effort",
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
+)
+def test_parse_spec_accepts_supported_reasoning_efforts(effort):
+    assert models.parse_spec(
+        "MODEL_REPORT", f"openai:report-model@{effort}"
+    ) == models.ModelSpec("openai", "report-model", effort)
+
+
+def test_validate_config_rejects_unsupported_reasoning_effort(monkeypatch):
+    clear_model_environment(monkeypatch)
+    monkeypatch.setenv("MODEL_CONVERSATION", "openai:chat-model@unsupported")
+
+    with pytest.raises(
+        models.ModelConfigError,
+        match="MODEL_CONVERSATION: unsupported reasoning effort",
+    ):
+        models.validate_config()
+
+
+def test_validate_config_checks_legacy_reasoning_effort(monkeypatch):
+    clear_model_environment(monkeypatch)
+    monkeypatch.setenv("DEFAULT_REASONING_EFFORT", "unsupported")
+
+    with pytest.raises(
+        models.ModelConfigError,
+        match="DEFAULT_REASONING_EFFORT: unsupported reasoning effort",
+    ):
+        models.validate_config()
+
+
 @pytest.mark.parametrize("provider", ["gemini", "deepseek"])
 def test_validate_config_rejects_disabled_chat_providers(provider, monkeypatch):
     clear_model_environment(monkeypatch)

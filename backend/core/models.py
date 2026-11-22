@@ -17,6 +17,7 @@ class ModelSpec:
 CHAT_ROLES = ("conversation", "report", "research", "vision")
 ROLES = CHAT_ROLES + ("video",)
 PROVIDERS = {"openai", "gemini", "deepseek"}
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 PROVIDER_KEYS = {
     "openai": ("OPENAI_API_KEY",),
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
@@ -32,6 +33,13 @@ ROLE_TIMEOUTS = {
 
 class ModelConfigError(ValueError):
     pass
+
+
+def _validate_effort(var_name: str, effort: str | None) -> None:
+    if effort is not None and effort not in REASONING_EFFORTS:
+        raise ModelConfigError(
+            f"{var_name}: unsupported reasoning effort {effort!r}"
+        )
 
 
 def is_transient(error: Exception) -> bool:
@@ -73,6 +81,7 @@ def parse_spec(var_name: str, value: str | None) -> ModelSpec | None:
             raise ModelConfigError(
                 f"{var_name}: expected provider:model[@effort], got {raw_value!r}"
             )
+        _validate_effort(var_name, effort)
     else:
         model = rest.strip()
 
@@ -100,6 +109,7 @@ def _legacy_spec(role: str) -> ModelSpec | None:
     if role == "conversation" and not os.environ.get("MODEL_CONVERSATION", "").strip():
         model = os.environ.get("DEFAULT_MODEL", "").strip() or "gpt-6-luna"
         effort = os.environ.get("DEFAULT_REASONING_EFFORT", "").strip() or None
+        _validate_effort("DEFAULT_REASONING_EFFORT", effort)
         return ModelSpec("openai", model, effort)
     if role == "vision" and not os.environ.get("MODEL_VISION", "").strip():
         model = os.environ.get("OPENAI_VISION_MODEL", "").strip()
@@ -154,6 +164,8 @@ def validate_config() -> None:
                 raise ModelConfigError(
                     f"{var_name}: provider '{spec.provider}' 1c 未启用（聊天类角色只支持 openai）"
                 )
+    if not os.environ.get("MODEL_CONVERSATION", "").strip():
+        _legacy_spec("conversation")
 
 
 def get_llm(
