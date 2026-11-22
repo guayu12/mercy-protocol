@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -223,6 +224,7 @@ class ReportStream:
     marker_in_storage: bool = False
     done: bool = False
     response: object | None = None
+    strip_external_links: bool = False
 
     @property
     def text(self) -> str:
@@ -235,6 +237,19 @@ async def _emit_report_delta(
     thread_id: str,
     config: RunnableConfig,
 ) -> None:
+    if state.strip_external_links:
+        markdown = re.sub(
+            r"!?\[([^\]]+)\]\(https?://[^)\s]+\)",
+            r"\1",
+            markdown,
+            flags=re.IGNORECASE,
+        )
+        markdown = re.sub(
+            r"https?://[^\s<>\]\)]+",
+            "",
+            markdown,
+            flags=re.IGNORECASE,
+        )
     rewritten, _ = await rewrite_report_media(markdown, thread_id)
     if not rewritten:
         return
@@ -397,6 +412,7 @@ async def _stream_report(
             state.response = combined
         await _flush_report_buffer(state, thread_id, event_config)
         if suffix:
+            state.strip_external_links = False
             await _buffer_report_text(state, suffix, thread_id, event_config)
             await _flush_report_buffer(state, thread_id, event_config)
         if _report_stream_was_truncated(state.response):
@@ -413,7 +429,9 @@ async def _stream_report(
         raise
     except Exception:
         state.incomplete = True
+        await _flush_report_buffer(state, thread_id, event_config)
         if suffix:
+            state.strip_external_links = False
             await _buffer_report_text(state, suffix, thread_id, event_config)
             await _flush_report_buffer(state, thread_id, event_config)
         await _buffer_report_text(
@@ -438,7 +456,9 @@ async def _finish_timeout(
     if not state.report_id:
         return
     state.marker_in_storage = False
+    await _flush_report_buffer(state, thread_id, config)
     if suffix:
+        state.strip_external_links = False
         await _buffer_report_text(state, suffix, thread_id, config)
         await _flush_report_buffer(state, thread_id, config)
     await _buffer_report_text(state, INTERRUPTED_MARKER, thread_id, config)
@@ -471,7 +491,7 @@ async def _run_report_tool(
     human_suffix: str = "",
 ) -> str:
     _, thread_id, turn_query = _config_context(config)
-    state = ReportStream()
+    state = ReportStream(strip_external_links=tool_name == "investigate")
     child = _child_config(config)
 
     async def run():

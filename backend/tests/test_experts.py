@@ -1217,6 +1217,70 @@ async def test_investigate_without_sources_marks_report_unverified(
 
 
 @pytest.mark.asyncio
+async def test_investigate_strips_model_links_but_preserves_source_appendix(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    search_model = SearchModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[_tool_call("tavily_search", {"query": "source"}, "s1")],
+            ),
+            AIMessage(content="资料已足够"),
+        ]
+    )
+    report_model = StreamModel(
+        ["结论见 [官方链接](https://model.invalid/page)，还有裸链接 https://bare.invalid/page。\n"]
+    )
+
+    async def search_raw(query, config):
+        return {
+            "results": [
+                {
+                    "title": "官方来源",
+                    "url": "https://source.invalid/a_(b)",
+                    "content": "来源内容",
+                }
+            ]
+        }
+
+    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+        return report_model if max_tokens is not None else search_model
+
+    monkeypatch.setattr(experts, "expert_llm", expert_model)
+    monkeypatch.setattr(experts, "search_raw", search_raw)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    turn_id = "investigate-links-turn"
+    thread_id = "investigate-links"
+    try:
+        await experts.investigate.ainvoke(
+            {"question": "核实来源链接"},
+            config=turn_config(thread_id, turn_id),
+        )
+        report = (await session_store.list_reports(thread_id))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+
+        assert "官方链接" in report["markdown"]
+        assert "model.invalid" not in report["markdown"]
+        assert "bare.invalid" not in report["markdown"]
+        assert "## 来源" in report["markdown"]
+        assert "https://source.invalid/a_%28b%29" in report["markdown"]
+        assert report["markdown"] == "".join(deltas)
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_inspect_image_uses_transient_fallback(tmp_path, monkeypatch):
     from PIL import Image
 
