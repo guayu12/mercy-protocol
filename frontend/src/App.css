@@ -824,7 +824,8 @@ textarea:focus-visible {
 
 .report-sources ol {
   margin: 0;
-  padding-left: 25px;
+  padding-left: 0;
+  list-style: none;
 }
 
 .report-sources li {
