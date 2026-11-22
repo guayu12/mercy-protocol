@@ -220,6 +220,25 @@ async def _emit_report_delta(
     )
 
 
+def _unclosed_image_start(markdown: str) -> int | None:
+    cursor = 0
+    while (start := markdown.find("![", cursor)) >= 0:
+        link_start = markdown.find("](", start + 2)
+        if link_start < 0:
+            return start
+        link_end = markdown.find(")", link_start + 2)
+        if link_end < 0:
+            return start
+        cursor = link_end + 1
+    return None
+
+
+def _defuse_unclosed_images(markdown: str) -> str:
+    while (start := _unclosed_image_start(markdown)) is not None:
+        markdown = markdown[:start] + markdown[start + 1 :]
+    return markdown
+
+
 async def _buffer_report_text(
     state: ReportStream,
     text: str,
@@ -229,7 +248,19 @@ async def _buffer_report_text(
     state.buffer += text
     if "\n" in state.buffer:
         end = state.buffer.rfind("\n") + 1
-        complete, state.buffer = state.buffer[:end], state.buffer[end:]
+        complete, remainder = state.buffer[:end], state.buffer[end:]
+        unclosed_image = _unclosed_image_start(complete)
+        if unclosed_image is None:
+            state.buffer = remainder
+        else:
+            state.buffer = complete[unclosed_image:] + remainder
+            complete = complete[:unclosed_image]
+        if complete:
+            await _emit_report_delta(state, complete, thread_id, config)
+    unclosed_image = _unclosed_image_start(state.buffer)
+    if unclosed_image is not None and len(state.buffer) - unclosed_image > 2000:
+        complete = _defuse_unclosed_images(state.buffer)
+        state.buffer = ""
         await _emit_report_delta(state, complete, thread_id, config)
 
 
@@ -239,7 +270,8 @@ async def _flush_report_buffer(
     config: RunnableConfig,
 ) -> None:
     if state.buffer:
-        remaining, state.buffer = state.buffer, ""
+        remaining = _defuse_unclosed_images(state.buffer)
+        state.buffer = ""
         await _emit_report_delta(state, remaining, thread_id, config)
 
 

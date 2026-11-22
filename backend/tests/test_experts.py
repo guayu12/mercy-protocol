@@ -257,6 +257,52 @@ async def test_write_report_streams_complete_lines_rewrites_media_and_updates_db
 
 
 @pytest.mark.asyncio
+async def test_report_stream_rewrites_multiline_media_alt_by_ownership(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    own = await media_store.register_media(
+        "multiline-report", "image", "upload", "image/png", "owned"
+    )
+    foreign = await media_store.register_media(
+        "other-thread", "image", "upload", "image/png", "foreign"
+    )
+    model = StreamModel(
+        [
+            "前文\n![外部\n",
+            f"图片](media:{foreign['media_id']})\n![本地\n",
+            f"图片](media:{own['media_id']})\n",
+        ]
+    )
+    monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    try:
+        await experts.write_report.ainvoke(
+            {"title": "图片报告", "brief": "检查媒体所有权"},
+            config=turn_config("multiline-report"),
+        )
+        report = (await session_store.list_reports("multiline-report"))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+        streamed = "".join(deltas)
+
+        assert streamed == report["markdown"]
+        assert f"(media:{foreign['media_id']})" not in streamed
+        assert f"![外部\n图片](media:{foreign['media_id']})" not in streamed
+        assert "外部\n图片" in streamed
+        assert f"![本地\n图片](media:{own['media_id']})" in streamed
+    finally:
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_based_on_report_ownership_is_checked_before_budget(tmp_path, monkeypatch):
     await init_stores(tmp_path)
     foreign = await session_store.create_report("owner", "原报告", "问题", "全文内容")
