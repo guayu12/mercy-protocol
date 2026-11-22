@@ -27,6 +27,8 @@ from core.safe_fetch import safe_media_fetcher
 
 MAX_DELEGATIONS = 2
 DELEGATION_LIMIT_TEXT = "本轮已经委派了 2 次，不能再委派。请直接回答用户，或请用户下一轮再提。"
+MAX_IMAGE_INSPECTIONS = 4
+IMAGE_INSPECTION_LIMIT_TEXT = "本轮看图次数已达上限（4 次）。"
 INTERRUPTED_MARKER = "\n\n（生成中断）\n"
 REPORT_TRUNCATION_MARKER = "\n（全文较长，已截断，需要时用 read_report 读全文）"
 
@@ -47,6 +49,7 @@ SEARCH_TOOL_SCHEMA = {
 search_raw = tavily_raw
 _expert_models: dict[tuple[str, str, ModelSpec, bool, int | None], object] = {}
 _turn_budgets: dict[str, "TurnBudget"] = {}
+_image_inspection_budgets: dict[str, "TurnBudget"] = {}
 
 
 @dataclass
@@ -197,8 +200,24 @@ async def _delegation_budget(config: RunnableConfig):
         yield True
 
 
+@asynccontextmanager
+async def _image_inspection_budget(config: RunnableConfig):
+    turn_id = _turn_id(config)
+    if not turn_id:
+        yield False
+        return
+    budget = _image_inspection_budgets.setdefault(turn_id, TurnBudget())
+    async with budget.lock:
+        if budget.count >= MAX_IMAGE_INSPECTIONS:
+            yield False
+            return
+        budget.count += 1
+        yield True
+
+
 def clear_turn_budget(turn_id: str) -> None:
     _turn_budgets.pop(turn_id, None)
+    _image_inspection_budgets.pop(turn_id, None)
 
 
 def _append_sources(sources: list[tuple[int, str, str]]) -> str:
@@ -581,9 +600,9 @@ async def write_report(
 @tool
 async def investigate(question: str, config: RunnableConfig) -> str:
     """Delegate research that needs several sources or fact-checking to the research expert, who searches the web and puts a cited report on screen by itself. question: the full research question including constraints."""
-    async with _delegation_budget(config) as allowed:
+    async with _image_inspection_budget(config) as allowed:
         if not allowed:
-            return DELEGATION_LIMIT_TEXT
+            return IMAGE_INSPECTION_LIMIT_TEXT
         configurable, thread_id, turn_query = _config_context(config)
         tier = configurable.get("model_tier", "normal")
         child = _child_config(config)

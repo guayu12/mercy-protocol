@@ -1326,6 +1326,67 @@ async def test_inspect_image_uses_transient_fallback(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_inspect_image_has_serialized_independent_four_call_budget(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    image_path = tmp_path / "vision-budget.png"
+    Image.new("RGB", (2, 2), "red").save(image_path)
+
+    async def get_media(media_id, thread_id):
+        return {
+            "media_id": media_id,
+            "kind": "image",
+            "origin": "upload",
+            "path": str(image_path),
+        }
+
+    class SerializedVisionModel:
+        model_name = "serialized-vision"
+
+        def __init__(self):
+            self.calls = 0
+            self.active = 0
+            self.max_active = 0
+
+        async def ainvoke(self, messages, config=None):
+            self.calls += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0.001)
+            self.active -= 1
+            return AIMessage(content="看清了")
+
+    model = SerializedVisionModel()
+    monkeypatch.setattr(experts.media_store, "get_media", get_media)
+    monkeypatch.setattr(experts, "expert_llm", lambda *args, **kwargs: model)
+    turn_id = "vision-budget-turn"
+    config = turn_config("vision-budget", turn_id)
+    try:
+        for _ in range(experts.MAX_DELEGATIONS):
+            async with experts._delegation_budget(config) as allowed:
+                assert allowed
+
+        results = await asyncio.gather(
+            *(
+                experts.inspect_image.ainvoke(
+                    {"media_id": "m_vision", "question": "看图"},
+                    config=config,
+                )
+                for _ in range(5)
+            )
+        )
+
+        assert model.calls == 4
+        assert model.max_active == 1
+        assert results.count(experts.IMAGE_INSPECTION_LIMIT_TEXT) == 1
+        assert sum(result.startswith("看图结果") for result in results) == 4
+    finally:
+        experts.clear_turn_budget(turn_id)
+
+
+@pytest.mark.asyncio
 async def test_conversation_fallback_runs_only_before_any_output(tmp_path, monkeypatch):
     await init_stores(tmp_path)
     primary = StreamModel([], rate_limit_error())
