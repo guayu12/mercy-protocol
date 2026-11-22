@@ -617,7 +617,7 @@ export function App() {
           link_policy: report.link_policy ?? "open",
         }));
         const restoredMessages = (session.utterances ?? [])
-          .filter((utterance) => utterance.text.trim())
+          .filter((utterance) => utterance.text.trim() || utterance.attachments?.length)
           .map((utterance) => ({
             id: `utterance_${utterance.id}`,
             turnId: utterance.turn_id,
