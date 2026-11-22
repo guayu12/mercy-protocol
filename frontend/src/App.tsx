@@ -1514,7 +1514,7 @@ export function App() {
                         <span className="interrupted-tag">已打断</span>
                       ) : null}
                     </div>
-                    {(message.content || message.attachments?.length) && (
+                    {(message.content || message.attachments?.length) ? (
                       <div className="dialogue-bubble">
                         {message.content && <p>{message.content}</p>}
                         {message.attachments?.map((attachment) =>
@@ -1537,7 +1537,7 @@ export function App() {
                           ),
                         )}
                       </div>
-                    )}
+                    ) : null}
                     {message.role === "assistant" && !message.content && isLoading && (
                       <div className="dialogue-bubble thinking-bubble">正在思考…</div>
                     )}
