@@ -558,7 +558,7 @@ async def agent_node(state: AgentState, config: RunnableConfig):
     try:
         response = await stream_response(llm)
     except Exception as error:
-        if not emitted or not is_transient(error) or fallback_llm_with_tools is None:
+        if emitted or not is_transient(error) or fallback_llm_with_tools is None:
             raise
         fallback_spec = get_model_spec("conversation", fallback=True)
         fallback_name = fallback_spec.model if fallback_spec else "fallback"
