@@ -258,7 +258,7 @@ class ReportStream:
 
 def _strip_external_links_from_text(markdown: str) -> str:
     markdown = re.sub(
-        r"!?\[([^\]]+)\]\(https?://[^)\s]+\)",
+        r"!?\[([^\]]+)\]\(https?://(?:[^()\s]|\([^()\s]*\))*(?:\s+(?:\"[^\"]*\"|'[^']*'))?\)",
         r"\1",
         markdown,
         flags=re.IGNORECASE,
@@ -270,7 +270,7 @@ def _strip_external_links_from_text(markdown: str) -> str:
         flags=re.IGNORECASE,
     )
     return re.sub(
-        r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]*",
+        r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+(?:[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]|\([^()\s]*\))*",
         "",
         markdown,
         flags=re.IGNORECASE,
@@ -299,6 +299,13 @@ def _strip_external_links_outside_code(
         if fence:
             state.code_fence = fence
             output.append(line)
+            continue
+
+        if re.match(
+            r"^\s*\[[^\]]+\]:\s*<?https?://",
+            line,
+            flags=re.IGNORECASE,
+        ):
             continue
 
         position = 0

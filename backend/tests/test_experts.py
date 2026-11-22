@@ -1470,6 +1470,58 @@ async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_investigate_strips_titled_and_reference_links_and_parenthesized_urls(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    research_model = SearchModel([AIMessage(content="资料已足够")])
+    report_model = StreamModel(
+        [
+            '[文](https://x.test "标题")\n',
+            "[1]: https://reference.test\n",
+            "段落中 https://w.test/A_(b) 到此。\n",
+        ]
+    )
+
+    monkeypatch.setattr(
+        experts,
+        "expert_llm",
+        lambda role, tier, max_tokens=None, *, fallback=False: (
+            report_model if max_tokens is not None else research_model
+        ),
+    )
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    turn_id = "investigate-markdown-links-turn"
+    thread_id = "investigate-markdown-links"
+    try:
+        await experts.investigate.ainvoke(
+            {"question": "检查链接格式"},
+            config=turn_config(thread_id, turn_id),
+        )
+        report = (await session_store.list_reports(thread_id))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+
+        assert report["markdown"].startswith("文\n段落中  到此。\n")
+        assert "标题" not in report["markdown"]
+        assert "x.test" not in report["markdown"]
+        assert "[1]:" not in report["markdown"]
+        assert "reference.test" not in report["markdown"]
+        assert "w.test" not in report["markdown"]
+        assert report["markdown"] == "".join(deltas)
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_inspect_image_uses_transient_fallback(tmp_path, monkeypatch):
     from PIL import Image
 
