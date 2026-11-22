@@ -1336,8 +1336,16 @@ async def test_investigate_report_fallback_strips_final_model_url(
         assert fallback_calls == [False, True]
         assert "x.test" not in streamed
         assert "x.test" not in report["markdown"]
-        assert "https://source.test/article" in streamed
-        assert "https://source.test/article" in report["markdown"]
+        assert "https://source.test/article" not in streamed
+        assert "https://source.test/article" not in report["markdown"]
+        assert report["sources"] == [
+            {
+                "number": 1,
+                "title": "官方来源",
+                "url": "https://source.test/article",
+            }
+        ]
+        assert "https://source.test/article" in result
         assert report["markdown"] == streamed
     finally:
         experts.clear_turn_budget(turn_id)
