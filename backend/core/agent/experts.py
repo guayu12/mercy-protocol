@@ -282,10 +282,7 @@ _INLINE_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)")
 
 
 def _fence_line(line: str) -> tuple[str, int, str] | None:
-    indent = len(line) - len(line.lstrip(" "))
-    if indent > 3:
-        return None
-    content = line[indent:].rstrip("\r\n")
+    content = line.lstrip(" \t").rstrip("\r\n")
     if not content or content[0] not in "`~":
         return None
     marker = content[0]

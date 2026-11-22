@@ -1469,21 +1469,32 @@ async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch)
         await close_stores()
 
 
+@pytest.mark.parametrize(
+    ("code_chunks", "preserved_code"),
+    [
+        (
+            ["````md\n", "```\n", "curl https://a.test\n", "```\n", "````\n"],
+            "````md\n```\ncurl https://a.test\n```\n````\n",
+        ),
+        (
+            [
+                "1. 步骤\n",
+                "    ```bash\n",
+                "    curl https://api.test/v1\n",
+                "    ```\n",
+            ],
+            "1. 步骤\n    ```bash\n    curl https://api.test/v1\n    ```\n",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_investigate_nested_fence_closes_only_matching_length(
-    tmp_path, monkeypatch
+async def test_investigate_fenced_code_preserves_urls_but_strips_prose(
+    code_chunks, preserved_code, tmp_path, monkeypatch
 ):
     await init_stores(tmp_path)
     research_model = SearchModel([AIMessage(content="资料已足够")])
     report_model = StreamModel(
-        [
-            "````md\n",
-            "```\n",
-            "curl https://a.test\n",
-            "```\n",
-            "````\n",
-            "见 https://b.test 结尾",
-        ]
+        [*code_chunks, "见 https://b.test 结尾"]
     )
 
     monkeypatch.setattr(
@@ -1503,12 +1514,7 @@ async def test_investigate_nested_fence_closes_only_matching_length(
     turn_id = "investigate-nested-fence-turn"
     thread_id = "investigate-nested-fence"
     expected = (
-        "````md\n"
-        "```\n"
-        "curl https://a.test\n"
-        "```\n"
-        "````\n"
-        "见  结尾"
+        f"{preserved_code}见  结尾"
         "\n\n本次没有搜到可用来源，内容未经核实。\n"
     )
     try:
@@ -1522,7 +1528,7 @@ async def test_investigate_nested_fence_closes_only_matching_length(
         ]
 
         assert report["markdown"] == expected
-        assert "curl https://a.test\n" in report["markdown"]
+        assert preserved_code in report["markdown"]
         assert "b.test" not in report["markdown"]
         assert report["markdown"] == "".join(deltas)
     finally:
