@@ -1314,8 +1314,7 @@ async def _ask_gemini_media(
             cancelled = True
             raise
         except gemini_files.GeminiRejected:
-            await gemini_files.delete_file(file.name)
-            await media_store.delete_gemini_file(media_id)
+            await _discard_gemini_file(media_id, file)
             removed = True
             raise
         finally:

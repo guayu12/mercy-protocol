@@ -1474,6 +1474,72 @@ async def test_document_rejection_deletes_remote_file_and_cache_row(
 
 
 @pytest.mark.asyncio
+async def test_rejected_document_delete_failure_keeps_row_for_cleanup_retry(
+    tmp_path, monkeypatch
+):
+    await _init_stores(tmp_path / "session.db")
+    path = tmp_path / "broken.pdf"
+    path.write_bytes(b"%PDF-")
+    record = await media_store.register_media(
+        "document-reject-delete-failure",
+        "document",
+        "upload",
+        "application/pdf",
+        "broken.pdf",
+        path=str(path),
+    )
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:gemini-test")
+    delete_calls = []
+
+    async def upload_file(source, mime, display_name):
+        return gemini_files.GeminiFile(FILE_NAME, FILE_URI, mime, None)
+
+    async def ask(*args, **kwargs):
+        raise gemini_files.GeminiRejected()
+
+    async def delete_handler(request):
+        delete_calls.append(request.method)
+        return httpx.Response(500 if len(delete_calls) == 1 else 200)
+
+    client = await _upload_client(delete_handler)
+    original_delete = gemini_files.delete_file
+
+    async def delete_file(name):
+        return await original_delete(name, client=client)
+
+    monkeypatch.setattr(gemini_files, "upload_file", upload_file)
+    monkeypatch.setattr(gemini_files, "ask", ask)
+    monkeypatch.setattr(gemini_files, "delete_file", delete_file)
+    try:
+        result = await experts.analyze_document.ainvoke(
+            {"media_id": record["media_id"], "question": "read"},
+            config={
+                "configurable": {
+                    "thread_id": "document-reject-delete-failure",
+                    "turn_id": "document-reject-delete-failure-turn",
+                    "turn_query": "read",
+                }
+            },
+        )
+        assert result == (
+            "Gemini 拒绝处理这份文档，可能超过了 1000 页或 50 MB 的限制，"
+            "或者文件已损坏。请如实告诉用户。"
+        )
+        cached = await media_store.get_gemini_file(record["media_id"])
+        assert cached is not None
+        assert cached["delete_after"] <= time.time()
+
+        await cleanup_gemini_files()
+
+        assert delete_calls == ["DELETE", "DELETE"]
+        assert await media_store.get_gemini_file(record["media_id"]) is None
+    finally:
+        await client.aclose()
+        experts.clear_turn_budget("document-reject-delete-failure-turn")
+        await _close_stores()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "expected"),
     [
