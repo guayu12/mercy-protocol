@@ -1,13 +1,10 @@
 import base64
-import io
 import os
-import re
 import time
 import asyncio
 import secrets
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables FIRST — before any module reads them
@@ -15,12 +12,17 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 load_dotenv(os.path.join(BACKEND_DIR, ".env"))
 from typing import TypedDict, Annotated, AsyncIterator, Optional, Literal
 import aiosqlite
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    message_chunk_to_message,
+)
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks import adispatch_custom_event
-from langchain_tavily import TavilySearch
 from langgraph.graph import StateGraph, START
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -29,8 +31,31 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from core.memory.memory_manager import MemoryManager
 from core import log_bus  # ← real-time log broadcaster
 from core import media_store, session_store, speech_queue
+from core.models import (
+    ModelConfigError,
+    get_llm,
+    get_model_spec,
+    is_transient,
+    role_available,
+    validate_config,
+)
+from core.agent.experts import (
+    clear_turn_budget,
+    inspect_image,
+    investigate,
+    write_report,
+)
+from core.agent.media_utils import cache_limit_bytes, image_data_url_from_path
+from core.agent.report_utils import rewrite_report_media
+from core.agent.search import (
+    _without_urls,
+    format_search_result,
+    tavily_raw,
+)
 from core.safe_fetch import safe_media_fetcher
 from core.speakable import SpeechRouter
+
+validate_config()
 
 # 1. Initialize Memory
 memory_manager = MemoryManager(os.path.join(BACKEND_DIR, "data", "chroma_db"))
@@ -65,68 +90,13 @@ async def save_memory(fact: str) -> str:
         return f"Already in permanent memory (duplicate skipped): {fact}"
     return f"Saved to permanent memory: {fact}"
 
-# Web Search Tool (requires TAVILY_API_KEY in .env)
-web_search = TavilySearch(
-    max_results=3,
-    include_images=True,
-    include_image_descriptions=True,
-    description="Search the web for current events, facts, or any information you do not know.",
-)
-
-
-def _without_urls(value: str) -> str:
-    return re.sub(r"https?://[^\s)\]>]+", "", value, flags=re.IGNORECASE).strip()
-
-
 @tool
 async def tavily_search(query: str, config: RunnableConfig) -> str:
     """Search the web and return text results plus registered, described images."""
-    result = await web_search.ainvoke({"query": query}, config=config)
-    if not isinstance(result, dict):
-        return str(result)
-    if result.get("error"):
-        return str(result["error"])
-
-    sections = []
-    if result.get("answer"):
-        sections.append(_without_urls(str(result["answer"])))
-    for item in result.get("results", []):
-        if not isinstance(item, dict):
-            continue
-        title = _without_urls(str(item.get("title", "")))
-        content = _without_urls(str(item.get("content", "")))
-        if title or content:
-            sections.append(f"{title}\n{content}".strip())
-
     thread_id = config.get("configurable", {}).get("thread_id", "default_user")
-    image_lines = []
-    image_mimes = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-        ".gif": "image/gif",
-    }
-    for image in result.get("images", []):
-        if not isinstance(image, dict):
-            continue
-        description = _without_urls(str(image.get("description") or "")).strip()
-        url = image.get("url") or image.get("image_url")
-        if not description or not isinstance(url, str) or not url.startswith(("http://", "https://")):
-            continue
-        extension = Path(url.split("?", 1)[0]).suffix.lower()
-        record = await media_store.register_media(
-            thread_id,
-            "image",
-            "search",
-            image_mimes.get(extension, "image/jpeg"),
-            description,
-            url=url,
-        )
-        image_lines.append(f"可展示图片：{record['media_id']}：{description}")
-    if image_lines:
-        sections.append("\n".join(image_lines))
-    return "\n\n".join(sections) if sections else "没有找到可用的文字结果。"
+    result = await tavily_raw(query, config)
+    text, _ = await format_search_result(result, thread_id)
+    return text or "没有找到可用的文字结果。"
 
 @tool
 def create_local_directory(dir_name: str) -> str:
@@ -151,31 +121,13 @@ def create_local_directory(dir_name: str) -> str:
         return f"Failed to create directory: {str(e)}"
 
 
-async def _rewrite_report_media(markdown: str, thread_id: str) -> tuple[str, list[str]]:
-    pattern = re.compile(r"!\[([^\]]*)\]\(media:(m_[A-Za-z0-9_-]+)\)")
-    parts = []
-    removed = []
-    cursor = 0
-    for match in pattern.finditer(markdown):
-        parts.append(markdown[cursor : match.start()])
-        record = await media_store.get_media(match.group(2), thread_id)
-        if record:
-            parts.append(match.group(0))
-        else:
-            parts.append(match.group(1))
-            removed.append(match.group(2))
-        cursor = match.end()
-    parts.append(markdown[cursor:])
-    return "".join(parts), removed
-
-
 @tool
 async def show_report(title: str, markdown: str, config: RunnableConfig) -> str:
     """Put a document on screen. ANY table, code, list of links, step-by-step document, or content longer than about three sentences MUST use this tool and never be included in the spoken reply."""
     configurable = config.get("configurable", {})
     thread_id = configurable.get("thread_id", "default_user")
     query = configurable.get("turn_query", "")
-    markdown, removed_media_ids = await _rewrite_report_media(markdown, thread_id)
+    markdown, removed_media_ids = await rewrite_report_media(markdown, thread_id)
     report = await session_store.create_report(thread_id, title, query, markdown)
     report_id = report["report_id"]
     await adispatch_custom_event(
@@ -317,7 +269,7 @@ async def highlight_report(
     return "已在屏幕上高亮。"
 
 
-tools = [
+base_tools = [
     check_weather,
     get_current_time,
     save_memory,
@@ -330,38 +282,30 @@ tools = [
     highlight_report,
 ]
 
-# 4. Setup LLMs (OpenAI official API; vision model handles turns with images)
-_base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-_api_key = os.environ.get("OPENAI_API_KEY", "dummy")
-_model_name = os.environ.get("DEFAULT_MODEL", "gpt-6-luna")
-_vision_model_name = os.environ.get("OPENAI_VISION_MODEL") or _model_name
-_reasoning_effort = os.environ.get("DEFAULT_REASONING_EFFORT", "")
+def build_tools():
+    configured_tools = list(base_tools)
+    if role_available("report"):
+        configured_tools.append(write_report)
+    if role_available("research") and os.environ.get("TAVILY_API_KEY", "").strip():
+        configured_tools.append(investigate)
+    if role_available("vision"):
+        configured_tools.append(inspect_image)
+    return configured_tools
 
-def _make_llm(model: str):
-    options = dict(
-        model=model,
-        api_key=_api_key,
-        base_url=_base_url,
-        streaming=True,
-        stream_usage=True,
-    )
-    if _reasoning_effort:
-        options["reasoning"] = {"effort": _reasoning_effort}
-    return ChatOpenAI(**options).bind_tools(tools)
 
-llm_with_tools = _make_llm(_model_name)
-vision_llm_with_tools = llm_with_tools if _vision_model_name == _model_name else _make_llm(_vision_model_name)
+tools = build_tools()
+conversation_model = get_llm("conversation")
+llm_with_tools = conversation_model.bind_tools(tools) if conversation_model else None
+fallback_model = get_llm("conversation", fallback=True)
+fallback_llm_with_tools = (
+    fallback_model.bind_tools(tools) if fallback_model else None
+)
 
 def _text_of(content) -> str:
     """Extract plain text from str or multimodal content blocks."""
     if isinstance(content, str):
         return content
     return " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-
-def _has_image(content) -> bool:
-    return isinstance(content, list) and any(
-        isinstance(b, dict) and b.get("type") == "image_url" for b in content
-    )
 
 async def _media_screen_context(thread_id: str, screen_state: dict) -> str:
     stage = await media_store.get_stage(thread_id)
@@ -394,35 +338,11 @@ async def _media_screen_context(thread_id: str, screen_state: dict) -> str:
 
 
 def _image_data_url(path: str) -> str | None:
-    from PIL import Image
-
-    image_path = Path(path)
-    if not image_path.is_file():
-        return None
     try:
-        with Image.open(image_path) as source:
-            source.seek(0)
-            image = source.copy()
-            image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
-            has_alpha = "A" in image.getbands() or "transparency" in source.info
-            if has_alpha:
-                image_format = "PNG"
-                image = image.convert("RGBA")
-                mime = "image/png"
-            else:
-                image_format = "JPEG"
-                image = image.convert("RGB")
-                mime = "image/jpeg"
-            output = io.BytesIO()
-            if image_format == "JPEG":
-                image.save(output, format=image_format, quality=85)
-            else:
-                image.save(output, format=image_format)
+        return image_data_url_from_path(path)
     except Exception as error:
         log_bus.emit("warn", "MEDIA", f"could not decode uploaded image: {error}")
         return None
-    encoded = base64.b64encode(output.getvalue()).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
 
 
 async def _prepare_user_media(
@@ -448,10 +368,7 @@ async def _prepare_user_media(
         except Exception as error:
             log_bus.emit("warn", "MEDIA", f"ignored legacy image attachment: {error}")
 
-    try:
-        cache_limit = max(0, int(os.environ.get("MEDIA_CACHE_MAX_MB", "500"))) * 1024 * 1024
-    except ValueError:
-        cache_limit = 500 * 1024 * 1024
+    cache_limit = cache_limit_bytes()
     for media_id in attachments or []:
         record = await media_store.get_media(media_id, thread_id)
         if record is None:
@@ -489,9 +406,9 @@ async def agent_node(state: AgentState, config: RunnableConfig):
     user_msgs = [m for m in messages if isinstance(m, HumanMessage)]
     latest = user_msgs[-1] if user_msgs else None
     latest_query = _text_of(latest.content) if latest else ""
-    use_vision = latest is not None and _has_image(latest.content)
-    model_name = _vision_model_name if use_vision else _model_name
-    llm = vision_llm_with_tools if use_vision else llm_with_tools
+    llm = llm_with_tools
+    if llm is None:
+        raise ModelConfigError("MODEL_CONVERSATION: model is unavailable")
 
     # Embedding lookup is a blocking HTTP call — keep it off the event loop
     past_contexts = await asyncio.to_thread(memory_manager.format_context, latest_query)
@@ -538,6 +455,41 @@ async def agent_node(state: AgentState, config: RunnableConfig):
     media_block = await _media_screen_context(thread_id, screen_state)
     assistant_name = os.environ.get("ASSISTANT_NAME", "Aura")
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    bound_tool_names = {item.name for item in tools}
+    prompt_additions = []
+    if "write_report" in bound_tool_names:
+        prompt_additions.append(
+            "需要详细、严谨或篇幅较长的文档时，调用 write_report 交给报告专家撰写：title 写标题，brief 写清楚要写什么、给谁看、重点和格式；修订已有报告时传 based_on_report_id。简单的表格或短文档仍可自己用 show_report。"
+        )
+    if "investigate" in bound_tool_names:
+        prompt_additions.append(
+            "需要调查、核实或综合多个来源时，调用 investigate 交给调查专家，它会自己搜索并把带来源的报告上屏。简单的事实查询仍用 tavily_search。"
+        )
+    if "inspect_image" in bound_tool_names:
+        prompt_additions.append(
+            "需要看清某张已登记图片的细节时，调用 inspect_image，传媒体编号和具体问题；拿到结果前不要描述画面。"
+        )
+    if {"write_report", "investigate"} & bound_tool_names:
+        prompt_additions.append(
+            "调用 write_report 或 investigate 前，先用一句话告诉用户你要去做什么、需要一点时间。它们返回时报告已经上屏，不要再调用 show_report，口头用两三句概括要点并询问意见，不要复述报告。"
+        )
+    if (
+        configurable.get("model_tier", "normal") == "max"
+        and "investigate" in bound_tool_names
+    ):
+        prompt_additions.append(
+            "用户开了深度模式：需要调查或严谨推理时优先使用 investigate。"
+        )
+    media_rules = (
+        "媒体与展示台规则：只能通过 show_media 展示上面列出的媒体编号；只有图片本身是当前主题时才使用 focus=primary；话题转移后调用 clear_stage。视频只能展示，你看不到视频画面，绝不能描述其内容。"
+    )
+    if "inspect_image" in bound_tool_names:
+        media_rules += (
+            "搜索图片和之前上传的图片，只有调用 inspect_image 之后才能描述画面；本轮上传的图片可直接分析。"
+        )
+    else:
+        media_rules += "搜索图片只知道已提供的描述；本轮上传的图片可直接分析。"
+    additions_block = "\n".join(prompt_additions)
 
     sys_prompt = SystemMessage(content=f"""
 你叫{assistant_name}，是用户的工作伙伴。说话自然、亲切、简洁，像同事当面汇报。
@@ -557,44 +509,72 @@ async def agent_node(state: AgentState, config: RunnableConfig):
 
 {media_block}
 
-媒体与展示台规则：只能通过 show_media 展示上面列出的媒体编号；只有图片本身是当前主题时才使用 focus=primary；话题转移后调用 clear_stage。视频只能展示，你看不到视频画面，绝不能描述其内容。搜索图片只知道已提供的描述；本轮上传的图片可直接分析。
+{media_rules}
+
+{additions_block}
 """)
     full_messages = [sys_prompt] + list(messages)
     input_tokens_est = sum(len(_text_of(m.content)) // 4 for m in full_messages)
 
-    log_bus.emit("flow", "FLOW", f"agent_node → invoking {model_name} ({len(full_messages)} msgs, ~{input_tokens_est} tokens est.)")
+    primary_spec = get_model_spec("conversation")
+    model_name = primary_spec.model if primary_spec else "unavailable"
+    log_bus.emit(
+        "flow",
+        "FLOW",
+        f"agent_node → invoking {model_name} ({len(full_messages)} msgs, ~{input_tokens_est} tokens est.)",
+    )
 
-    # Retry with exponential backoff for transient API errors
-    last_err = None
-    for attempt in range(3):
-        t0 = time.time()
-        try:
-            # Pass config explicitly so token callbacks reach astream_events on Python < 3.11
-            response = await llm.ainvoke(full_messages, config)
-            latency = round((time.time() - t0) * 1000)
-            usage = getattr(response, "usage_metadata", None)
-            if usage:
-                in_tok = usage.get("input_tokens", "?")
-                out_tok = usage.get("output_tokens", "?")
-            else:
-                in_tok, out_tok = "?", "?"
+    emitted = False
 
-            tool_calls = getattr(response, "tool_calls", [])
-            log_bus.emit("llm", "LLM",
-                         f"← response {latency}ms | in:{in_tok} out:{out_tok} tok | {'→ ' + ', '.join(tc['name'] for tc in tool_calls) if tool_calls else 'direct reply'}",
-                         {"model": model_name, "latency_ms": latency,
-                          "input_tokens": in_tok, "output_tokens": out_tok,
-                          "tool_calls": [tc["name"] for tc in tool_calls]})
-            return {"messages": [response]}
-        except Exception as e:
-            last_err = e
-            err_str = str(e)
-            log_bus.emit("warn", "RETRY", f"attempt {attempt+1}/3 — {err_str[:100]}")
-            if "429" in err_str or "500" in err_str or "503" in err_str:
-                await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
-                continue
-            raise  # Non-transient error, propagate immediately
-    raise last_err  # All retries exhausted
+    async def stream_response(model):
+        nonlocal emitted
+        combined = None
+        async for chunk in model.astream(full_messages, config):
+            if _text_of(chunk.content) or getattr(chunk, "tool_call_chunks", None):
+                emitted = True
+            combined = chunk if combined is None else combined + chunk
+        if combined is None:
+            raise RuntimeError("Conversation model returned an empty stream")
+        return message_chunk_to_message(combined)
+
+    started_at = time.time()
+    try:
+        response = await stream_response(llm)
+    except Exception as error:
+        if emitted or not is_transient(error) or fallback_llm_with_tools is None:
+            raise
+        fallback_spec = get_model_spec("conversation", fallback=True)
+        fallback_name = fallback_spec.model if fallback_spec else "fallback"
+        log_bus.emit(
+            "warn",
+            "RETRY",
+            f"primary model failed before output ({type(error).__name__}); trying fallback {fallback_name}",
+        )
+        response = await stream_response(fallback_llm_with_tools)
+        model_name = fallback_name
+
+    latency = round((time.time() - started_at) * 1000)
+    usage = getattr(response, "usage_metadata", None)
+    if usage:
+        in_tok = usage.get("input_tokens", "?")
+        out_tok = usage.get("output_tokens", "?")
+    else:
+        in_tok, out_tok = "?", "?"
+
+    tool_calls = getattr(response, "tool_calls", [])
+    log_bus.emit(
+        "llm",
+        "LLM",
+        f"← response {latency}ms | in:{in_tok} out:{out_tok} tok | {'→ ' + ', '.join(tc['name'] for tc in tool_calls) if tool_calls else 'direct reply'}",
+        {
+            "model": model_name,
+            "latency_ms": latency,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "tool_calls": [tc["name"] for tc in tool_calls],
+        },
+    )
+    return {"messages": [response]}
 
 # 6. Build the Graph
 workflow = StateGraph(AgentState)
@@ -676,11 +656,13 @@ async def process_query(
     screen_state: Optional[dict] = None,
     interrupted: Optional[dict] = None,
     attachments: Optional[list[str]] = None,
+    model_tier: Literal["normal", "max"] = "normal",
 ) -> AsyncIterator[dict]:
     """Run one turn and stream status, spoken sentences, reports, tools and completion."""
     # Serialize turns per thread so concurrent requests don't overwrite each other's checkpoints
     async with _thread_locks[thread_id]:
         graph = await init_graph()
+        original_query = query
         query, image_data_urls = await _prepare_user_media(
             query, thread_id, attachments, image_base64
         )
@@ -688,8 +670,10 @@ async def process_query(
         config = {
             "configurable": {
                 "thread_id": thread_id,
-                "turn_query": query,
+                "turn_query": original_query,
+                "turn_id": turn_id,
                 "screen_state": screen_state or {},
+                "model_tier": model_tier,
             }
         }
         await _close_pending_tool_calls(graph, config)
@@ -827,6 +811,12 @@ async def process_query(
                 version="v2",
             ):
                 kind = event["event"]
+                if kind in {
+                    "on_tool_start",
+                    "on_tool_end",
+                    "on_chat_model_stream",
+                } and "mercy_expert" in (event.get("tags") or []):
+                    continue
                 if kind == "on_chat_model_stream":
                     if event.get("metadata", {}).get("langgraph_node") != "agent":
                         continue
@@ -879,6 +869,9 @@ async def process_query(
                         "tavily_search": "正在搜索",
                         "show_report": "正在整理报告",
                         "read_report": "正在翻看报告",
+                        "write_report": "正在写报告",
+                        "investigate": "正在调查",
+                        "inspect_image": "正在看图",
                     }
                     if event["name"] == "show_report" and report_status_pending:
                         report_status_pending -= 1
@@ -967,5 +960,6 @@ async def process_query(
             await save_assistant_utterance(interrupted=False)
             raise
         finally:
+            clear_turn_budget(turn_id)
             if not assistant_utterance_saved:
                 await save_assistant_utterance(interrupted=True)

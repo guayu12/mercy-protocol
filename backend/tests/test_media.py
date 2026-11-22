@@ -4,7 +4,7 @@ from pathlib import Path
 import httpcore
 import httpx
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 
 from core import media_store, session_store
 from core.agent import graph
@@ -550,7 +550,7 @@ async def test_report_media_rewrite_and_prompt_omit_urls(tmp_path, monkeypatch):
         "图片描述 https://secret.test/image.jpg",
         url="https://secret.test/image.jpg",
     )
-    markdown, removed = await graph._rewrite_report_media(
+    markdown, removed = await graph.rewrite_report_media(
         f"![图](media:{record['media_id']}) ![外部](media:m_foreign)",
         "prompt-test",
     )
@@ -568,9 +568,9 @@ async def test_report_media_rewrite_and_prompt_omit_urls(tmp_path, monkeypatch):
     captured = {}
 
     class CapturingModel:
-        async def ainvoke(self, messages, config):
+        async def astream(self, messages, config):
             captured["prompt"] = messages[0].content
-            return HumanMessage(content="已收到")
+            yield AIMessageChunk(content="已收到")
 
     monkeypatch.setattr(graph.memory_manager, "format_context", lambda query: "")
     monkeypatch.setattr(graph, "llm_with_tools", CapturingModel())

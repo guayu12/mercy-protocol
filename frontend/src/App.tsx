@@ -19,7 +19,11 @@ import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
 import { Stage, type MediaStageData, type StageItem } from "./Stage";
 import { API_BASE } from "./api";
-import { markdownUrlTransform, reportImage } from "./reportMarkdown.mjs";
+import {
+  markdownUrlTransform,
+  reportImage,
+  reportLink,
+} from "./reportMarkdown.mjs";
 import "./App.css";
 
 const ASSISTANT_NAME = "Aura";
@@ -80,11 +84,7 @@ type ChatEvent =
 type BackendState = "idle" | "thinking" | "working";
 
 const markdownComponents: Components = {
-  a: ({ children, href }) => (
-    <a className="report-link" href={href} target="_blank" rel="noreferrer">
-      {children}
-    </a>
-  ),
+  a: reportLink,
   img: reportImage,
   code: ({ children, className }) =>
     className ? (
@@ -212,6 +212,8 @@ export function App() {
   const [backendState, setBackendState] = useState<BackendState>("idle");
   const [workingLabel, setWorkingLabel] = useState("");
   const [backendConnected, setBackendConnected] = useState(false);
+  const [maxTierAvailable, setMaxTierAvailable] = useState(false);
+  const [deepMode, setDeepMode] = useState(false);
   const [leftExpanded, setLeftExpanded] = useState(false);
   const [clock, setClock] = useState("");
   const [reports, setReports] = useState<Report[]>([]);
@@ -233,6 +235,7 @@ export function App() {
   const reportAtBottomRef = useRef(true);
   const shouldFollowReportRef = useRef(false);
   const viewingReportIdRef = useRef<string | null>(null);
+  const sessionRestoredRef = useRef(false);
   const requestControllerRef = useRef<AbortController | null>(null);
   const activeTurnIdRef = useRef<string | null>(null);
   const pendingInterruptedRef = useRef<{ turn_id: string; spoken_sentence_ids: string[] } | null>(null);
@@ -249,7 +252,9 @@ export function App() {
   const handleAudioEndRef = useRef<() => void>(() => undefined);
   const isPumpingRef = useRef(false);
   const audioEpochRef = useRef(0);
-  const highlightTimersRef = useRef(new Map<string, number>());
+  const highlightTimersRef = useRef(
+    new Map<string, { timer: number; target: HTMLElement }>(),
+  );
   const reportHighlightNonceRef = useRef(0);
 
   const addSystemNotice = useCallback((content: string) => {
@@ -527,10 +532,34 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!backendConnected) {
+      setMaxTierAvailable(false);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`${API_BASE}/api/capabilities`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Capabilities request failed: ${response.status}`);
+        return (await response.json()) as { max_tier?: boolean };
+      })
+      .then((capabilities) => {
+        const available = capabilities.max_tier === true;
+        setMaxTierAvailable(available);
+        if (!available) setDeepMode(false);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [backendConnected]);
+
+  useEffect(() => {
+    if (!backendConnected || sessionRestoredRef.current) return;
     const controller = new AbortController();
     fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`, { signal: controller.signal })
       .then(async (response) => {
-        if (!response.ok) throw new Error(`Session request failed: ${response.status}`);
+        if (!response.ok) {
+          addSystemNotice("无法恢复本地会话记录。");
+          return null;
+        }
         return (await response.json()) as {
           reports?: Report[];
           stage?: MediaStageData | null;
@@ -545,6 +574,8 @@ export function App() {
         };
       })
       .then((session) => {
+        if (!session || controller.signal.aborted) return;
+        sessionRestoredRef.current = true;
         const restoredReports = session.reports ?? [];
         const restoredMessages = (session.utterances ?? [])
           .filter((utterance) => utterance.text.trim())
@@ -565,10 +596,10 @@ export function App() {
         shouldFollowReportRef.current = true;
       })
       .catch((error: unknown) => {
-        if (!isAbortError(error)) addSystemNotice("无法恢复本地会话记录。");
+        if (isAbortError(error)) return;
       });
     return () => controller.abort();
-  }, [addSystemNotice, sessionId]);
+  }, [addSystemNotice, backendConnected, sessionId]);
 
   useEffect(() => {
     const feed = logFeedRef.current;
@@ -662,7 +693,7 @@ export function App() {
         window.clearTimeout(speechWatchdogRef.current);
         speechWatchdogRef.current = null;
       }
-      for (const timer of highlightTimersRef.current.values()) window.clearTimeout(timer);
+      for (const { timer } of highlightTimersRef.current.values()) window.clearTimeout(timer);
     },
     [clearSpeechMetadataProbe],
   );
@@ -678,18 +709,23 @@ export function App() {
       (item) => item.textContent?.toLocaleLowerCase().includes(anchor.toLocaleLowerCase()),
     );
     if (!target) return false;
+    const previous = highlightTimersRef.current.get(reportId);
+    if (previous) {
+      window.clearTimeout(previous.timer);
+      previous.target.classList.remove("report-highlight");
+      highlightTimersRef.current.delete(reportId);
+    }
     target.classList.add("report-highlight");
     list.scrollTo({
       top: list.scrollTop + target.getBoundingClientRect().top - list.getBoundingClientRect().top - 24,
       behavior: "smooth",
     });
-    const previousTimer = highlightTimersRef.current.get(reportId);
-    if (previousTimer) window.clearTimeout(previousTimer);
     const timer = window.setTimeout(() => {
+      if (highlightTimersRef.current.get(reportId)?.timer !== timer) return;
       target.classList.remove("report-highlight");
       highlightTimersRef.current.delete(reportId);
     }, 4500);
-    highlightTimersRef.current.set(reportId, timer);
+    highlightTimersRef.current.set(reportId, { timer, target });
     return true;
   }, []);
 
@@ -897,6 +933,7 @@ export function App() {
             stage_media_ids: stage?.items.map((item) => item.media_id) ?? [],
             stage_current_media_id: stageCurrentMediaId,
           },
+          model_tier: deepMode ? "max" : "normal",
           interrupted,
         }),
       });
@@ -948,7 +985,7 @@ export function App() {
         activeTurnIdRef.current = null;
       }
     }
-  }, [addSystemNotice, attachments, handleChatEvent, interruptActiveTurn, query, sessionId, stage, stageCurrentMediaId]);
+  }, [addSystemNotice, attachments, deepMode, handleChatEvent, interruptActiveTurn, query, sessionId, stage, stageCurrentMediaId]);
 
   const handleImageSelect = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -1093,6 +1130,17 @@ export function App() {
           <span className="session-pill">#{sessionId.slice(-8).toUpperCase()}</span>
         </div>
         <div className="topbar-right">
+          {maxTierAvailable && (
+            <button
+              className={`deep-mode-toggle ${deepMode ? "active" : ""}`}
+              type="button"
+              aria-pressed={deepMode}
+              onClick={() => setDeepMode((value) => !value)}
+            >
+              {deepMode && <span className="deep-mode-dot" />}
+              <span>{deepMode ? "深度模式 · 开" : "深度模式"}</span>
+            </button>
+          )}
           <div className="layout-pill">
             布局：<strong>{layoutLabel}</strong>
           </div>

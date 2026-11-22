@@ -97,6 +97,16 @@ async def create_report(thread_id: str, title: str, query: str, markdown: str) -
     return report
 
 
+async def update_report_markdown(report_id: str, markdown: str) -> None:
+    async with _get_lock():
+        db = _db()
+        await db.execute(
+            "UPDATE reports SET markdown = ? WHERE report_id = ?",
+            (markdown, report_id),
+        )
+        await db.commit()
+
+
 async def get_report(thread_id: str, report_id: str) -> dict | None:
     async with _get_lock():
         cursor = await _db().execute(

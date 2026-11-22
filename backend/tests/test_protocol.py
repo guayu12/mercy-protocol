@@ -58,7 +58,7 @@ async def _install_graph(monkeypatch, tmp_path, responses):
     )
     fake = ScriptedChatModel(messages=iter(responses))
     monkeypatch.setattr(agent_graph, "llm_with_tools", fake)
-    monkeypatch.setattr(agent_graph, "vision_llm_with_tools", fake)
+    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", None)
     return connection
 
 
@@ -353,7 +353,7 @@ async def test_stream_failure_persists_sentences_already_emitted(monkeypatch, tm
     connection = await _install_graph(monkeypatch, tmp_path, [])
     failing_model = FailingChatModel(messages=iter([]))
     monkeypatch.setattr(agent_graph, "llm_with_tools", failing_model)
-    monkeypatch.setattr(agent_graph, "vision_llm_with_tools", failing_model)
+    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", None)
     try:
         with pytest.raises(RuntimeError, match="scripted stream failure"):
             async for _ in agent_graph.process_query(
