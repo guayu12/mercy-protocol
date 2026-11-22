@@ -15,10 +15,16 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Literal, Optional
 from core import log_bus  # real-time log broadcaster
-from core.agent.graph import process_query, init_graph, close_graph
+from core.agent.graph import (
+    close_graph,
+    init_graph,
+    process_query,
+    tools as graph_tools,
+)
 from core import media_store, session_store, speech_queue
+from core.models import role_available
 from core.safe_fetch import DownloadTooLarge, SafeFetchError, safe_media_fetcher
 from core.speech import synthesize
 from core.speakable import to_speakable
@@ -100,6 +106,7 @@ class Interrupted(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    model_tier: Literal["normal", "max"] = "normal"
     image_base64: Optional[str] = None  # raw base64 or full data: URL
     thread_id: str = "default_user"
     attachments: list[str] = Field(default_factory=list)
@@ -118,6 +125,17 @@ def _require_allowed_origin(request: Request) -> None:
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "Mercy Protocol Backend Running"}
+
+
+@app.get("/api/capabilities")
+async def capabilities():
+    max_tier = (
+        bool(os.environ.get("MODEL_RESEARCH_MAX", "").strip())
+        and role_available("research", "max")
+        and any(item.name == "investigate" for item in graph_tools)
+    )
+    return {"max_tier": max_tier, "video": False, "document": False}
+
 
 # ─── SSE Log Stream ──────────────────────────────────────────────────
 @app.get("/api/logs")
@@ -167,6 +185,7 @@ async def chat_endpoint(request: ChatRequest):
                 screen_state,
                 request.interrupted.model_dump() if request.interrupted else None,
                 request.attachments,
+                request.model_tier,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:

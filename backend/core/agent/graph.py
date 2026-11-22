@@ -673,6 +673,7 @@ async def process_query(
     screen_state: Optional[dict] = None,
     interrupted: Optional[dict] = None,
     attachments: Optional[list[str]] = None,
+    model_tier: Literal["normal", "max"] = "normal",
 ) -> AsyncIterator[dict]:
     """Run one turn and stream status, spoken sentences, reports, tools and completion."""
     # Serialize turns per thread so concurrent requests don't overwrite each other's checkpoints
@@ -689,6 +690,7 @@ async def process_query(
                 "turn_query": original_query,
                 "turn_id": turn_id,
                 "screen_state": screen_state or {},
+                "model_tier": model_tier,
             }
         }
         await _close_pending_tool_calls(graph, config)
