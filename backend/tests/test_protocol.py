@@ -107,6 +107,7 @@ async def test_process_query_splits_reports_from_speech(monkeypatch, tmp_path):
             "report.delta",
             "report.done",
         ]
+        assert report_events[0]["link_policy"] == "open"
         working_events = [
             (index, event)
             for index, event in enumerate(events)
@@ -167,6 +168,7 @@ async def test_process_query_moves_overflow_to_a_report(monkeypatch, tmp_path):
             "report.delta",
             "report.done",
         ]
+        assert report_events[0]["link_policy"] == "open"
         assert report_events[1]["markdown"] == markdown
         assert [
             event["text"]

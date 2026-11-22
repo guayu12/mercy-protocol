@@ -98,3 +98,27 @@ async def format_search_result(
     if image_lines:
         sections.append("\n".join(image_lines))
     return "\n\n".join(section for section in sections if section), sources
+
+
+def format_sources(sources: list[dict] | list[tuple[int, str, str]]) -> str:
+    if not sources:
+        return ""
+    formatted = []
+    for source in sources:
+        if isinstance(source, dict):
+            number = source.get("number", "")
+            title = source.get("title") or ""
+            url = source.get("url") or ""
+        else:
+            number, title, url = source
+        title = (
+            " ".join(str(title).split())
+            .replace("\\", "\\\\")
+            .replace("[", r"\[")
+            .replace("]", r"\]")
+        )
+        if url:
+            formatted.append(f"{number}. [{title or url}]({url})\n")
+        else:
+            formatted.append(f"{number}. {title or '（无链接）'}\n")
+    return "\n\n## 来源\n" + "".join(formatted)
