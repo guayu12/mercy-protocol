@@ -1058,8 +1058,10 @@ async def process_query(
             await save_assistant_utterance(interrupted=False)
             raise
         finally:
-            if event_stream is not None:
-                await event_stream.aclose()
-            clear_turn_budget(turn_id)
-            if not assistant_utterance_saved:
-                await save_assistant_utterance(interrupted=True)
+            try:
+                if event_stream is not None:
+                    await event_stream.aclose()
+            finally:
+                clear_turn_budget(turn_id)
+                if not assistant_utterance_saved:
+                    await save_assistant_utterance(interrupted=True)

@@ -31,7 +31,7 @@ def _remove_emoji_like_symbols(text: str) -> str:
         char
         for char in text
         if unicodedata.category(char) not in {"So", "Sk"}
-        and char not in {"\ufe0e", "\ufe0f"}
+        and char not in {"\u200d", "\ufe0e", "\ufe0f"}
         and not 0x1F1E6 <= ord(char) <= 0x1F1FF
     )
 
