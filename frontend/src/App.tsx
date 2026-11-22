@@ -21,8 +21,10 @@ import { Stage, type MediaStageData, type StageItem } from "./Stage";
 import { API_BASE } from "./api";
 import {
   markdownUrlTransform,
+  ReportSources,
   reportImage,
   reportLink,
+  reportTextLink,
 } from "./reportMarkdown.mjs";
 import "./App.css";
 
@@ -40,6 +42,8 @@ type DialogueMessage = {
 
 type UploadedAttachment = StageItem & { filename: string; previewUrl: string };
 
+type ReportSource = { number: number; title: string; url: string };
+
 type Report = {
   report_id: string;
   title: string;
@@ -47,6 +51,8 @@ type Report = {
   markdown: string;
   created_at: number;
   complete?: boolean;
+  link_policy?: "open" | "sources_only";
+  sources?: ReportSource[];
 };
 
 type LogEntry = {
@@ -72,7 +78,14 @@ type ChatEvent =
   | { type: "status"; state: string; label?: string }
   | { type: "tool"; name: string; status: string }
   | ({ type: "speech.sentence" } & SpeechSentence)
-  | { type: "report.open"; report_id: string; title: string; query: string }
+  | {
+      type: "report.open";
+      report_id: string;
+      title: string;
+      query: string;
+      link_policy?: "open" | "sources_only";
+      sources?: ReportSource[];
+    }
   | { type: "report.delta"; report_id: string; markdown: string }
   | { type: "report.done"; report_id: string }
   | { type: "report.highlight"; report_id: string; anchor: string }
@@ -98,6 +111,11 @@ const markdownComponents: Components = {
       <table className="md-table">{children}</table>
     </div>
   ),
+};
+
+const sourcesOnlyMarkdownComponents: Components = {
+  a: reportTextLink,
+  img: reportImage,
 };
 
 function makeId(prefix: string) {
@@ -576,7 +594,10 @@ export function App() {
       .then((session) => {
         if (!session || controller.signal.aborted) return;
         sessionRestoredRef.current = true;
-        const restoredReports = session.reports ?? [];
+        const restoredReports = (session.reports ?? []).map((report) => ({
+          ...report,
+          link_policy: report.link_policy ?? "open",
+        }));
         const restoredMessages = (session.utterances ?? [])
           .filter((utterance) => utterance.text.trim())
           .map((utterance) => ({
@@ -808,6 +829,10 @@ export function App() {
                 markdown: "",
                 created_at: Date.now() / 1000,
                 complete: false,
+                link_policy: event.link_policy ?? "open",
+                sources:
+                  event.sources ??
+                  (event.link_policy === "sources_only" ? [] : undefined),
               },
             ];
           });
@@ -1291,7 +1316,11 @@ export function App() {
                           <div className="report-markdown">
                             <ReactMarkdown
                               remarkPlugins={[remarkGfm]}
-                              components={markdownComponents}
+                              components={
+                                report.link_policy === "sources_only"
+                                  ? sourcesOnlyMarkdownComponents
+                                  : markdownComponents
+                              }
                               urlTransform={markdownUrlTransform}
                             >
                               {report.markdown}
@@ -1299,6 +1328,9 @@ export function App() {
                           </div>
                         ) : (
                           <div className="report-loading">正在整理内容…</div>
+                        )}
+                        {report.link_policy === "sources_only" && (
+                          <ReportSources sources={report.sources} />
                         )}
                       </article>
                     ))
