@@ -533,7 +533,7 @@ async def test_timeout_closes_open_fence_before_interruption_marker(tmp_path, mo
         code_fence_char="`",
         code_fence_length=3,
     )
-    events = []
+    events = [{"type": "report.delta", "markdown": "```bash\n部分内容\n"}]
 
     async def dispatch(name, data, config=None):
         events.append(data)
@@ -1439,7 +1439,7 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
     turn_id = "investigate-links-turn"
     thread_id = "investigate-links"
     try:
-        await experts.investigate.ainvoke(
+        result = await experts.investigate.ainvoke(
             {"question": "核实来源链接"},
             config=turn_config(thread_id, turn_id),
         )

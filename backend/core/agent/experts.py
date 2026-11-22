@@ -522,12 +522,18 @@ async def _close_open_report_fence(
     state: ReportStream,
     thread_id: str,
     config: RunnableConfig,
-) -> None:
+) -> bool:
     await _flush_report_buffer(state, thread_id, config)
     closing_fence = _take_open_fence_closer(state, state.text)
-    if closing_fence:
-        await _buffer_report_text(state, closing_fence, thread_id, config)
-        await _flush_report_buffer(state, thread_id, config)
+    if not closing_fence:
+        return False
+    await _buffer_report_text(state, closing_fence, thread_id, config)
+    await _flush_report_buffer(state, thread_id, config)
+    return True
+
+
+def _interrupted_marker(fence_was_closed: bool) -> str:
+    return INTERRUPTED_MARKER[1:] if fence_was_closed else INTERRUPTED_MARKER
 
 
 async def _persist_report(state: ReportStream, text: str) -> None:
@@ -634,9 +640,14 @@ async def _stream_report(
             await _append_report_suffix(state, suffix, thread_id, event_config)
         if _report_stream_was_truncated(state.response):
             state.incomplete = True
-            await _close_open_report_fence(state, thread_id, event_config)
+            fence_was_closed = await _close_open_report_fence(
+                state, thread_id, event_config
+            )
             await _buffer_report_text(
-                state, INTERRUPTED_MARKER, thread_id, event_config
+                state,
+                _interrupted_marker(fence_was_closed),
+                thread_id,
+                event_config,
             )
             await _flush_report_buffer(state, thread_id, event_config)
         await _emit_report_done(state, event_config)
@@ -645,16 +656,26 @@ async def _stream_report(
         state.incomplete = True
         state.marker_in_storage = True
         await _flush_report_buffer(state, thread_id, event_config)
-        state.storage_tail = _take_open_fence_closer(state, state.text)
+        closing_fence = _take_open_fence_closer(state, state.text)
+        if closing_fence:
+            state.storage_tail = (
+                closing_fence + _interrupted_marker(fence_was_closed=True)
+            )
+            state.marker_in_storage = False
         raise
     except Exception:
         state.incomplete = True
         await _flush_report_buffer(state, thread_id, event_config)
         if suffix:
             await _append_report_suffix(state, suffix, thread_id, event_config)
-        await _close_open_report_fence(state, thread_id, event_config)
+        fence_was_closed = await _close_open_report_fence(
+            state, thread_id, event_config
+        )
         await _buffer_report_text(
-            state, INTERRUPTED_MARKER, thread_id, event_config
+            state,
+            _interrupted_marker(fence_was_closed),
+            thread_id,
+            event_config,
         )
         await _flush_report_buffer(state, thread_id, event_config)
         await _emit_report_done(state, event_config)
@@ -678,8 +699,10 @@ async def _finish_timeout(
     await _flush_report_buffer(state, thread_id, config)
     if suffix:
         await _append_report_suffix(state, suffix, thread_id, config)
-    await _close_open_report_fence(state, thread_id, config)
-    await _buffer_report_text(state, INTERRUPTED_MARKER, thread_id, config)
+    fence_was_closed = await _close_open_report_fence(state, thread_id, config)
+    await _buffer_report_text(
+        state, _interrupted_marker(fence_was_closed), thread_id, config
+    )
     await _flush_report_buffer(state, thread_id, config)
     await _emit_report_done(state, config)
     await _persist_report(state, state.text)
