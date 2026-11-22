@@ -967,6 +967,181 @@ def rate_limit_error():
     return openai.RateLimitError("rate limited", response=response, body=None)
 
 
+def test_expert_llm_caches_fallback_model(monkeypatch):
+    monkeypatch.setattr(experts, "_expert_models", {})
+    spec = experts.ModelSpec("openai", "fallback-model", None)
+    calls = []
+    model = object()
+
+    monkeypatch.setattr(
+        experts, "get_model_spec", lambda role, tier, fallback=False: spec
+    )
+
+    def get_llm(role, tier, fallback=False, max_tokens=None):
+        calls.append((role, tier, fallback, max_tokens))
+        return model
+
+    monkeypatch.setattr(experts, "get_llm", get_llm)
+
+    assert experts.expert_llm("report", "normal", 8000, fallback=True) is model
+    assert experts.expert_llm("report", "normal", 8000, fallback=True) is model
+    assert calls == [("report", "normal", True, 8000)]
+
+
+@pytest.mark.asyncio
+async def test_report_uses_transient_fallback_only_before_first_delta(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    primary = StreamModel([], rate_limit_error())
+    fallback_model = StreamModel(["备用报告。\n"])
+    fallback_calls = []
+
+    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+        fallback_calls.append(fallback)
+        return fallback_model if fallback else primary
+
+    monkeypatch.setattr(experts, "expert_llm", expert_model)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    try:
+        result = await experts.write_report.ainvoke(
+            {"title": "备用报告", "brief": "写一份"},
+            config=turn_config("report-fallback-before-output"),
+        )
+        report = (await session_store.list_reports(
+            "report-fallback-before-output"
+        ))[0]
+        assert report["markdown"] == "备用报告。\n"
+        assert "内容不完整" not in result
+        assert [event["type"] for event in events] == [
+            "report.open",
+            "report.delta",
+            "report.done",
+        ]
+        assert fallback_calls == [False, True]
+    finally:
+        await close_stores()
+
+
+@pytest.mark.asyncio
+async def test_report_does_not_fallback_after_first_delta(tmp_path, monkeypatch):
+    await init_stores(tmp_path)
+    primary = StreamModel(["部分内容。\n"], rate_limit_error())
+    fallback_model = StreamModel(["不应使用。\n"])
+    fallback_calls = []
+
+    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+        fallback_calls.append(fallback)
+        return fallback_model if fallback else primary
+
+    monkeypatch.setattr(experts, "expert_llm", expert_model)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    try:
+        result = await experts.write_report.ainvoke(
+            {"title": "不完整报告", "brief": "写一份"},
+            config=turn_config("report-fallback-after-output"),
+        )
+        report = (await session_store.list_reports(
+            "report-fallback-after-output"
+        ))[0]
+        assert fallback_calls == [False]
+        assert report["markdown"].startswith("部分内容。\n")
+        assert report["markdown"].endswith("（生成中断）\n")
+        assert "内容不完整" in result
+        assert events[-1]["type"] == "report.done"
+    finally:
+        await close_stores()
+
+
+@pytest.mark.asyncio
+async def test_investigate_search_uses_transient_fallback(tmp_path, monkeypatch):
+    await init_stores(tmp_path)
+
+    class FailingSearchModel(SearchModel):
+        async def ainvoke(self, messages, config=None):
+            self.inputs.append((messages, config))
+            raise rate_limit_error()
+
+    primary = FailingSearchModel([])
+    fallback_search = SearchModel([AIMessage(content="搜索结束")])
+    report_model = StreamModel(["报告正文。\n"])
+
+    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+        if max_tokens is not None:
+            return report_model
+        return fallback_search if fallback else primary
+
+    monkeypatch.setattr(experts, "expert_llm", expert_model)
+    try:
+        result = await experts.investigate.ainvoke(
+            {"question": "研究一个主题"},
+            config=turn_config("investigate-fallback"),
+        )
+        assert "报告已上屏" in result
+        assert len(primary.inputs) == 1
+        assert len(fallback_search.inputs) == 1
+    finally:
+        experts.clear_turn_budget("expert-turn")
+        await close_stores()
+
+
+@pytest.mark.asyncio
+async def test_inspect_image_uses_transient_fallback(tmp_path, monkeypatch):
+    from PIL import Image
+
+    image_path = tmp_path / "vision.png"
+    Image.new("RGB", (2, 2), "red").save(image_path)
+
+    async def get_media(media_id, thread_id):
+        return {
+            "media_id": media_id,
+            "kind": "image",
+            "origin": "upload",
+            "path": str(image_path),
+        }
+
+    class FailingVisionModel:
+        model_name = "primary-vision"
+
+        def __init__(self):
+            self.inputs = []
+
+        async def ainvoke(self, messages, config=None):
+            self.inputs.append((messages, config))
+            raise rate_limit_error()
+
+    primary = FailingVisionModel()
+    fallback_model = StreamModel([])
+
+    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+        return fallback_model if fallback else primary
+
+    monkeypatch.setattr(experts.media_store, "get_media", get_media)
+    monkeypatch.setattr(experts, "expert_llm", expert_model)
+    try:
+        result = await experts.inspect_image.ainvoke(
+            {"media_id": "m_vision", "question": "图片里是什么？"},
+            config=turn_config("vision-fallback"),
+        )
+        assert "看到了" in result
+        assert len(primary.inputs) == 1
+        assert len(fallback_model.inputs) == 1
+    finally:
+        experts.clear_turn_budget("expert-turn")
+
+
 @pytest.mark.asyncio
 async def test_conversation_fallback_runs_only_before_any_output(tmp_path, monkeypatch):
     await init_stores(tmp_path)

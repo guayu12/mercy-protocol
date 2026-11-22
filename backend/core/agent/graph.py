@@ -3,7 +3,6 @@ import os
 import time
 import asyncio
 import secrets
-import openai
 from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
@@ -36,6 +35,7 @@ from core.models import (
     ModelConfigError,
     get_llm,
     get_model_spec,
+    is_transient,
     role_available,
     validate_config,
 )
@@ -536,23 +536,6 @@ async def agent_node(state: AgentState, config: RunnableConfig):
         if combined is None:
             raise RuntimeError("Conversation model returned an empty stream")
         return message_chunk_to_message(combined)
-
-    def is_transient(error: Exception) -> bool:
-        return (
-            isinstance(
-                error,
-                (
-                    openai.RateLimitError,
-                    openai.APITimeoutError,
-                    openai.APIConnectionError,
-                    asyncio.TimeoutError,
-                ),
-            )
-            or (
-                isinstance(error, openai.APIStatusError)
-                and error.status_code >= 500
-            )
-        )
 
     started_at = time.time()
     try:

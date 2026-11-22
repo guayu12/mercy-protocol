@@ -1,7 +1,9 @@
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import Literal
 
+import openai
 from langchain_openai import ChatOpenAI
 
 
@@ -30,6 +32,24 @@ ROLE_TIMEOUTS = {
 
 class ModelConfigError(ValueError):
     pass
+
+
+def is_transient(error: Exception) -> bool:
+    return (
+        isinstance(
+            error,
+            (
+                openai.RateLimitError,
+                openai.APITimeoutError,
+                openai.APIConnectionError,
+                asyncio.TimeoutError,
+            ),
+        )
+        or (
+            isinstance(error, openai.APIStatusError)
+            and error.status_code >= 500
+        )
+    )
 
 
 def parse_spec(var_name: str, value: str | None) -> ModelSpec | None:
