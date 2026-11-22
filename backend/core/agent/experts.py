@@ -225,7 +225,12 @@ def _append_sources(sources: list[tuple[int, str, str]]) -> str:
         return ""
     formatted = []
     for number, title, url in sources:
-        title = " ".join(title.split()).replace("[", r"\[").replace("]", r"\]")
+        title = (
+            " ".join(title.split())
+            .replace("\\", "\\\\")
+            .replace("[", r"\[")
+            .replace("]", r"\]")
+        )
         if url:
             formatted.append(f"{number}. [{title or url}]({url})\n")
         else:

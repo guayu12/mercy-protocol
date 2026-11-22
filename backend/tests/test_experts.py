@@ -3,6 +3,7 @@ import base64
 import httpx
 import io
 import json
+import re
 
 import openai
 import pytest
@@ -1666,3 +1667,13 @@ async def test_search_source_urls_preserve_plus_and_encode_parentheses():
         (1, "带查询参数", "https://s.test/?q=climate+change"),
         (2, "带括号路径", "https://w.test/A_%28b%29"),
     ]
+
+
+def test_append_sources_escapes_backslashes_before_brackets():
+    source_line = experts._append_sources(
+        [(1, r"C\](//evil.test) 结尾", "https://tavily.test/source")]
+    ).splitlines()[-1]
+
+    link_targets = re.findall(r"(?<!\\)\]\(([^)]*)\)", source_line)
+    assert link_targets == ["https://tavily.test/source"]
+    assert r"C\\\]" in source_line
