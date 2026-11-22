@@ -8,7 +8,6 @@ import secrets
 import openai
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables FIRST — before any module reads them
@@ -28,7 +27,6 @@ from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks import adispatch_custom_event
-from langchain_tavily import TavilySearch
 from langgraph.graph import StateGraph, START
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -38,6 +36,7 @@ from core.memory.memory_manager import MemoryManager
 from core import log_bus  # ← real-time log broadcaster
 from core import media_store, session_store, speech_queue
 from core.models import ModelConfigError, get_llm, get_model_spec, validate_config
+from core.agent.search import format_search_result, tavily_raw
 from core.safe_fetch import safe_media_fetcher
 from core.speakable import SpeechRouter
 
@@ -76,68 +75,13 @@ async def save_memory(fact: str) -> str:
         return f"Already in permanent memory (duplicate skipped): {fact}"
     return f"Saved to permanent memory: {fact}"
 
-# Web Search Tool (requires TAVILY_API_KEY in .env)
-web_search = TavilySearch(
-    max_results=3,
-    include_images=True,
-    include_image_descriptions=True,
-    description="Search the web for current events, facts, or any information you do not know.",
-)
-
-
-def _without_urls(value: str) -> str:
-    return re.sub(r"https?://[^\s)\]>]+", "", value, flags=re.IGNORECASE).strip()
-
-
 @tool
 async def tavily_search(query: str, config: RunnableConfig) -> str:
     """Search the web and return text results plus registered, described images."""
-    result = await web_search.ainvoke({"query": query}, config=config)
-    if not isinstance(result, dict):
-        return str(result)
-    if result.get("error"):
-        return str(result["error"])
-
-    sections = []
-    if result.get("answer"):
-        sections.append(_without_urls(str(result["answer"])))
-    for item in result.get("results", []):
-        if not isinstance(item, dict):
-            continue
-        title = _without_urls(str(item.get("title", "")))
-        content = _without_urls(str(item.get("content", "")))
-        if title or content:
-            sections.append(f"{title}\n{content}".strip())
-
     thread_id = config.get("configurable", {}).get("thread_id", "default_user")
-    image_lines = []
-    image_mimes = {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-        ".gif": "image/gif",
-    }
-    for image in result.get("images", []):
-        if not isinstance(image, dict):
-            continue
-        description = _without_urls(str(image.get("description") or "")).strip()
-        url = image.get("url") or image.get("image_url")
-        if not description or not isinstance(url, str) or not url.startswith(("http://", "https://")):
-            continue
-        extension = Path(url.split("?", 1)[0]).suffix.lower()
-        record = await media_store.register_media(
-            thread_id,
-            "image",
-            "search",
-            image_mimes.get(extension, "image/jpeg"),
-            description,
-            url=url,
-        )
-        image_lines.append(f"可展示图片：{record['media_id']}：{description}")
-    if image_lines:
-        sections.append("\n".join(image_lines))
-    return "\n\n".join(sections) if sections else "没有找到可用的文字结果。"
+    result = await tavily_raw(query, config)
+    text, _ = await format_search_result(result, thread_id)
+    return text or "没有找到可用的文字结果。"
 
 @tool
 def create_local_directory(dir_name: str) -> str:
