@@ -1230,6 +1230,74 @@ async def test_investigate_search_uses_transient_fallback(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_investigate_report_fallback_strips_final_model_url(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    search_model = SearchModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[_tool_call("tavily_search", {"query": "source"}, "s1")],
+            ),
+            AIMessage(content="资料已足够"),
+        ]
+    )
+    primary_report = StreamModel([], rate_limit_error())
+    fallback_report = StreamModel(["结论：见 https://x.test/a"])
+    fallback_calls = []
+
+    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+        if max_tokens is not None:
+            fallback_calls.append(fallback)
+            return fallback_report if fallback else primary_report
+        return search_model
+
+    async def search_raw(query, config):
+        return {
+            "results": [
+                {
+                    "title": "官方来源",
+                    "url": "https://source.test/article",
+                    "content": "来源内容",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(experts, "expert_llm", expert_model)
+    monkeypatch.setattr(experts, "search_raw", search_raw)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    turn_id = "investigate-report-fallback-turn"
+    thread_id = "investigate-report-fallback"
+    try:
+        await experts.investigate.ainvoke(
+            {"question": "核实来源链接"},
+            config=turn_config(thread_id, turn_id),
+        )
+        report = (await session_store.list_reports(thread_id))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+        streamed = "".join(deltas)
+
+        assert fallback_calls == [False, True]
+        assert "x.test" not in streamed
+        assert "x.test" not in report["markdown"]
+        assert "https://source.test/article" in streamed
+        assert "https://source.test/article" in report["markdown"]
+        assert report["markdown"] == streamed
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_investigate_without_sources_marks_report_unverified(
     tmp_path, monkeypatch
 ):
