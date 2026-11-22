@@ -411,7 +411,12 @@ async def test_revising_sources_only_report_includes_citations_in_expert_context
                 "number": 1,
                 "title": "官方来源",
                 "url": "https://source.test/report",
-            }
+            },
+            {
+                "number": 2,
+                "title": "https://title-is-url.test/page",
+                "url": "https://title-is-url.test/page",
+            },
         ],
     )
     model = StreamModel(["变体 [官网](https://copied.test/path)。"])
@@ -447,6 +452,7 @@ async def test_revising_sources_only_report_includes_citations_in_expert_context
         assert "需要修订的报告" in human
         assert "# 报告正文" in human
         assert "[1] 官方来源" in human
+        assert "[2] （标题省略）" in human
         assert "保留原有 [n] 编号" in human
         assert re.search(r"https?://", human) is None
         assert "官网" in report["markdown"]

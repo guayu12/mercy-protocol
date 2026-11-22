@@ -815,7 +815,8 @@ async def write_report(
                 link_policy = "sources_only"
                 sources = based_on.get("sources")
                 source_titles = "\n".join(
-                    f"[{source['number']}] {source['title']}"
+                    f"[{source['number']}] "
+                    f"{_without_urls(source['title']) or '（标题省略）'}"
                     for source in sources or []
                 )
                 task += (
