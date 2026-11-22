@@ -20,7 +20,12 @@ from core.agent.prompts import (
     VISION_PROMPT,
 )
 from core.agent.report_utils import rewrite_report_media
-from core.agent.search import _without_urls, format_search_result, tavily_raw
+from core.agent.search import (
+    _without_urls,
+    format_search_result,
+    format_sources,
+    tavily_raw,
+)
 from core.models import ModelSpec, get_llm, get_model_spec, is_transient
 from core.safe_fetch import safe_media_fetcher
 
@@ -220,24 +225,6 @@ def clear_turn_budget(turn_id: str) -> None:
     _image_inspection_budgets.pop(turn_id, None)
 
 
-def _append_sources(sources: list[tuple[int, str, str]]) -> str:
-    if not sources:
-        return ""
-    formatted = []
-    for number, title, url in sources:
-        title = (
-            " ".join(title.split())
-            .replace("\\", "\\\\")
-            .replace("[", r"\[")
-            .replace("]", r"\]")
-        )
-        if url:
-            formatted.append(f"{number}. [{title or url}]({url})\n")
-        else:
-            formatted.append(f"{number}. {title or '（无链接）'}\n")
-    return "\n\n## 来源\n" + "".join(formatted)
-
-
 @dataclass
 class ReportStream:
     report_id: str | None = None
@@ -246,6 +233,7 @@ class ReportStream:
     incomplete: bool = False
     cancelled: bool = False
     marker_in_storage: bool = False
+    storage_tail: str = ""
     done: bool = False
     response: object | None = None
     strip_external_links: bool = False
@@ -263,11 +251,11 @@ _URL_HOST_PATTERN = (
 )
 _HTTP_URL_PATTERN = (
     rf"https?://{_URL_HOST_PATTERN}"
-    r"(?:[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]|\([^()\s]*\))*"
+    r"(?:[A-Za-z0-9\-._~:/?#@!$&*+,;=%]|\([^()\s]*\))*"
 )
 _WWW_URL_PATTERN = (
     rf"\bwww\.{_URL_HOST_PATTERN}"
-    r"[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]*"
+    r"[A-Za-z0-9\-._~:/?#@!$&*+,;=%]*"
 )
 _PROTOCOL_RELATIVE_LINK_PATTERN = (
     r"!?\[([^\]]+)\]\(//(?:[^()\s]|\([^()\s]*\))*"
@@ -333,6 +321,33 @@ def _fence_line(line: str) -> tuple[str, int, str] | None:
     marker = content[0]
     length = len(content) - len(content.lstrip(marker))
     return marker, length, content[length:]
+
+
+def _track_report_fences(markdown: str, state: ReportStream) -> None:
+    for line in markdown.splitlines(keepends=True):
+        fence_line = _fence_line(line)
+        if state.code_fence_char:
+            if (
+                fence_line is not None
+                and fence_line[0] == state.code_fence_char
+                and fence_line[1] >= state.code_fence_length
+                and not fence_line[2].strip()
+            ):
+                state.code_fence_char = None
+                state.code_fence_length = 0
+                state.code_fence_indent = ""
+            continue
+        if (
+            fence_line is not None
+            and fence_line[1] >= 3
+            and not (
+                fence_line[0] == "`"
+                and "`" in fence_line[2]
+            )
+        ):
+            state.code_fence_char = fence_line[0]
+            state.code_fence_length = fence_line[1]
+            state.code_fence_indent = line[: len(line) - len(line.lstrip(" \t"))]
 
 
 def _strip_external_links_outside_code(
@@ -405,6 +420,8 @@ async def _emit_report_delta(
     if state.strip_external_links:
         markdown = _strip_external_links_outside_code(markdown, state)
         markdown = _enforce_investigation_link_invariants(markdown)
+    else:
+        _track_report_fences(markdown, state)
     rewritten, _ = await rewrite_report_media(markdown, thread_id)
     if not rewritten:
         return
@@ -484,18 +501,39 @@ async def _append_report_suffix(
     thread_id: str,
     config: RunnableConfig,
 ) -> None:
-    await _flush_report_buffer(state, thread_id, config)
-    if state.code_fence_char:
-        newline = "" if not state.text or state.text.endswith("\n") else "\n"
-        closing_fence = (
-            f"{newline}{state.code_fence_indent}"
-            f"{state.code_fence_char * state.code_fence_length}\n"
-        )
-        await _buffer_report_text(state, closing_fence, thread_id, config)
-        await _flush_report_buffer(state, thread_id, config)
+    await _close_open_report_fence(state, thread_id, config)
     state.strip_external_links = False
     await _buffer_report_text(state, suffix, thread_id, config)
     await _flush_report_buffer(state, thread_id, config)
+
+
+def _take_open_fence_closer(state: ReportStream, text: str) -> str:
+    if state.code_fence_char:
+        newline = "" if not text or text.endswith("\n") else "\n"
+        closing_fence = f"{newline}{state.code_fence_indent}"
+        closing_fence += (
+            f"{state.code_fence_char * state.code_fence_length}\n"
+        )
+        return closing_fence
+    return ""
+
+
+async def _close_open_report_fence(
+    state: ReportStream,
+    thread_id: str,
+    config: RunnableConfig,
+) -> bool:
+    await _flush_report_buffer(state, thread_id, config)
+    closing_fence = _take_open_fence_closer(state, state.text)
+    if not closing_fence:
+        return False
+    await _buffer_report_text(state, closing_fence, thread_id, config)
+    await _flush_report_buffer(state, thread_id, config)
+    return True
+
+
+def _interrupted_marker(fence_was_closed: bool) -> str:
+    return INTERRUPTED_MARKER[1:] if fence_was_closed else INTERRUPTED_MARKER
 
 
 async def _persist_report(state: ReportStream, text: str) -> None:
@@ -544,19 +582,28 @@ async def _stream_report(
     event_config: RunnableConfig,
     suffix: str = "",
     fallback_model_factory: Callable[[], object | None] | None = None,
+    link_policy: str = "open",
+    sources: list[dict] | None = None,
 ) -> None:
-    report = await session_store.create_report(thread_id, title, turn_query, "")
-    state.report_id = report["report_id"]
-    await adispatch_custom_event(
-        "report",
-        {
-            "type": "report.open",
-            "report_id": state.report_id,
-            "title": title,
-            "query": turn_query,
-        },
-        config=event_config,
+    report = await session_store.create_report(
+        thread_id,
+        title,
+        turn_query,
+        "",
+        link_policy=link_policy,
+        sources=sources,
     )
+    state.report_id = report["report_id"]
+    open_event = {
+        "type": "report.open",
+        "report_id": state.report_id,
+        "title": title,
+        "query": turn_query,
+        "link_policy": link_policy,
+    }
+    if link_policy == "sources_only":
+        open_event["sources"] = sources or []
+    await adispatch_custom_event("report", open_event, config=event_config)
     async def stream(active_model):
         started_at = time.time()
         combined = None
@@ -593,8 +640,14 @@ async def _stream_report(
             await _append_report_suffix(state, suffix, thread_id, event_config)
         if _report_stream_was_truncated(state.response):
             state.incomplete = True
+            fence_was_closed = await _close_open_report_fence(
+                state, thread_id, event_config
+            )
             await _buffer_report_text(
-                state, INTERRUPTED_MARKER, thread_id, event_config
+                state,
+                _interrupted_marker(fence_was_closed),
+                thread_id,
+                event_config,
             )
             await _flush_report_buffer(state, thread_id, event_config)
         await _emit_report_done(state, event_config)
@@ -602,19 +655,32 @@ async def _stream_report(
         state.cancelled = True
         state.incomplete = True
         state.marker_in_storage = True
+        await _flush_report_buffer(state, thread_id, event_config)
+        closing_fence = _take_open_fence_closer(state, state.text)
+        if closing_fence:
+            state.storage_tail = (
+                closing_fence + _interrupted_marker(fence_was_closed=True)
+            )
+            state.marker_in_storage = False
         raise
     except Exception:
         state.incomplete = True
         await _flush_report_buffer(state, thread_id, event_config)
         if suffix:
             await _append_report_suffix(state, suffix, thread_id, event_config)
+        fence_was_closed = await _close_open_report_fence(
+            state, thread_id, event_config
+        )
         await _buffer_report_text(
-            state, INTERRUPTED_MARKER, thread_id, event_config
+            state,
+            _interrupted_marker(fence_was_closed),
+            thread_id,
+            event_config,
         )
         await _flush_report_buffer(state, thread_id, event_config)
         await _emit_report_done(state, event_config)
     finally:
-        stored = state.text + (
+        stored = state.text + state.storage_tail + (
             INTERRUPTED_MARKER if state.marker_in_storage else ""
         )
         await _persist_report(state, stored)
@@ -633,7 +699,10 @@ async def _finish_timeout(
     await _flush_report_buffer(state, thread_id, config)
     if suffix:
         await _append_report_suffix(state, suffix, thread_id, config)
-    await _buffer_report_text(state, INTERRUPTED_MARKER, thread_id, config)
+    fence_was_closed = await _close_open_report_fence(state, thread_id, config)
+    await _buffer_report_text(
+        state, _interrupted_marker(fence_was_closed), thread_id, config
+    )
     await _flush_report_buffer(state, thread_id, config)
     await _emit_report_done(state, config)
     await _persist_report(state, state.text)
@@ -661,9 +730,11 @@ async def _run_report_tool(
     timeout: int,
     suffix: str = "",
     human_suffix: str = "",
+    link_policy: str = "open",
+    sources: list[dict] | None = None,
 ) -> str:
     _, thread_id, turn_query = _config_context(config)
-    state = ReportStream(strip_external_links=tool_name == "investigate")
+    state = ReportStream(strip_external_links=link_policy == "sources_only")
     child = _child_config(config)
 
     async def run():
@@ -689,6 +760,8 @@ async def _run_report_tool(
             fallback_model_factory=lambda: expert_llm(
                 role, tier, max_tokens, fallback=True
             ),
+            link_policy=link_policy,
+            sources=sources,
         )
 
     try:
@@ -731,11 +804,26 @@ async def write_report(
         if not allowed:
             return DELEGATION_LIMIT_TEXT
         task = brief
+        link_policy = "open"
+        sources = None
         if based_on:
             task += (
-                f"\n\n需要修订的报告 {based_on_report_id}《{based_on['title']}》全文：\n"
+                f"\n\n需要修订的报告 {based_on_report_id}《{based_on['title']}》正文：\n"
                 f"<<<\n{based_on['markdown']}\n>>>"
             )
+            if based_on.get("link_policy") == "sources_only":
+                link_policy = "sources_only"
+                sources = based_on.get("sources")
+                source_titles = "\n".join(
+                    f"[{source['number']}] "
+                    f"{_without_urls(source['title']) or '（标题省略）'}"
+                    for source in sources or []
+                )
+                task += (
+                    "\n\n原报告来源编号与标题：\n"
+                    f"{source_titles}\n"
+                    "修订时请保留原有 [n] 编号。"
+                )
         assistant_name = os.environ.get("ASSISTANT_NAME", "Aura")
         return await _run_report_tool(
             tool_name="write_report",
@@ -747,6 +835,8 @@ async def write_report(
             title=title,
             config=config,
             timeout=180,
+            link_policy=link_policy,
+            sources=sources,
         )
 
 
@@ -842,10 +932,14 @@ async def investigate(question: str, config: RunnableConfig) -> str:
                 result for result in numbered_results if result
             ) or "（没有搜到资料）"
             title = "调查：" + question[:24]
-            no_sources = not sources
-            suffix = _append_sources(sources)
-            if no_sources:
-                suffix += "\n\n本次没有搜到可用来源，内容未经核实。\n"
+            source_entries = [
+                {
+                    "number": number,
+                    "title": " ".join(source_title.split()) or url,
+                    "url": url,
+                }
+                for number, source_title, url in sources
+            ]
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 raise asyncio.TimeoutError()
@@ -859,11 +953,15 @@ async def investigate(question: str, config: RunnableConfig) -> str:
                 title=title,
                 config=config,
                 timeout=remaining,
-                suffix=suffix,
                 human_suffix=f"\n\n搜索资料：\n{source_material}",
+                link_policy="sources_only",
+                sources=source_entries,
             )
-            if no_sources and result.startswith("报告已上屏"):
-                result += "\n注意：本次没有搜到可用来源。"
+            if result.startswith("报告已上屏"):
+                if source_entries:
+                    result += format_sources(source_entries)
+                else:
+                    result += "\n注意：本次没有搜到可用来源。"
             return result
         except asyncio.CancelledError:
             raise

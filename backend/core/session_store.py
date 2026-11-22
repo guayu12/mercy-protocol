@@ -1,5 +1,6 @@
 """Async SQLite persistence for reports and spoken conversation history."""
 
+import json
 import os
 import secrets
 import time
@@ -38,7 +39,9 @@ async def init_store(path: str):
                 title TEXT NOT NULL,
                 query TEXT NOT NULL,
                 markdown TEXT NOT NULL,
-                created_at REAL NOT NULL
+                created_at REAL NOT NULL,
+                link_policy TEXT NOT NULL DEFAULT 'open',
+                sources TEXT
             );
             CREATE TABLE IF NOT EXISTS utterances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +58,16 @@ async def init_store(path: str):
                 ON utterances(thread_id, id);
             """
         )
+        cursor = await _connection.execute("PRAGMA table_info(reports)")
+        report_columns = {row["name"] for row in await cursor.fetchall()}
+        await cursor.close()
+        if "link_policy" not in report_columns:
+            await _connection.execute(
+                "ALTER TABLE reports ADD COLUMN "
+                "link_policy TEXT NOT NULL DEFAULT 'open'"
+            )
+        if "sources" not in report_columns:
+            await _connection.execute("ALTER TABLE reports ADD COLUMN sources TEXT")
         await _connection.commit()
 
 
@@ -74,10 +87,22 @@ def _db() -> aiosqlite.Connection:
 
 
 def _row_dict(row) -> dict:
-    return dict(row)
+    report = dict(row)
+    report.setdefault("link_policy", "open")
+    sources = report.get("sources")
+    report["sources"] = json.loads(sources) if sources is not None else None
+    return report
 
 
-async def create_report(thread_id: str, title: str, query: str, markdown: str) -> dict:
+async def create_report(
+    thread_id: str,
+    title: str,
+    query: str,
+    markdown: str,
+    *,
+    link_policy: str = "open",
+    sources: list[dict] | None = None,
+) -> dict:
     report = {
         "thread_id": thread_id,
         "report_id": f"r_{secrets.token_hex(4)}",
@@ -85,13 +110,23 @@ async def create_report(thread_id: str, title: str, query: str, markdown: str) -
         "query": query,
         "markdown": markdown,
         "created_at": time.time(),
+        "link_policy": link_policy,
+        "sources": sources,
+    }
+    values = {
+        **report,
+        "sources_json": json.dumps(sources, ensure_ascii=False)
+        if sources is not None
+        else None,
     }
     async with _get_lock():
         db = _db()
         await db.execute(
-            "INSERT INTO reports (thread_id, report_id, title, query, markdown, created_at) "
-            "VALUES (:thread_id, :report_id, :title, :query, :markdown, :created_at)",
-            report,
+            "INSERT INTO reports "
+            "(thread_id, report_id, title, query, markdown, created_at, link_policy, sources) "
+            "VALUES (:thread_id, :report_id, :title, :query, :markdown, :created_at, "
+            ":link_policy, :sources_json)",
+            values,
         )
         await db.commit()
     return report

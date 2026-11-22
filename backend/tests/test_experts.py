@@ -384,9 +384,81 @@ async def test_based_on_report_ownership_is_checked_before_budget(tmp_path, monk
             config=turn_config("not-owner", "revision-turn"),
         )
         human = model.inputs[0][0][1].content
+        reports = await session_store.list_reports("not-owner")
         assert "需要修订的报告" in human
         assert "需要保留的全文" in human
+        assert reports[-1]["link_policy"] == "open"
+        assert reports[-1]["sources"] is None
     finally:
+        await close_stores()
+
+
+@pytest.mark.asyncio
+async def test_revising_sources_only_report_includes_citations_in_expert_context(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    thread_id = "sources-only-revision"
+    turn_id = "sources-only-revision-turn"
+    original = await session_store.create_report(
+        thread_id,
+        "调查报告",
+        "研究主题",
+        "# 报告正文",
+        link_policy="sources_only",
+        sources=[
+            {
+                "number": 1,
+                "title": "官方来源",
+                "url": "https://source.test/report",
+            },
+            {
+                "number": 2,
+                "title": "https://title-is-url.test/page",
+                "url": "https://title-is-url.test/page",
+            },
+        ],
+    )
+    model = StreamModel(["变体 [官网](https://copied.test/path)。"])
+    monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    try:
+        await experts.write_report.ainvoke(
+            {
+                "title": "修订版",
+                "brief": "修订原报告",
+                "based_on_report_id": original["report_id"],
+            },
+            config=turn_config(thread_id, turn_id),
+        )
+        human = model.inputs[0][0][1].content
+        report = (await session_store.list_reports(thread_id))[-1]
+        open_event = next(
+            event
+            for event in events
+            if event["type"] == "report.open"
+            and event["report_id"] == report["report_id"]
+        )
+        assert report["link_policy"] == original["link_policy"]
+        assert report["sources"] == original["sources"]
+        assert open_event["link_policy"] == "sources_only"
+        assert open_event["sources"] == original["sources"]
+        assert "需要修订的报告" in human
+        assert "# 报告正文" in human
+        assert "[1] 官方来源" in human
+        assert "[2] （标题省略）" in human
+        assert "保留原有 [n] 编号" in human
+        assert re.search(r"https?://", human) is None
+        assert "官网" in report["markdown"]
+        assert "copied.test" not in report["markdown"]
+    finally:
+        experts.clear_turn_budget(turn_id)
         await close_stores()
 
 
@@ -395,7 +467,9 @@ async def test_report_error_emits_incomplete_marker_without_leaking_exception(
     tmp_path, monkeypatch
 ):
     await init_stores(tmp_path)
-    model = StreamModel(["部分内容\n"], RuntimeError("https://secret.invalid/key"))
+    model = StreamModel(
+        ["```bash\n部分内容\n"], RuntimeError("https://secret.invalid/key")
+    )
     monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
     events = []
 
@@ -411,7 +485,7 @@ async def test_report_error_emits_incomplete_marker_without_leaking_exception(
         report = (await session_store.list_reports("error-thread"))[0]
         deltas = [event["markdown"] for event in events if event["type"] == "report.delta"]
         assert report["markdown"] == "".join(deltas)
-        assert report["markdown"].endswith("（生成中断）\n")
+        assert report["markdown"].endswith("```\n\n（生成中断）\n")
         assert events[-1]["type"] == "report.done"
         assert "生成中断" in result
         assert "内容不完整" in result
@@ -437,7 +511,7 @@ async def test_report_stream_metadata_marks_stream_incomplete(
     class TruncatedModel(StreamModel):
         async def astream(self, messages, config=None):
             self.inputs.append((messages, config))
-            yield AIMessageChunk(content="报告正文。\n")
+            yield AIMessageChunk(content="```bash\n报告正文。\n")
             yield AIMessageChunk(content="", response_metadata=response_metadata)
 
     model = TruncatedModel()
@@ -462,6 +536,7 @@ async def test_report_stream_metadata_marks_stream_incomplete(
         ]
 
         assert "报告正文。\n" in report["markdown"]
+        assert report["markdown"].endswith("```\n\n（生成中断）\n")
         assert report["markdown"] == "".join(deltas)
         assert any("（生成中断）" in delta for delta in deltas)
         assert events[-1]["type"] == "report.done"
@@ -479,7 +554,7 @@ async def test_cancelled_report_persists_marker_without_emitting_it(tmp_path, mo
     class WaitingModel(StreamModel):
         async def astream(self, messages, config=None):
             self.inputs.append((messages, config))
-            yield AIMessageChunk(content="首行\n")
+            yield AIMessageChunk(content="```bash\n首行\n")
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -510,10 +585,44 @@ async def test_cancelled_report_persists_marker_without_emitting_it(tmp_path, mo
         emitted = "".join(
             event["markdown"] for event in events if event["type"] == "report.delta"
         )
-        assert report["markdown"] == emitted + "\n\n（生成中断）\n"
+        assert report["markdown"] == emitted + "```\n\n（生成中断）\n"
         assert not any("生成中断" in event.get("markdown", "") for event in events)
         assert not any(event["type"] == "report.done" for event in events)
         assert model.cancelled
+    finally:
+        await close_stores()
+
+
+@pytest.mark.asyncio
+async def test_timeout_closes_open_fence_before_interruption_marker(tmp_path, monkeypatch):
+    await init_stores(tmp_path)
+    report = await session_store.create_report(
+        "timeout-thread", "超时", "问题", ""
+    )
+    state = experts.ReportStream(
+        report_id=report["report_id"],
+        emitted=["```bash\n部分内容\n"],
+        code_fence_char="`",
+        code_fence_length=3,
+    )
+    events = [{"type": "report.delta", "markdown": "```bash\n部分内容\n"}]
+
+    async def dispatch(name, data, config=None):
+        events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    try:
+        await experts._finish_timeout(
+            state,
+            "timeout-thread",
+            turn_config("timeout-thread"),
+        )
+        stored = await session_store.get_report("timeout-thread", report["report_id"])
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+        assert stored["markdown"] == "".join(deltas)
+        assert stored["markdown"].endswith("```\n\n（生成中断）\n")
     finally:
         await close_stores()
 
@@ -619,12 +728,20 @@ async def test_investigate_uses_three_numbered_searches_without_model_urls(
             if isinstance(message.content, str)
         ]
         assert not any("https://source" in content for content in model_contents)
-        assert report["markdown"].endswith(
-            "\n\n## 来源\n"
-            "1. [来源1](https://source1.test/page)\n"
-            "2. [来源2](https://source2.test/page)\n"
-            "3. [来源3](https://source3.test/page)\n"
-        )
+        assert report["markdown"] == "结论见 [1]。\n"
+        assert report["link_policy"] == "sources_only"
+        assert report["sources"] == [
+            {
+                "number": number,
+                "title": f"来源{number}",
+                "url": f"https://source{number}.test/page",
+            }
+            for number in range(1, 4)
+        ]
+        assert "## 来源" in result
+        open_event = next(event for event in events if event["type"] == "report.open")
+        assert open_event["link_policy"] == "sources_only"
+        assert open_event["sources"] == report["sources"]
         human = compose.inputs[0][0][1].content
         assert "研究问题" in human
         assert "搜索资料：" in human
@@ -1278,7 +1395,7 @@ async def test_investigate_report_fallback_strips_final_model_url(
     turn_id = "investigate-report-fallback-turn"
     thread_id = "investigate-report-fallback"
     try:
-        await experts.investigate.ainvoke(
+        result = await experts.investigate.ainvoke(
             {"question": "核实来源链接"},
             config=turn_config(thread_id, turn_id),
         )
@@ -1291,8 +1408,16 @@ async def test_investigate_report_fallback_strips_final_model_url(
         assert fallback_calls == [False, True]
         assert "x.test" not in streamed
         assert "x.test" not in report["markdown"]
-        assert "https://source.test/article" in streamed
-        assert "https://source.test/article" in report["markdown"]
+        assert "https://source.test/article" not in streamed
+        assert "https://source.test/article" not in report["markdown"]
+        assert report["sources"] == [
+            {
+                "number": 1,
+                "title": "官方来源",
+                "url": "https://source.test/article",
+            }
+        ]
+        assert "https://source.test/article" in result
         assert report["markdown"] == streamed
     finally:
         experts.clear_turn_budget(turn_id)
@@ -1325,14 +1450,11 @@ async def test_investigate_without_sources_marks_report_unverified(
             config=turn_config("investigate-no-sources", turn_id),
         )
         report = (await session_store.list_reports("investigate-no-sources"))[0]
-        no_source_delta = "\n\n本次没有搜到可用来源，内容未经核实。\n"
-
-        assert report["markdown"].endswith(no_source_delta)
-        assert events[-2] == {
-            "type": "report.delta",
-            "report_id": report["report_id"],
-            "markdown": no_source_delta,
-        }
+        assert report["markdown"] == "初步报告。\n"
+        assert report["link_policy"] == "sources_only"
+        assert report["sources"] == []
+        open_event = next(event for event in events if event["type"] == "report.open")
+        assert open_event["sources"] == []
         assert result.endswith("注意：本次没有搜到可用来源。")
     finally:
         experts.clear_turn_budget(turn_id)
@@ -1389,7 +1511,7 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
     turn_id = "investigate-links-turn"
     thread_id = "investigate-links"
     try:
-        await experts.investigate.ainvoke(
+        result = await experts.investigate.ainvoke(
             {"question": "核实来源链接"},
             config=turn_config(thread_id, turn_id),
         )
@@ -1406,8 +1528,17 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
         assert "政府.香港" not in report["markdown"]
         assert "见 ，后面" in report["markdown"]
         assert "后续文字。" in report["markdown"]
-        assert "## 来源" in report["markdown"]
-        assert "https://source.invalid/a_%28b%29" in report["markdown"]
+        assert "## 来源" not in report["markdown"]
+        assert "https://source.invalid/a_%28b%29" not in report["markdown"]
+        assert report["link_policy"] == "sources_only"
+        assert report["sources"] == [
+            {
+                "number": 1,
+                "title": "官方来源",
+                "url": "https://source.invalid/a_%28b%29",
+            }
+        ]
+        assert "https://source.invalid/a_%28b%29" in result
         assert report["markdown"] == "".join(deltas)
     finally:
         experts.clear_turn_budget(turn_id)
@@ -1424,6 +1555,7 @@ async def test_investigate_replaces_code_urls_and_strips_prose_links(
         [
             "```bash\n",
             "curl https://api.test/v1\n",
+            "curl 'https://x.test/a'\n",
             "```\n",
             "用 `curl https://api.test/v1` 调用\n",
             "正文见 https://plain.test/path 结束。\n",
@@ -1449,10 +1581,10 @@ async def test_investigate_replaces_code_urls_and_strips_prose_links(
     expected = (
         "```bash\n"
         "curl （网址已省略）\n"
+        "curl '（网址已省略）'\n"
         "```\n"
         "用 `curl （网址已省略）` 调用\n"
         "正文见  结束。\n"
-        "\n\n本次没有搜到可用来源，内容未经核实。\n"
     )
     try:
         await experts.investigate.ainvoke(
@@ -1517,10 +1649,7 @@ async def test_investigate_fenced_code_preserves_urls_but_strips_prose(
     monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
     turn_id = "investigate-nested-fence-turn"
     thread_id = "investigate-nested-fence"
-    expected = (
-        f"{expected_code}见  结尾"
-        "\n\n本次没有搜到可用来源，内容未经核实。\n"
-    )
+    expected = f"{expected_code}见  结尾"
     try:
         await experts.investigate.ainvoke(
             {"question": "检查嵌套代码围栏"},
@@ -1930,7 +2059,7 @@ async def test_search_sources_stay_aligned_across_numbered_searches():
     )
 
     sources = first_sources + second_sources
-    appendix = experts._append_sources(sources)
+    appendix = search_module.format_sources(sources)
     assert "[1] 第一条结果正文" in first_text
     assert "[2] 第二条 [研究] 标题\n第二条正文" in second_text
     assert sources == [
@@ -1976,10 +2105,42 @@ async def test_search_source_urls_preserve_plus_and_encode_parentheses():
 
 
 def test_append_sources_escapes_backslashes_before_brackets():
-    source_line = experts._append_sources(
+    source_line = search_module.format_sources(
         [(1, r"C\](//evil.test) 结尾", "https://tavily.test/source")]
     ).splitlines()[-1]
 
     link_targets = re.findall(r"(?<!\\)\]\(([^)]*)\)", source_line)
     assert link_targets == ["https://tavily.test/source"]
     assert r"C\\\]" in source_line
+
+
+@pytest.mark.asyncio
+async def test_read_report_includes_sources_only_citations_and_empty_notice(tmp_path):
+    await init_stores(tmp_path)
+    source = {"number": 1, "title": "来源", "url": "https://source.test"}
+    try:
+        sourced = await session_store.create_report(
+            "read-thread",
+            "调查",
+            "问题",
+            "# 正文",
+            link_policy="sources_only",
+            sources=[source],
+        )
+        empty = await session_store.create_report(
+            "read-thread",
+            "未找到",
+            "问题",
+            "# 空正文",
+            link_policy="sources_only",
+            sources=[],
+        )
+        config = turn_config("read-thread")
+        assert await agent_graph.read_report.ainvoke(
+            {"report_id": sourced["report_id"]}, config=config
+        ) == "# 正文\n\n## 来源\n1. [来源](https://source.test)\n"
+        assert await agent_graph.read_report.ainvoke(
+            {"report_id": empty["report_id"]}, config=config
+        ) == "# 空正文\n\n注意：本次没有搜到可用来源。"
+    finally:
+        await close_stores()

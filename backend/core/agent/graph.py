@@ -50,6 +50,7 @@ from core.agent.report_utils import rewrite_report_media
 from core.agent.search import (
     _without_urls,
     format_search_result,
+    report_full_text,
     tavily_raw,
 )
 from core.safe_fetch import safe_media_fetcher
@@ -130,9 +131,18 @@ async def show_report(title: str, markdown: str, config: RunnableConfig) -> str:
     markdown, removed_media_ids = await rewrite_report_media(markdown, thread_id)
     report = await session_store.create_report(thread_id, title, query, markdown)
     report_id = report["report_id"]
+    open_event = {
+        "type": "report.open",
+        "report_id": report_id,
+        "title": title,
+        "query": query,
+        "link_policy": report["link_policy"],
+    }
+    if report["link_policy"] == "sources_only":
+        open_event["sources"] = report["sources"] or []
     await adispatch_custom_event(
         "report",
-        {"type": "report.open", "report_id": report_id, "title": title, "query": query},
+        open_event,
         config=config,
     )
     await adispatch_custom_event(
@@ -247,7 +257,9 @@ async def read_report(report_id: str, config: RunnableConfig) -> str:
     """Read the full text of an existing on-screen report when the user asks for more detail."""
     thread_id = config.get("configurable", {}).get("thread_id", "default_user")
     report = await session_store.get_report(thread_id, report_id)
-    return report["markdown"] if report else "找不到这份报告"
+    if not report:
+        return "找不到这份报告"
+    return report_full_text(report)
 
 
 @tool
@@ -912,6 +924,7 @@ async def process_query(
                     "report_id": report_id,
                     "title": report["title"],
                     "query": query,
+                    "link_policy": report["link_policy"],
                 }
                 yield {
                     "type": "report.delta",

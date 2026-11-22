@@ -806,6 +806,53 @@ textarea:focus-visible {
   background: var(--border-subtle);
 }
 
+.report-sources {
+  margin-top: 18px;
+  padding-top: 13px;
+  border-top: 1px solid var(--border-subtle);
+  color: #c7cad2;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.report-sources h3 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.report-sources ol {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.report-sources li {
+  padding-left: 3px;
+  overflow-wrap: anywhere;
+}
+
+.report-sources li + li {
+  margin-top: 5px;
+}
+
+.report-sources a {
+  color: var(--accent-strong);
+  text-decoration-color: rgba(240, 188, 133, 0.45);
+  text-underline-offset: 3px;
+}
+
+.report-sources-empty {
+  margin-top: 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .report-link {
   color: var(--accent-strong);
   text-decoration-color: rgba(240, 188, 133, 0.45);
