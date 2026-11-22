@@ -1340,6 +1340,8 @@ export function App() {
             className="settings-trigger"
             type="button"
             aria-label="设置与状态"
+            aria-controls="left-rail"
+            aria-expanded={leftExpanded}
             title="设置与状态"
             onClick={toggleSettings}
           >

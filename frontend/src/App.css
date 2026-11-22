@@ -2147,13 +2147,13 @@ textarea:focus-visible {
   }
 }
 
-#app[data-layout="evidence"] #left-rail .left-full,
-#app[data-layout="focus_evidence"] #left-rail .left-full {
+#app[data-layout="evidence"]:not([data-left-expanded="true"]) #left-rail .left-full,
+#app[data-layout="focus_evidence"]:not([data-left-expanded="true"]) #left-rail .left-full {
   display: none;
 }
 
-#app[data-layout="evidence"] #left-rail .left-slim,
-#app[data-layout="focus_evidence"] #left-rail .left-slim {
+#app[data-layout="evidence"]:not([data-left-expanded="true"]) #left-rail .left-slim,
+#app[data-layout="focus_evidence"]:not([data-left-expanded="true"]) #left-rail .left-slim {
   display: flex;
 }
 
