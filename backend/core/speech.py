@@ -1,11 +1,12 @@
 """TTS synthesis with word-level timing converted to VRM viseme tracks."""
 import base64
+import os
 import re
 
 import edge_tts
 from pypinyin import Style, lazy_pinyin
 
-VOICE = "zh-CN-XiaoxiaoNeural"
+VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoyiNeural")
 TICKS_PER_SECOND = 10_000_000
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")

@@ -1,8 +1,7 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import edge_tts
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import os
 import sys
 import asyncio
@@ -15,13 +14,19 @@ from contextlib import asynccontextmanager
 from typing import Optional
 from core import log_bus  # real-time log broadcaster
 from core.agent.graph import process_query, init_graph, close_graph
+from core import session_store, speech_queue
 from core.speech import synthesize
+from core.speakable import to_speakable
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await session_store.init_store(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "session.db")
+    )
     await init_graph()
     yield
     await close_graph()
+    await session_store.close_store()
 
 app = FastAPI(title="Mercy Protocol — AI Judicial Interface", version="2.0.0", lifespan=lifespan)
 
@@ -46,10 +51,22 @@ app.add_middleware(
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
+class ScreenState(BaseModel):
+    viewing_report_id: Optional[str] = None
+
+
+class Interrupted(BaseModel):
+    turn_id: str
+    spoken_sentence_ids: list[str] = Field(default_factory=list)
+
+
 class ChatRequest(BaseModel):
     message: str
     image_base64: Optional[str] = None  # raw base64 or full data: URL
     thread_id: str = "default_user"
+    screen_state: Optional[ScreenState] = None
+    interrupted: Optional[Interrupted] = None
+
 
 @app.get("/")
 async def root():
@@ -80,17 +97,21 @@ async def logs_sse(request: Request):
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
-# ─── Chat (SSE, token-level streaming) ───────────────────────────────
+# ─── Chat (SSE, speech and report events) ────────────────────────────
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     """
-    Streams the agent reply as Server-Sent Events. Each event is JSON:
-    {"type": "token", "content": ...} | {"type": "tool", "name": ..., "status": ...}
-    | {"type": "done", "reply": ...} | {"type": "error", "message": ...}
+    Streams spoken sentences, reports, status and tool events as Server-Sent Events.
     """
     async def event_stream():
         try:
-            async for event in process_query(request.message, request.thread_id, request.image_base64):
+            async for event in process_query(
+                request.message,
+                request.thread_id,
+                request.image_base64,
+                request.screen_state.model_dump() if request.screen_state else None,
+                request.interrupted.model_dump() if request.interrupted else None,
+            ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:
             log_bus.emit("error", "ERROR", f"chat_endpoint exception: {str(e)[:200]}")
@@ -99,19 +120,6 @@ async def chat_endpoint(request: ChatRequest):
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
-# ─── TTS ──────────────────────────────────────────────────────────────
-@app.get("/api/tts")
-async def tts_endpoint(text: str):
-    """Convert text to speech stream using edge-tts."""
-    async def generate_audio():
-        communicate = edge_tts.Communicate(text, "zh-CN-XiaoxiaoNeural")
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
-
-    return StreamingResponse(generate_audio(), media_type="audio/mpeg")
-
-
 class SpeechRequest(BaseModel):
     text: str
 
@@ -119,7 +127,28 @@ class SpeechRequest(BaseModel):
 @app.post("/api/speech")
 async def speech_endpoint(req: SpeechRequest):
     """Synthesize speech and return base64 audio plus a timed viseme track for avatar lip-sync."""
-    return await synthesize(req.text)
+    text = to_speakable(req.text)
+    if not text:
+        raise HTTPException(status_code=400, detail="Speech text is empty after cleaning")
+    return await synthesize(text)
+
+
+@app.get("/api/speech/{sentence_id}")
+async def sentence_speech_endpoint(sentence_id: str):
+    """Synthesize a sentence previously emitted by the chat stream."""
+    text = speech_queue.get_sentence(sentence_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail="Speech sentence not found")
+    return await synthesize(text)
+
+
+@app.get("/api/session/{thread_id}")
+async def session_endpoint(thread_id: str):
+    """Return saved reports and recent spoken conversation for a thread."""
+    return {
+        "reports": await session_store.list_reports(thread_id),
+        "utterances": await session_store.recent_utterances(thread_id),
+    }
 
 if __name__ == "__main__":
     import uvicorn
