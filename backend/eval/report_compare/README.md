@@ -14,6 +14,8 @@ Replace `DIR` with the desired output directory. The scripts call real model
 APIs; generation and judging incur API costs. Judging uses `gpt-6.2-sol` with
 high reasoning effort.
 
+Latest results: [RESULTS.md](RESULTS.md)
+
 Keep Terra only if at least one rule passes:
 
 - **a.** Terra's mean across the five criteria is at least 0.5 above Luna's on
