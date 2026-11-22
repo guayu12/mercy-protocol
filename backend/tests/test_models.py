@@ -228,6 +228,7 @@ def test_get_llm_uses_langchain_token_limit_for_each_api_mode(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypatch):
     import main
+    from core import runtime_config
 
     clear_model_environment(monkeypatch)
     seen = []
@@ -241,6 +242,9 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
         main, "graph_tools", [SimpleNamespace(name="investigate")]
     )
     monkeypatch.setattr(main, "role_available", lambda role, tier: tier == "max")
+    monkeypatch.setattr(
+        runtime_config, "role_available", lambda role, tier="normal": tier == "max"
+    )
     monkeypatch.setenv("MODEL_RESEARCH_MAX", "openai:configured-max")
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

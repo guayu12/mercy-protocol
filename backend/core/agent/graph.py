@@ -304,6 +304,10 @@ base_tools = [
 
 def build_tools():
     configured_tools = list(base_tools)
+    if not os.environ.get("TAVILY_API_KEY", "").strip():
+        configured_tools = [
+            item for item in configured_tools if item.name != "tavily_search"
+        ]
     if role_available("report"):
         configured_tools.append(write_report)
     if role_available("research") and os.environ.get("TAVILY_API_KEY", "").strip():
