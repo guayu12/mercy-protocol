@@ -62,6 +62,19 @@ Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_
 The backend binds to `127.0.0.1` by default; set `BACKEND_HOST` in `.env` to override it.
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
 
+Gemini video analysis is optional (`GEMINI_API_KEY` or `GOOGLE_API_KEY` plus
+`MODEL_VIDEO=gemini:gemini-3.8-flash`). On the Gemini free tier, Google may use
+uploaded videos and files to improve its products, and people may review them;
+the paid tier does not use this content for product improvement or human review.
+Mercy does not change behavior based on tier: quota exhaustion is reported to
+the user as a rate-limit error and is never retried. Gemini's Files API has a
+2 GB per-file free-tier limit and Google automatically deletes files after 48
+hours. Mercy deletes an analyzed video after 15 minutes without another
+question by default (`GEMINI_FILE_RETENTION_SECONDS`, set it to `0` to delete
+immediately); files left by an abnormal exit are cleaned on the next startup.
+The paid-tier Gemini 3.8 Flash input price reference is $0.75 per 1 million
+tokens through 2026-12-31 and $1.50 per 1 million tokens starting 2027-01-01.
+
 ### 2. Avatar model
 
 The frontend loads `frontend/public/vrm/avatar.vrm`, pixiv's VRM 1.0 sample model, which is licensed for redistribution, modification and commercial use (see `frontend/public/vrm/LICENSE.md`). To use your own character, export a VRM 1.0 file (e.g. from [VRoid Studio](https://vroid.com/en/studio)) and replace that file.

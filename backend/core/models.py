@@ -29,6 +29,8 @@ ROLE_TIMEOUTS = {
     "research": 120,
     "vision": 60,
 }
+DEFAULT_VIDEO_MAX_MINUTES = 30
+DEFAULT_GEMINI_FILE_RETENTION_SECONDS = 900
 
 
 class ModelConfigError(ValueError):
@@ -130,6 +132,8 @@ def get_model_spec(
 
     base_var = f"MODEL_{role.upper()}"
     if fallback:
+        if role == "video":
+            return None
         fallback_var = f"{base_var}_FALLBACK"
         if tier == "max":
             max_fallback_var = f"{base_var}_MAX_FALLBACK"
@@ -155,7 +159,34 @@ def role_available(role: str, tier: str = "normal") -> bool:
     )
 
 
+def _integer_setting(name: str, default: int, *, minimum: int = 0) -> int:
+    raw_value = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise ModelConfigError(f"{name}: expected an integer") from error
+    if value < minimum:
+        raise ModelConfigError(f"{name}: must be at least {minimum}")
+    return value
+
+
+def video_max_minutes() -> int:
+    return _integer_setting("VIDEO_MAX_MINUTES", DEFAULT_VIDEO_MAX_MINUTES, minimum=1)
+
+
+def gemini_file_retention_seconds() -> int:
+    return _integer_setting(
+        "GEMINI_FILE_RETENTION_SECONDS",
+        DEFAULT_GEMINI_FILE_RETENTION_SECONDS,
+    )
+
+
 def validate_config() -> None:
+    for suffix in ("_FALLBACK", "_MAX_FALLBACK"):
+        var_name = f"MODEL_VIDEO{suffix}"
+        if os.environ.get(var_name, "").strip():
+            raise ModelConfigError(f"{var_name}: video models do not support fallbacks")
+
     for role in ROLES:
         for suffix in ("", "_MAX", "_FALLBACK", "_MAX_FALLBACK"):
             var_name = f"MODEL_{role.upper()}{suffix}"
@@ -164,8 +195,19 @@ def validate_config() -> None:
                 raise ModelConfigError(
                     f"{var_name}: provider '{spec.provider}' 1c 未启用（聊天类角色只支持 openai）"
                 )
+            if role == "video" and spec:
+                if spec.provider != "gemini":
+                    raise ModelConfigError(
+                        f"{var_name}: video models must use the gemini provider"
+                    )
+                if spec.effort is not None:
+                    raise ModelConfigError(
+                        f"{var_name}: reasoning effort is not supported for video"
+                    )
     if not os.environ.get("MODEL_CONVERSATION", "").strip():
         _legacy_spec("conversation")
+    video_max_minutes()
+    gemini_file_retention_seconds()
 
 
 def get_llm(
@@ -176,6 +218,8 @@ def get_llm(
     max_tokens: int | None = None,
 ) -> ChatOpenAI | None:
     role = _role_name(role)
+    if role == "video":
+        raise ModelConfigError("MODEL_VIDEO: video models do not use get_llm")
     spec = get_model_spec(role, tier, fallback=fallback)  # type: ignore[arg-type]
     if spec is None or not any(
         os.environ.get(key, "").strip() for key in PROVIDER_KEYS[spec.provider]

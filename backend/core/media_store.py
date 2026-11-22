@@ -115,6 +115,15 @@ async def init_store(path: str) -> None:
                 ON media(thread_id, created_at);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_media_thread_url
                 ON media(thread_id, url) WHERE url IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS gemini_files (
+                media_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                uri TEXT NOT NULL,
+                mime TEXT NOT NULL,
+                duration_seconds REAL,
+                uploaded_at REAL NOT NULL,
+                delete_after REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS stage_state (
                 thread_id TEXT PRIMARY KEY,
                 items_json TEXT NOT NULL,
@@ -391,6 +400,74 @@ async def clear_cached_path(media_id: str) -> None:
     async with _lock():
         await _db().execute(
             "UPDATE media SET path = NULL WHERE media_id = ?", (media_id,)
+        )
+        await _db().commit()
+
+
+async def get_gemini_file(media_id: str) -> dict | None:
+    async with _lock():
+        cursor = await _db().execute(
+            "SELECT * FROM gemini_files WHERE media_id = ?", (media_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    return dict(row) if row is not None else None
+
+
+async def list_gemini_files() -> list[dict]:
+    async with _lock():
+        cursor = await _db().execute(
+            "SELECT * FROM gemini_files ORDER BY uploaded_at ASC"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+    return [dict(row) for row in rows]
+
+
+async def put_gemini_file(
+    media_id: str,
+    name: str,
+    uri: str,
+    mime: str,
+    duration_seconds: float | None,
+    uploaded_at: float,
+    delete_after: float,
+) -> None:
+    async with _lock():
+        await _db().execute(
+            "INSERT INTO gemini_files "
+            "(media_id, name, uri, mime, duration_seconds, uploaded_at, delete_after) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(media_id) DO UPDATE SET "
+            "name = excluded.name, uri = excluded.uri, mime = excluded.mime, "
+            "duration_seconds = excluded.duration_seconds, "
+            "uploaded_at = excluded.uploaded_at, delete_after = excluded.delete_after",
+            (
+                media_id,
+                name,
+                uri,
+                mime,
+                duration_seconds,
+                uploaded_at,
+                delete_after,
+            ),
+        )
+        await _db().commit()
+
+
+async def set_gemini_file_delete_after(media_id: str, delete_after: float) -> None:
+    async with _lock():
+        await _db().execute(
+            "UPDATE gemini_files SET delete_after = ? WHERE media_id = ?",
+            (delete_after, media_id),
+        )
+        await _db().commit()
+
+
+async def delete_gemini_file(media_id: str) -> None:
+    async with _lock():
+        await _db().execute(
+            "DELETE FROM gemini_files WHERE media_id = ?", (media_id,)
         )
         await _db().commit()
 

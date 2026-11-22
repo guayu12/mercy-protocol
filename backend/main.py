@@ -24,6 +24,7 @@ from core.agent.graph import (
     tools as graph_tools,
 )
 from core import media_store, session_store, speech_queue
+from core.gemini_file_cache import cleanup_gemini_files, gemini_file_cleanup_loop
 from core.models import role_available
 from core.safe_fetch import DownloadTooLarge, SafeFetchError, safe_media_fetcher
 from core.speech import synthesize
@@ -36,11 +37,18 @@ async def lifespan(app: FastAPI):
     )
     await session_store.init_store(store_path)
     await media_store.init_store(store_path)
-    await init_graph()
-    yield
-    await close_graph()
-    await media_store.close_store()
-    await session_store.close_store()
+    await cleanup_gemini_files(delete_all=True)
+    cleanup_task = asyncio.create_task(gemini_file_cleanup_loop())
+    try:
+        await init_graph()
+        yield
+    finally:
+        cleanup_task.cancel()
+        await asyncio.gather(cleanup_task, return_exceptions=True)
+        await close_graph()
+        await cleanup_gemini_files(delete_all=True)
+        await media_store.close_store()
+        await session_store.close_store()
 
 app = FastAPI(title="Mercy Protocol — AI Judicial Interface", version="2.0.0", lifespan=lifespan)
 
@@ -134,7 +142,8 @@ async def capabilities():
         and role_available("research", "max")
         and any(item.name == "investigate" for item in graph_tools)
     )
-    return {"max_tier": max_tier, "video": False, "document": False}
+    video = any(item.name == "analyze_video" for item in graph_tools)
+    return {"max_tier": max_tier, "video": video, "document": False}
 
 
 # ─── SSE Log Stream ──────────────────────────────────────────────────
