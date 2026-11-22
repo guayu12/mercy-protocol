@@ -13,7 +13,7 @@ async def rewrite_report_media(markdown: str, thread_id: str) -> tuple[str, list
     for match in _MEDIA_REFERENCE.finditer(markdown):
         parts.append(markdown[cursor : match.start()])
         record = await media_store.get_media(match.group(2), thread_id)
-        if record:
+        if record and record["kind"] != "document":
             parts.append(match.group(0))
         else:
             parts.append(match.group(1))

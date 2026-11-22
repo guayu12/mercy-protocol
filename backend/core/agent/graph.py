@@ -40,6 +40,8 @@ from core.models import (
     validate_config,
 )
 from core.agent.experts import (
+    analyze_document,
+    analyze_video,
     clear_turn_budget,
     inspect_image,
     investigate,
@@ -175,13 +177,19 @@ async def show_media(
     thread_id = config.get("configurable", {}).get("thread_id", "default_user")
     allowed_images = {"image/jpeg", "image/png", "image/webp", "image/gif"}
     allowed_videos = {"video/mp4", "video/webm"}
-    limits = {"image": media_store.IMAGE_LIMIT, "video": media_store.VIDEO_LIMIT}
+    limits = {
+        "image": media_store.IMAGE_LIMIT,
+        "video": media_store.VIDEO_LIMIT,
+        "document": media_store.DOCUMENT_LIMIT,
+    }
     failures = []
 
     async def validate(media_id: str):
         record = await media_store.get_media(media_id, thread_id)
         if record is None:
             return None, "不存在或不属于当前会话"
+        if record["kind"] == "document":
+            return None, "文档不会展示在展示台上"
         if record["origin"] == "upload":
             path = Path(record["path"] or "")
             if not path.is_file():
@@ -302,6 +310,9 @@ def build_tools():
         configured_tools.append(investigate)
     if role_available("vision"):
         configured_tools.append(inspect_image)
+    if role_available("video"):
+        configured_tools.append(analyze_video)
+        configured_tools.append(analyze_document)
     return configured_tools
 
 
@@ -324,7 +335,7 @@ async def _media_screen_context(thread_id: str, screen_state: dict) -> str:
     stage_items = stage["items"] if stage else []
     stage_ids = [item["media_id"] for item in stage_items]
     records = await media_store.list_media(thread_id, 20, stage_ids)
-    kind_labels = {"image": "图片", "video": "视频"}
+    kind_labels = {"image": "图片", "video": "视频", "document": "文档"}
     origin_labels = {"upload": "上传", "search": "搜索", "link": "链接"}
     media_lines = [
         f"{record['media_id']} · {kind_labels[record['kind']]} · "
@@ -365,6 +376,7 @@ async def _prepare_user_media(
 ) -> tuple[str, list[str]]:
     image_urls = []
     video_ids = []
+    document_ids = []
     if image_base64:
         try:
             encoded = (
@@ -388,6 +400,9 @@ async def _prepare_user_media(
         if record["kind"] == "video":
             video_ids.append(media_id)
             continue
+        if record["kind"] == "document":
+            document_ids.append((media_id, record["caption"]))
+            continue
         try:
             if record["origin"] != "upload":
                 record = await media_store.cache_remote_image(
@@ -402,9 +417,29 @@ async def _prepare_user_media(
             log_bus.emit("warn", "MEDIA", f"ignored image attachment {media_id}: {error}")
 
     if video_ids:
+        has_video_analysis = any(
+            item.name == "analyze_video" for item in tools
+        )
         notices = [
-            f"［用户上传了视频 {media_id}，你看不到画面内容］"
+            (
+                f"［用户上传了视频 {media_id}，需要了解内容时用 analyze_video］"
+                if has_video_analysis
+                else f"［用户上传了视频 {media_id}，你看不到画面内容］"
+            )
             for media_id in video_ids
+        ]
+        query = "\n".join([query, *notices]).strip()
+    if document_ids:
+        has_document_analysis = any(
+            item.name == "analyze_document" for item in tools
+        )
+        notices = [
+            (
+                f"［用户上传了文档 {media_id}（{_without_urls(filename)}），需要了解内容时用 analyze_document］"
+                if has_document_analysis
+                else f"［用户上传了文档 {media_id}（{_without_urls(filename)}），你读不到内容］"
+            )
+            for media_id, filename in document_ids
         ]
         query = "\n".join([query, *notices]).strip()
     return query, image_urls
@@ -481,6 +516,23 @@ async def agent_node(state: AgentState, config: RunnableConfig):
         prompt_additions.append(
             "需要看清某张已登记图片的细节时，调用 inspect_image，传媒体编号和具体问题；拿到结果前不要描述画面。"
         )
+    if {"analyze_video", "analyze_document"} & bound_tool_names:
+        if await session_store.get_flag("gemini_notice_given") is None:
+            prompt_additions.append(
+                "调用 analyze_video 或 analyze_document 前，先用同一句话告诉用户你要看视频或读文档、需要一点时间；首次调用任一工具时还要提醒用户，若使用 Gemini 免费层，Google 可能使用上传内容改进产品且可能由人工审核。"
+            )
+        else:
+            prompt_additions.append(
+                "调用 analyze_video 或 analyze_document 前，先用一句话告诉用户你要看视频或读文档、需要一点时间。"
+            )
+    if "analyze_video" in bound_tool_names:
+        prompt_additions.append(
+            "你不能直接看视频；需要了解视频内容时，调用 analyze_video 并传媒体编号和具体问题，拿到结果前不要描述视频。"
+        )
+    if "analyze_document" in bound_tool_names:
+        prompt_additions.append(
+            "你不能直接阅读 PDF；需要了解文档内容时，调用 analyze_document 并传媒体编号和具体问题，拿到结果前不要描述文档。"
+        )
     if {"write_report", "investigate"} & bound_tool_names:
         prompt_additions.append(
             "调用 write_report 或 investigate 前，先用一句话告诉用户你要去做什么、需要一点时间。它们返回时报告已经上屏，不要再调用 show_report，口头用两三句概括要点并询问意见，不要复述报告。"
@@ -492,8 +544,20 @@ async def agent_node(state: AgentState, config: RunnableConfig):
         prompt_additions.append(
             "用户开了深度模式：需要调查或严谨推理时优先使用 investigate。"
         )
+    video_rule = (
+        "视频只能展示，你看不到视频画面，绝不能描述其内容。"
+        if "analyze_video" not in bound_tool_names
+        else ""
+    )
+    document_rule = (
+        "你看不到已上传文档的内容，绝不能描述其内容。"
+        if "analyze_document" not in bound_tool_names
+        else ""
+    )
     media_rules = (
-        "媒体与展示台规则：只能通过 show_media 展示上面列出的媒体编号；只有图片本身是当前主题时才使用 focus=primary；话题转移后调用 clear_stage。视频只能展示，你看不到视频画面，绝不能描述其内容。"
+        "媒体与展示台规则：只能通过 show_media 展示上面列出的媒体编号；只有图片本身是当前主题时才使用 focus=primary；话题转移后调用 clear_stage。"
+        + video_rule
+        + document_rule
     )
     if "inspect_image" in bound_tool_names:
         media_rules += (
@@ -884,6 +948,8 @@ async def process_query(
                         "write_report": "正在写报告",
                         "investigate": "正在调查",
                         "inspect_image": "正在看图",
+                        "analyze_video": "正在看视频",
+                        "analyze_document": "正在读文档",
                     }
                     if event["name"] == "show_report" and report_status_pending:
                         report_status_pending -= 1

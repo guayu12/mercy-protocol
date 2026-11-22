@@ -52,6 +52,10 @@ async def init_store(path: str):
                 interrupted INTEGER DEFAULT 0,
                 created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS app_flags (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_reports_thread_id
                 ON reports(thread_id);
             CREATE INDEX IF NOT EXISTS idx_utterances_thread_id_id
@@ -162,6 +166,27 @@ async def list_reports(thread_id: str) -> list[dict]:
         rows = await cursor.fetchall()
         await cursor.close()
     return [_row_dict(row) for row in rows]
+
+
+async def get_flag(key: str) -> str | None:
+    async with _get_lock():
+        cursor = await _db().execute(
+            "SELECT value FROM app_flags WHERE key = ?", (key,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+    return row["value"] if row else None
+
+
+async def set_flag(key: str, value: str) -> None:
+    async with _get_lock():
+        db = _db()
+        await db.execute(
+            "INSERT INTO app_flags (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await db.commit()
 
 
 async def add_utterance(

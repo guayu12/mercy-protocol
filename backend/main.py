@@ -3,6 +3,7 @@ import re
 import sys
 import asyncio
 import json
+import logging
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,6 +25,7 @@ from core.agent.graph import (
     tools as graph_tools,
 )
 from core import media_store, session_store, speech_queue
+from core.gemini_file_cache import cleanup_gemini_files, gemini_file_cleanup_loop
 from core.models import role_available
 from core.safe_fetch import DownloadTooLarge, SafeFetchError, safe_media_fetcher
 from core.speech import synthesize
@@ -36,15 +38,34 @@ async def lifespan(app: FastAPI):
     )
     await session_store.init_store(store_path)
     await media_store.init_store(store_path)
-    await init_graph()
-    yield
-    await close_graph()
-    await media_store.close_store()
-    await session_store.close_store()
+    cleanup_task = asyncio.create_task(gemini_file_cleanup_loop())
+    try:
+        await init_graph()
+        yield
+    finally:
+        cleanup_task.cancel()
+        await asyncio.gather(cleanup_task, return_exceptions=True)
+        await close_graph()
+        try:
+            await asyncio.wait_for(
+                cleanup_gemini_files(delete_all=True),
+                timeout=GEMINI_FILE_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logging.getLogger(__name__).warning(
+                "Gemini file shutdown cleanup timed out"
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Gemini file shutdown cleanup failed"
+            )
+        await media_store.close_store()
+        await session_store.close_store()
 
 app = FastAPI(title="Mercy Protocol — AI Judicial Interface", version="2.0.0", lifespan=lifespan)
 
 UPLOAD_MULTIPART_OVERHEAD = 1024 * 1024
+GEMINI_FILE_SHUTDOWN_TIMEOUT_SECONDS = 10
 
 
 @app.middleware("http")
@@ -134,7 +155,9 @@ async def capabilities():
         and role_available("research", "max")
         and any(item.name == "investigate" for item in graph_tools)
     )
-    return {"max_tier": max_tier, "video": False, "document": False}
+    video = any(item.name == "analyze_video" for item in graph_tools)
+    document = any(item.name == "analyze_document" for item in graph_tools)
+    return {"max_tier": max_tier, "video": video, "document": document}
 
 
 # ─── SSE Log Stream ──────────────────────────────────────────────────
@@ -273,12 +296,19 @@ def _cache_limit_bytes() -> int:
     return megabytes * 1024 * 1024
 
 
-def _media_file_response(path: Path, mime: str) -> FileResponse:
+def _media_file_response(
+    path: Path,
+    mime: str,
+    *,
+    filename: str | None = None,
+    disposition: Literal["inline", "attachment"] = "inline",
+) -> FileResponse:
     return FileResponse(
         path,
         media_type=mime,
         headers={"X-Content-Type-Options": "nosniff"},
-        content_disposition_type="inline",
+        filename=filename,
+        content_disposition_type=disposition,
     )
 
 
@@ -293,6 +323,13 @@ async def get_media(media_id: str, request: Request):
         path = Path(record["path"] or "").resolve()
         if path.parent != media_store.media_directory().resolve() or not path.is_file():
             raise HTTPException(status_code=404, detail="Uploaded media not found")
+        if record["kind"] == "document":
+            return _media_file_response(
+                path,
+                "application/pdf",
+                filename=record["caption"],
+                disposition="attachment",
+            )
         return _media_file_response(path, record["mime"])
 
     if not record["url"]:
