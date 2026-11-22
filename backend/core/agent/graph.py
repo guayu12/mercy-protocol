@@ -455,6 +455,41 @@ async def agent_node(state: AgentState, config: RunnableConfig):
     media_block = await _media_screen_context(thread_id, screen_state)
     assistant_name = os.environ.get("ASSISTANT_NAME", "Aura")
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    bound_tool_names = {item.name for item in tools}
+    prompt_additions = []
+    if "write_report" in bound_tool_names:
+        prompt_additions.append(
+            "需要详细、严谨或篇幅较长的文档时，调用 write_report 交给报告专家撰写：title 写标题，brief 写清楚要写什么、给谁看、重点和格式；修订已有报告时传 based_on_report_id。简单的表格或短文档仍可自己用 show_report。"
+        )
+    if "investigate" in bound_tool_names:
+        prompt_additions.append(
+            "需要调查、核实或综合多个来源时，调用 investigate 交给调查专家，它会自己搜索并把带来源的报告上屏。简单的事实查询仍用 tavily_search。"
+        )
+    if "inspect_image" in bound_tool_names:
+        prompt_additions.append(
+            "需要看清某张已登记图片的细节时，调用 inspect_image，传媒体编号和具体问题；拿到结果前不要描述画面。"
+        )
+    if {"write_report", "investigate"} & bound_tool_names:
+        prompt_additions.append(
+            "调用 write_report 或 investigate 前，先用一句话告诉用户你要去做什么、需要一点时间。它们返回时报告已经上屏，不要再调用 show_report，口头用两三句概括要点并询问意见，不要复述报告。"
+        )
+    if (
+        configurable.get("model_tier", "normal") == "max"
+        and "investigate" in bound_tool_names
+    ):
+        prompt_additions.append(
+            "用户开了深度模式：需要调查或严谨推理时优先使用 investigate。"
+        )
+    media_rules = (
+        "媒体与展示台规则：只能通过 show_media 展示上面列出的媒体编号；只有图片本身是当前主题时才使用 focus=primary；话题转移后调用 clear_stage。视频只能展示，你看不到视频画面，绝不能描述其内容。"
+    )
+    if "inspect_image" in bound_tool_names:
+        media_rules += (
+            "搜索图片和之前上传的图片，只有调用 inspect_image 之后才能描述画面；本轮上传的图片可直接分析。"
+        )
+    else:
+        media_rules += "搜索图片只知道已提供的描述；本轮上传的图片可直接分析。"
+    additions_block = "\n".join(prompt_additions)
 
     sys_prompt = SystemMessage(content=f"""
 你叫{assistant_name}，是用户的工作伙伴。说话自然、亲切、简洁，像同事当面汇报。
@@ -474,7 +509,9 @@ async def agent_node(state: AgentState, config: RunnableConfig):
 
 {media_block}
 
-媒体与展示台规则：只能通过 show_media 展示上面列出的媒体编号；只有图片本身是当前主题时才使用 focus=primary；话题转移后调用 clear_stage。视频只能展示，你看不到视频画面，绝不能描述其内容。搜索图片只知道已提供的描述；本轮上传的图片可直接分析。
+{media_rules}
+
+{additions_block}
 """)
     full_messages = [sys_prompt] + list(messages)
     input_tokens_est = sum(len(_text_of(m.content)) // 4 for m in full_messages)
