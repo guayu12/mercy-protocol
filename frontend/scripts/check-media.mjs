@@ -95,6 +95,9 @@ const sourceMarkup = renderMarkdown("", {
 });
 assert.equal((sourceMarkup.match(/<a\b/g) ?? []).length, 1);
 assert.ok(sourceMarkup.includes('href="https://c.test"'));
+assert.ok(sourceMarkup.includes('title="https://c.test"'));
+assert.ok(sourceMarkup.includes('target="_blank"'));
+assert.ok(sourceMarkup.includes('rel="noopener noreferrer"'));
 assert.ok(sourceMarkup.includes("C](//evil.test) 结尾"));
 assert.ok(!sourceMarkup.includes('href="//evil.test"'));
 
