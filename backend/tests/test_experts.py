@@ -3,6 +3,7 @@ import base64
 import httpx
 import io
 import json
+import random
 import re
 
 import openai
@@ -1414,7 +1415,9 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
 
 
 @pytest.mark.asyncio
-async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch):
+async def test_investigate_replaces_code_urls_and_strips_prose_links(
+    tmp_path, monkeypatch
+):
     await init_stores(tmp_path)
     research_model = SearchModel([AIMessage(content="资料已足够")])
     report_model = StreamModel(
@@ -1445,9 +1448,9 @@ async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch)
     thread_id = "investigate-code-links"
     expected = (
         "```bash\n"
-        "curl https://api.test/v1\n"
+        "curl （网址已省略）\n"
         "```\n"
-        "用 `curl https://api.test/v1` 调用\n"
+        "用 `curl （网址已省略）` 调用\n"
         "正文见  结束。\n"
         "\n\n本次没有搜到可用来源，内容未经核实。\n"
     )
@@ -1464,17 +1467,18 @@ async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch)
         assert report["markdown"] == expected
         assert report["markdown"] == "".join(deltas)
         assert "plain.test" not in report["markdown"]
+        assert "https://api.test/v1" not in report["markdown"]
     finally:
         experts.clear_turn_budget(turn_id)
         await close_stores()
 
 
 @pytest.mark.parametrize(
-    ("code_chunks", "preserved_code"),
+    ("code_chunks", "expected_code"),
     [
         (
             ["````md\n", "```\n", "curl https://a.test\n", "```\n", "````\n"],
-            "````md\n```\ncurl https://a.test\n```\n````\n",
+            "````md\n```\ncurl （网址已省略）\n```\n````\n",
         ),
         (
             [
@@ -1483,13 +1487,13 @@ async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch)
                 "    curl https://api.test/v1\n",
                 "    ```\n",
             ],
-            "1. 步骤\n    ```bash\n    curl https://api.test/v1\n    ```\n",
+            "1. 步骤\n    ```bash\n    curl （网址已省略）\n    ```\n",
         ),
     ],
 )
 @pytest.mark.asyncio
 async def test_investigate_fenced_code_preserves_urls_but_strips_prose(
-    code_chunks, preserved_code, tmp_path, monkeypatch
+    code_chunks, expected_code, tmp_path, monkeypatch
 ):
     await init_stores(tmp_path)
     research_model = SearchModel([AIMessage(content="资料已足够")])
@@ -1514,7 +1518,7 @@ async def test_investigate_fenced_code_preserves_urls_but_strips_prose(
     turn_id = "investigate-nested-fence-turn"
     thread_id = "investigate-nested-fence"
     expected = (
-        f"{preserved_code}见  结尾"
+        f"{expected_code}见  结尾"
         "\n\n本次没有搜到可用来源，内容未经核实。\n"
     )
     try:
@@ -1528,11 +1532,124 @@ async def test_investigate_fenced_code_preserves_urls_but_strips_prose(
         ]
 
         assert report["markdown"] == expected
-        assert preserved_code in report["markdown"]
+        assert expected_code in report["markdown"]
         assert "b.test" not in report["markdown"]
         assert report["markdown"] == "".join(deltas)
     finally:
         experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
+@pytest.mark.parametrize("chunking", ["whole", "characters", "random"])
+@pytest.mark.parametrize(
+    ("case_id", "markdown", "expected_fragment", "closing_fence"),
+    [
+        (
+            "escaped_inline",
+            r"\`[官网](https://x.test/a)\`",
+            "（网址已省略）",
+            None,
+        ),
+        (
+            "indented_unclosed_fence",
+            "段落\n\n    ```\n[官网](https://x.test/a)\n",
+            "（网址已省略）",
+            "    ```\n",
+        ),
+        (
+            "html_fence_mismatch",
+            "<div>\n```\n</div>\n\n[官网](https://x.test/a)\n",
+            "（网址已省略）",
+            "```\n",
+        ),
+        (
+            "tilde_fence",
+            "~~~\n      ~~~\n~~~\n[官网](https://x.test/a)\n",
+            "（网址已省略）",
+            "~~~\n",
+        ),
+        ("www", "见 www.x.test/path 说明\n", "见  说明", None),
+        ("protocol_relative", "[官网](//x.test/a)\n", "官网", None),
+        (
+            "autolink_and_uppercase",
+            "<https://政府.香港> HTTPS://X.TEST\n",
+            None,
+            None,
+        ),
+        (
+            "code_block",
+            "```bash\ncurl https://api.test/v1\n```",
+            "curl （网址已省略）",
+            None,
+        ),
+        (
+            "email_addresses",
+            "contact user@example.com; mailto:alice@example.com\n",
+            "user@example.com; mailto:alice@example.com",
+            None,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_investigate_link_invariants_across_chunk_boundaries(
+    case_id, markdown, expected_fragment, closing_fence, chunking, tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    thread_id = f"investigate-link-invariants-{case_id}-{chunking}"
+    report = await session_store.create_report(thread_id, "测试", "问题", "")
+    state = experts.ReportStream(
+        report_id=report["report_id"],
+        strip_external_links=True,
+    )
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    if chunking == "whole":
+        chunks = [markdown]
+    elif chunking == "characters":
+        chunks = list(markdown)
+    else:
+        rng = random.Random(20261122)
+        chunks = []
+        position = 0
+        while position < len(markdown):
+            size = rng.randint(1, min(11, len(markdown) - position))
+            chunks.append(markdown[position : position + size])
+            position += size
+
+    source_suffix = "\n\n## 来源\n1. [来源](https://source.test/page)\n"
+    try:
+        for chunk in chunks:
+            await experts._buffer_report_text(
+                state, chunk, thread_id, turn_config(thread_id)
+            )
+        await experts._flush_report_buffer(state, thread_id, turn_config(thread_id))
+        await experts._append_report_suffix(
+            state, source_suffix, thread_id, turn_config(thread_id)
+        )
+        await experts._persist_report(state, state.text)
+
+        stored = (await session_store.list_reports(thread_id))[0]["markdown"]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+        body, separator, sources = stored.partition("\n\n## 来源\n")
+
+        assert separator
+        assert sources == "1. [来源](https://source.test/page)\n"
+        assert stored == "".join(deltas)
+        assert re.search(r"(?i)https?://", body) is None
+        assert re.search(r"(?i)\bwww\.", body) is None
+        assert "](//" not in body
+        if expected_fragment:
+            assert expected_fragment in body
+        if closing_fence:
+            assert body.endswith(closing_fence)
+    finally:
         await close_stores()
 
 

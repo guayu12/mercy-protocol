@@ -251,18 +251,38 @@ class ReportStream:
     strip_external_links: bool = False
     code_fence_char: str | None = None
     code_fence_length: int = 0
+    code_fence_indent: str = ""
 
     @property
     def text(self) -> str:
         return "".join(self.emitted)
 
 
+_HTTP_URL_PATTERN = (
+    r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+"
+    r"(?:[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]|\([^()\s]*\))*"
+)
+_WWW_URL_PATTERN = (
+    r"\bwww\.[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+"
+    r"[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]*"
+)
+_PROTOCOL_RELATIVE_LINK_PATTERN = (
+    r"!?\[([^\]]+)\]\(//(?:[^()\s]|\([^()\s]*\))*"
+    r"(?:\s+(?:\"[^\"]*\"|'[^']*'))?\)"
+)
+
+
 def _strip_external_links_from_text(markdown: str) -> str:
     markdown = re.sub(
-        r"!?\[([^\]]+)\]\(https?://(?:[^()\s]|\([^()\s]*\))*(?:\s+(?:\"[^\"]*\"|'[^']*'))?\)",
+        rf"!?\[([^\]]+)\]\({_HTTP_URL_PATTERN}(?:\s+(?:\"[^\"]*\"|'[^']*'))?\)",
         r"\1",
         markdown,
         flags=re.IGNORECASE,
+    )
+    markdown = re.sub(
+        _PROTOCOL_RELATIVE_LINK_PATTERN,
+        r"\1",
+        markdown,
     )
     markdown = re.sub(
         r"<https?://[^>\s]+>",
@@ -270,9 +290,31 @@ def _strip_external_links_from_text(markdown: str) -> str:
         markdown,
         flags=re.IGNORECASE,
     )
-    return re.sub(
-        r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+(?:[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]|\([^()\s]*\))*",
+    markdown = re.sub(
+        _HTTP_URL_PATTERN,
         "",
+        markdown,
+        flags=re.IGNORECASE,
+    )
+    markdown = re.sub(
+        _WWW_URL_PATTERN,
+        "",
+        markdown,
+        flags=re.IGNORECASE,
+    )
+    return markdown.replace("](//", "](")
+
+
+def _replace_external_urls_in_code(markdown: str) -> str:
+    markdown = re.sub(
+        _HTTP_URL_PATTERN,
+        "（网址已省略）",
+        markdown,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        _WWW_URL_PATTERN,
+        "（网址已省略）",
         markdown,
         flags=re.IGNORECASE,
     )
@@ -297,7 +339,7 @@ def _strip_external_links_outside_code(
     for line in markdown.splitlines(keepends=True):
         fence_line = _fence_line(line)
         if state.code_fence_char:
-            output.append(line)
+            output.append(_replace_external_urls_in_code(line))
             if (
                 fence_line is not None
                 and fence_line[0] == state.code_fence_char
@@ -306,6 +348,7 @@ def _strip_external_links_outside_code(
             ):
                 state.code_fence_char = None
                 state.code_fence_length = 0
+                state.code_fence_indent = ""
             continue
 
         if (
@@ -318,11 +361,12 @@ def _strip_external_links_outside_code(
         ):
             state.code_fence_char = fence_line[0]
             state.code_fence_length = fence_line[1]
-            output.append(line)
+            state.code_fence_indent = line[: len(line) - len(line.lstrip(" \t"))]
+            output.append(_replace_external_urls_in_code(line))
             continue
 
         if re.match(
-            r"^\s*\[[^\]]+\]:\s*<?https?://",
+            r"^\s*\[[^\]]+\]:\s*<?(?:https?://|//|www\.)",
             line,
             flags=re.IGNORECASE,
         ):
@@ -332,11 +376,21 @@ def _strip_external_links_outside_code(
         parts = []
         for match in _INLINE_CODE_SPAN.finditer(line):
             parts.append(_strip_external_links_from_text(line[position : match.start()]))
-            parts.append(match.group(0))
+            parts.append(_replace_external_urls_in_code(match.group(0)))
             position = match.end()
         parts.append(_strip_external_links_from_text(line[position:]))
         output.append("".join(parts))
     return "".join(output)
+
+
+def _enforce_investigation_link_invariants(markdown: str) -> str:
+    markdown = re.sub(_HTTP_URL_PATTERN, "", markdown, flags=re.IGNORECASE)
+    markdown = re.sub(_WWW_URL_PATTERN, "", markdown, flags=re.IGNORECASE)
+    markdown = re.sub(_PROTOCOL_RELATIVE_LINK_PATTERN, r"\1", markdown)
+    markdown = markdown.replace("](//", "](")
+    markdown = re.sub(r"(?i)https?:/*", "", markdown)
+    markdown = re.sub(r"(?i)\bwww\.", "www ", markdown)
+    return markdown.replace("](//", "](")
 
 
 async def _emit_report_delta(
@@ -347,6 +401,7 @@ async def _emit_report_delta(
 ) -> None:
     if state.strip_external_links:
         markdown = _strip_external_links_outside_code(markdown, state)
+        markdown = _enforce_investigation_link_invariants(markdown)
     rewritten, _ = await rewrite_report_media(markdown, thread_id)
     if not rewritten:
         return
@@ -418,6 +473,26 @@ async def _flush_report_buffer(
         remaining = _defuse_unclosed_images(state.buffer)
         state.buffer = ""
         await _emit_report_delta(state, remaining, thread_id, config)
+
+
+async def _append_report_suffix(
+    state: ReportStream,
+    suffix: str,
+    thread_id: str,
+    config: RunnableConfig,
+) -> None:
+    await _flush_report_buffer(state, thread_id, config)
+    if state.code_fence_char:
+        newline = "" if not state.text or state.text.endswith("\n") else "\n"
+        closing_fence = (
+            f"{newline}{state.code_fence_indent}"
+            f"{state.code_fence_char * state.code_fence_length}\n"
+        )
+        await _buffer_report_text(state, closing_fence, thread_id, config)
+        await _flush_report_buffer(state, thread_id, config)
+    state.strip_external_links = False
+    await _buffer_report_text(state, suffix, thread_id, config)
+    await _flush_report_buffer(state, thread_id, config)
 
 
 async def _persist_report(state: ReportStream, text: str) -> None:
@@ -512,9 +587,7 @@ async def _stream_report(
             state.response = combined
         await _flush_report_buffer(state, thread_id, event_config)
         if suffix:
-            state.strip_external_links = False
-            await _buffer_report_text(state, suffix, thread_id, event_config)
-            await _flush_report_buffer(state, thread_id, event_config)
+            await _append_report_suffix(state, suffix, thread_id, event_config)
         if _report_stream_was_truncated(state.response):
             state.incomplete = True
             await _buffer_report_text(
@@ -531,9 +604,7 @@ async def _stream_report(
         state.incomplete = True
         await _flush_report_buffer(state, thread_id, event_config)
         if suffix:
-            state.strip_external_links = False
-            await _buffer_report_text(state, suffix, thread_id, event_config)
-            await _flush_report_buffer(state, thread_id, event_config)
+            await _append_report_suffix(state, suffix, thread_id, event_config)
         await _buffer_report_text(
             state, INTERRUPTED_MARKER, thread_id, event_config
         )
@@ -558,9 +629,7 @@ async def _finish_timeout(
     state.marker_in_storage = False
     await _flush_report_buffer(state, thread_id, config)
     if suffix:
-        state.strip_external_links = False
-        await _buffer_report_text(state, suffix, thread_id, config)
-        await _flush_report_buffer(state, thread_id, config)
+        await _append_report_suffix(state, suffix, thread_id, config)
     await _buffer_report_text(state, INTERRUPTED_MARKER, thread_id, config)
     await _flush_report_buffer(state, thread_id, config)
     await _emit_report_done(state, config)
