@@ -724,6 +724,23 @@ def test_image_helper_strips_exif_and_uses_first_gif_frame(tmp_path):
     assert first_frame.getpixel((0, 0))[0] > first_frame.getpixel((0, 0))[2]
 
 
+def test_palette_png_transparency_survives_image_conversion(tmp_path):
+    from PIL import Image
+
+    image_path = tmp_path / "palette-transparent.png"
+    image = Image.new("P", (2, 1))
+    image.putpalette([255, 0, 0, 0, 255, 0] + [0] * 762)
+    image.putdata([0, 1])
+    image.save(image_path, transparency=0)
+
+    data_url = media_utils.image_data_url_from_path(str(image_path))
+    assert data_url and data_url.startswith("data:image/png;base64,")
+    decoded = Image.open(io.BytesIO(base64.b64decode(data_url.split(",", 1)[1])))
+    rgba = decoded.convert("RGBA")
+    assert rgba.getpixel((0, 0))[3] == 0
+    assert rgba.getpixel((1, 0))[3] == 255
+
+
 def test_image_helper_rejects_more_than_fifty_million_pixels(tmp_path, monkeypatch):
     path = tmp_path / "large.jpg"
     path.touch()

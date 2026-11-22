@@ -31,12 +31,13 @@ def image_data_url_from_path(path: str) -> str | None:
         source.seek(0)
         image = ImageOps.exif_transpose(source.copy())
         has_alpha = "A" in image.getbands() or "transparency" in source.info
+        if has_alpha:
+            image = image.convert("RGBA")
         image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
         image.info.clear()
         image.getexif().clear()
         output = io.BytesIO()
         if has_alpha:
-            image = image.convert("RGBA")
             image.save(output, format="PNG")
             mime = "image/png"
         else:
