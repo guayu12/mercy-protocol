@@ -251,7 +251,9 @@ export function App() {
   const handleAudioEndRef = useRef<() => void>(() => undefined);
   const isPumpingRef = useRef(false);
   const audioEpochRef = useRef(0);
-  const highlightTimersRef = useRef(new Map<string, number>());
+  const highlightTimersRef = useRef(
+    new Map<string, { timer: number; target: HTMLElement }>(),
+  );
   const reportHighlightNonceRef = useRef(0);
 
   const addSystemNotice = useCallback((content: string) => {
@@ -684,7 +686,7 @@ export function App() {
         window.clearTimeout(speechWatchdogRef.current);
         speechWatchdogRef.current = null;
       }
-      for (const timer of highlightTimersRef.current.values()) window.clearTimeout(timer);
+      for (const { timer } of highlightTimersRef.current.values()) window.clearTimeout(timer);
     },
     [clearSpeechMetadataProbe],
   );
@@ -700,18 +702,23 @@ export function App() {
       (item) => item.textContent?.toLocaleLowerCase().includes(anchor.toLocaleLowerCase()),
     );
     if (!target) return false;
+    const previous = highlightTimersRef.current.get(reportId);
+    if (previous) {
+      window.clearTimeout(previous.timer);
+      previous.target.classList.remove("report-highlight");
+      highlightTimersRef.current.delete(reportId);
+    }
     target.classList.add("report-highlight");
     list.scrollTo({
       top: list.scrollTop + target.getBoundingClientRect().top - list.getBoundingClientRect().top - 24,
       behavior: "smooth",
     });
-    const previousTimer = highlightTimersRef.current.get(reportId);
-    if (previousTimer) window.clearTimeout(previousTimer);
     const timer = window.setTimeout(() => {
+      if (highlightTimersRef.current.get(reportId)?.timer !== timer) return;
       target.classList.remove("report-highlight");
       highlightTimersRef.current.delete(reportId);
     }, 4500);
-    highlightTimersRef.current.set(reportId, timer);
+    highlightTimersRef.current.set(reportId, { timer, target });
     return true;
   }, []);
 
