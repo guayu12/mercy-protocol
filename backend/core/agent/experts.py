@@ -203,10 +203,13 @@ def clear_turn_budget(turn_id: str) -> None:
 def _append_sources(sources: list[tuple[str, str]]) -> str:
     if not sources:
         return ""
-    return "\n\n## 来源\n" + "".join(
-        f"{index}. [{title or url}]({url})\n"
-        for index, (title, url) in enumerate(sources, start=1)
-    )
+    formatted = []
+    for index, (title, url) in enumerate(sources, start=1):
+        if url:
+            formatted.append(f"{index}. [{title or url}]({url})\n")
+        else:
+            formatted.append(f"{index}. {title or '（无链接）'}\n")
+    return "\n\n## 来源\n" + "".join(formatted)
 
 
 @dataclass

@@ -1276,3 +1276,39 @@ async def test_conversation_does_not_fallback_after_output_or_for_bad_request(
         assert not fallback.inputs
     finally:
         await close_stores()
+
+
+@pytest.mark.asyncio
+async def test_search_sources_stay_aligned_across_numbered_searches():
+    first_text, first_sources = await experts.format_search_result(
+        {
+            "results": [
+                {
+                    "content": "第一条结果正文",
+                    "url": "https://example.test/first",
+                }
+            ]
+        },
+        "search-numbering",
+        numbered_from=1,
+    )
+    second_text, second_sources = await experts.format_search_result(
+        {
+            "results": [
+                {
+                    "title": "第二条结果",
+                    "content": "第二条正文",
+                }
+            ]
+        },
+        "search-numbering",
+        numbered_from=len(first_sources) + 1,
+    )
+
+    sources = first_sources + second_sources
+    appendix = experts._append_sources(sources)
+    assert "[1] 第一条结果正文" in first_text
+    assert "[2] 第二条结果\n第二条正文" in second_text
+    assert sources == [("", "https://example.test/first"), ("第二条结果", "")]
+    assert "1. [https://example.test/first](https://example.test/first)" in appendix
+    assert "2. 第二条结果\n" in appendix

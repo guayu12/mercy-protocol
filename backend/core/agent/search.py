@@ -48,15 +48,20 @@ async def format_search_result(
             continue
         title = _without_urls(str(item.get("title", "")))
         content = _without_urls(str(item.get("content", "")))
-        url = item.get("url")
+        raw_url = item.get("url")
+        url = (
+            raw_url
+            if isinstance(raw_url, str)
+            and raw_url.startswith(("http://", "https://"))
+            else ""
+        )
         section = f"{title}\n{content}".strip()
         if next_number is not None:
             section = f"[{next_number}] {section}".strip()
             next_number += 1
         if section:
             sections.append(section)
-        if title and isinstance(url, str) and url.startswith(("http://", "https://")):
-            sources.append((title, url))
+        sources.append((title, url))
 
     image_lines = []
     image_mimes = {
