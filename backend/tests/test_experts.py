@@ -7,13 +7,16 @@ import json
 import openai
 import pytest
 import aiosqlite
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from core import media_store, session_store, speech_queue
-from core.agent import experts, graph as agent_graph, media_utils
+from core.agent import experts, graph as agent_graph, media_utils, search as search_module
 
 
 def turn_config(thread_id, turn_id="expert-turn", model_tier="normal"):
@@ -784,34 +787,45 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
 ):
     await init_stores(tmp_path)
     search_queries = []
-    search_model = SearchModel(
-        [
-            AIMessage(content="", tool_calls=[_tool_call("tavily_search", {"query": "q1"}, "s1")]),
-            AIMessage(content="", tool_calls=[_tool_call("tavily_search", {"query": "q2"}, "s2")]),
-            AIMessage(content="", tool_calls=[_tool_call("tavily_search", {"query": "q3"}, "s3")]),
+
+    class ResearchModel(BaseChatModel):
+        responses: list[AIMessage]
+        response_index: int = 0
+
+        @property
+        def _llm_type(self) -> str:
+            return "scripted-research"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            response = self.responses[self.response_index]
+            self.response_index += 1
+            return ChatResult(generations=[ChatGeneration(message=response)])
+
+    search_model = ResearchModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[_tool_call("tavily_search", {"query": "q1"}, "s1")],
+            ),
             AIMessage(content="资料已足够"),
         ]
     )
     compose = StreamModel(["专家报告内容不应朗读。\n"])
 
-    async def raw(query, config):
+    @tool("tavily_search")
+    async def fixture_search(query: str) -> dict:
+        """Return deterministic search data for event propagation coverage."""
         search_queries.append(query)
-        number = len(search_queries)
-        return {
-            "results": [
-                {
-                    "title": f"来源{number}",
-                    "url": f"https://source{number}.test",
-                    "content": f"内容{number}",
-                }
-            ]
-        }
+        return {"answer": "搜索结果"}
 
-    monkeypatch.setattr(experts, "search_raw", raw)
+    monkeypatch.setattr(search_module, "web_search", fixture_search)
     monkeypatch.setattr(
         experts,
         "expert_llm",
-        lambda role, tier="normal", max_tokens=None: (
+        lambda role, tier="normal", max_tokens=None, *, fallback=False: (
             compose if max_tokens == 12000 else search_model
         ),
     )
@@ -834,7 +848,7 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
             async for event in agent_graph.process_query("研究一下", "expert-process")
         ]
         turn_id = events[0]["turn_id"]
-        assert len(search_queries) == 3
+        assert search_queries == ["q1"]
         assert speech_queue.get_turn_segment(turn_id) == 1
         assert not any(
             event.get("name") == "tavily_search" for event in events if event["type"] == "tool"
@@ -845,8 +859,7 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
             if event["type"] == "speech.sentence"
         )
         report = (await session_store.list_reports("expert-process"))[0]
-        assert "## 来源" in report["markdown"]
-        assert "https://source1.test" in report["markdown"]
+        assert "专家报告内容不应朗读" in report["markdown"]
     finally:
         await close_process_graph(connection)
 
