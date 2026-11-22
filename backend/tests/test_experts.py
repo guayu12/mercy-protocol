@@ -396,7 +396,7 @@ async def test_report_finish_reason_length_marks_stream_incomplete(
     try:
         result = await experts.write_report.ainvoke(
             {"title": "截断报告", "brief": "写一份"},
-            config=turn_config("length-report"),
+            config=turn_config("length-report", "length-report-turn"),
         )
         report = (await session_store.list_reports("length-report"))[0]
         deltas = [
@@ -409,6 +409,7 @@ async def test_report_finish_reason_length_marks_stream_incomplete(
         assert events[-1]["type"] == "report.done"
         assert "内容不完整" in result
     finally:
+        experts.clear_turn_budget("length-report-turn")
         await close_stores()
 
 
@@ -1071,7 +1072,9 @@ async def test_report_uses_transient_fallback_only_before_first_delta(
     try:
         result = await experts.write_report.ainvoke(
             {"title": "备用报告", "brief": "写一份"},
-            config=turn_config("report-fallback-before-output"),
+            config=turn_config(
+                "report-fallback-before-output", "report-fallback-before-output-turn"
+            ),
         )
         report = (await session_store.list_reports(
             "report-fallback-before-output"
@@ -1085,6 +1088,7 @@ async def test_report_uses_transient_fallback_only_before_first_delta(
         ]
         assert fallback_calls == [False, True]
     finally:
+        experts.clear_turn_budget("report-fallback-before-output-turn")
         await close_stores()
 
 
@@ -1110,7 +1114,9 @@ async def test_report_does_not_fallback_after_first_delta(tmp_path, monkeypatch)
     try:
         result = await experts.write_report.ainvoke(
             {"title": "不完整报告", "brief": "写一份"},
-            config=turn_config("report-fallback-after-output"),
+            config=turn_config(
+                "report-fallback-after-output", "report-fallback-after-output-turn"
+            ),
         )
         report = (await session_store.list_reports(
             "report-fallback-after-output"
@@ -1121,6 +1127,7 @@ async def test_report_does_not_fallback_after_first_delta(tmp_path, monkeypatch)
         assert "内容不完整" in result
         assert events[-1]["type"] == "report.done"
     finally:
+        experts.clear_turn_budget("report-fallback-after-output-turn")
         await close_stores()
 
 
@@ -1146,13 +1153,13 @@ async def test_investigate_search_uses_transient_fallback(tmp_path, monkeypatch)
     try:
         result = await experts.investigate.ainvoke(
             {"question": "研究一个主题"},
-            config=turn_config("investigate-fallback"),
+            config=turn_config("investigate-fallback", "investigate-fallback-turn"),
         )
         assert "报告已上屏" in result
         assert len(primary.inputs) == 1
         assert len(fallback_search.inputs) == 1
     finally:
-        experts.clear_turn_budget("expert-turn")
+        experts.clear_turn_budget("investigate-fallback-turn")
         await close_stores()
 
 
@@ -1192,13 +1199,13 @@ async def test_inspect_image_uses_transient_fallback(tmp_path, monkeypatch):
     try:
         result = await experts.inspect_image.ainvoke(
             {"media_id": "m_vision", "question": "图片里是什么？"},
-            config=turn_config("vision-fallback"),
+            config=turn_config("vision-fallback", "vision-fallback-turn"),
         )
         assert "看到了" in result
         assert len(primary.inputs) == 1
         assert len(fallback_model.inputs) == 1
     finally:
-        experts.clear_turn_budget("expert-turn")
+        experts.clear_turn_budget("vision-fallback-turn")
 
 
 @pytest.mark.asyncio
