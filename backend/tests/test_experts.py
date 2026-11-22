@@ -6,7 +6,11 @@ import json
 
 import openai
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+import aiosqlite
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import START, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 from core import media_store, session_store, speech_queue
 from core.agent import experts, graph as agent_graph, media_utils
@@ -113,6 +117,37 @@ def _tool_call(name, args, call_id="call-1"):
         "id": call_id,
         "type": "tool_call",
     }
+
+
+async def install_process_graph(tmp_path, monkeypatch, toolset, conversation):
+    speech_queue.clear()
+    monkeypatch.setattr(agent_graph, "tools", toolset)
+    monkeypatch.setattr(agent_graph, "llm_with_tools", conversation)
+    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", None)
+    monkeypatch.setattr(agent_graph.memory_manager, "format_context", lambda _: "")
+    connection = await aiosqlite.connect(str(tmp_path / "checkpoints.db"))
+    checkpointer = AsyncSqliteSaver(connection)
+    await checkpointer.setup()
+    workflow = StateGraph(agent_graph.AgentState)
+    workflow.add_node("agent", agent_graph.agent_node)
+    workflow.add_node("tools", ToolNode(toolset, handle_tool_errors=True))
+    workflow.add_edge(START, "agent")
+    workflow.add_conditional_edges("agent", tools_condition)
+    workflow.add_edge("tools", "agent")
+    agent_graph.app_graph = workflow.compile(checkpointer=checkpointer)
+
+    async def initialized_graph():
+        return agent_graph.app_graph
+
+    monkeypatch.setattr(agent_graph, "init_graph", initialized_graph)
+    return connection
+
+
+async def close_process_graph(connection):
+    await media_store.close_store()
+    await session_store.close_store()
+    await connection.close()
+    agent_graph.app_graph = None
 
 
 def test_build_tools_and_prompt_guidance_are_role_gated(monkeypatch):
@@ -572,6 +607,15 @@ async def test_inspect_image_remote_url_is_replaced_by_data_url(tmp_path, monkey
 def test_image_helper_strips_exif_and_uses_first_gif_frame(tmp_path):
     from PIL import Image
 
+    transparent = tmp_path / "transparent.png"
+    Image.new("RGBA", (4, 4), (255, 0, 0, 96)).save(transparent)
+    png_data = media_utils.image_data_url_from_path(str(transparent))
+    assert png_data.startswith("data:image/png;base64,")
+    decoded_png = Image.open(
+        io.BytesIO(base64.b64decode(png_data.split(",", 1)[1]))
+    )
+    assert decoded_png.getpixel((0, 0))[3] == 96
+
     jpeg = tmp_path / "with-exif.jpg"
     source = Image.new("RGB", (12, 8), "red")
     exif = Image.Exif()
@@ -620,7 +664,6 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
     tmp_path, monkeypatch
 ):
     await init_stores(tmp_path)
-    speech_queue.clear()
     search_queries = []
     search_model = SearchModel(
         [
@@ -662,31 +705,10 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
             AIMessage(content="报告已经完成。"),
         ]
     )
-    monkeypatch.setattr(agent_graph, "llm_with_tools", conversation)
-    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", None)
-    monkeypatch.setattr(agent_graph.memory_manager, "format_context", lambda _: "")
     toolset = agent_graph.base_tools + [experts.investigate]
-    monkeypatch.setattr(agent_graph, "tools", toolset)
-    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    from langgraph.graph import START, StateGraph
-    from langgraph.prebuilt import ToolNode, tools_condition
-    import aiosqlite
-
-    connection = await aiosqlite.connect(str(tmp_path / "checkpoints.db"))
-    checkpointer = AsyncSqliteSaver(connection)
-    await checkpointer.setup()
-    workflow = StateGraph(agent_graph.AgentState)
-    workflow.add_node("agent", agent_graph.agent_node)
-    workflow.add_node("tools", ToolNode(toolset, handle_tool_errors=True))
-    workflow.add_edge(START, "agent")
-    workflow.add_conditional_edges("agent", tools_condition)
-    workflow.add_edge("tools", "agent")
-    agent_graph.app_graph = workflow.compile(checkpointer=checkpointer)
-
-    async def initialized_graph():
-        return agent_graph.app_graph
-
-    monkeypatch.setattr(agent_graph, "init_graph", initialized_graph)
+    connection = await install_process_graph(
+        tmp_path, monkeypatch, toolset, conversation
+    )
     try:
         events = [
             event
@@ -707,10 +729,158 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
         assert "## 来源" in report["markdown"]
         assert "https://source1.test" in report["markdown"]
     finally:
-        await media_store.close_store()
-        await session_store.close_store()
-        await connection.close()
-        agent_graph.app_graph = None
+        await close_process_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_three_report_tool_calls_are_serial_and_third_is_limited(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    active = 0
+    maximum = 0
+    calls = 0
+
+    class SerialModel(StreamModel):
+        async def astream(self, messages, config=None):
+            nonlocal active, maximum, calls
+            self.inputs.append((messages, config))
+            calls += 1
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0.02)
+            yield AIMessageChunk(content=f"报告 {calls}\n")
+            active -= 1
+
+    model = SerialModel()
+    monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
+    conversation = ScriptedConversation(
+        [
+            AIMessage(
+                content="我来整理。",
+                tool_calls=[
+                    _tool_call("write_report", {"title": f"报告{i}", "brief": "写一份"}, f"write-{i}")
+                    for i in range(3)
+                ],
+            ),
+            AIMessage(content="两份报告已经完成。"),
+        ]
+    )
+    toolset = agent_graph.base_tools + [experts.write_report]
+    connection = await install_process_graph(
+        tmp_path, monkeypatch, toolset, conversation
+    )
+    try:
+        events = [
+            event
+            async for event in agent_graph.process_query(
+                "写三份报告", "three-report-calls"
+            )
+        ]
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": "three-report-calls"}}
+        )
+        tool_messages = [
+            message
+            for message in state.values["messages"]
+            if isinstance(message, ToolMessage)
+        ]
+        assert calls == 2
+        assert maximum == 1
+        assert len(await session_store.list_reports("three-report-calls")) == 2
+        assert sum(
+            message.content == experts.DELEGATION_LIMIT_TEXT
+            for message in tool_messages
+        ) == 1
+        assert events[-1]["type"] == "done"
+    finally:
+        await close_process_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_call(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class WaitingComposer(StreamModel):
+        async def astream(self, messages, config=None):
+            self.inputs.append((messages, config))
+            yield AIMessageChunk(content="报告首行\n")
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                cancelled.set()
+                raise
+
+    search_model = SearchModel([AIMessage(content="资料已足够")])
+    composer = WaitingComposer()
+    monkeypatch.setattr(
+        experts,
+        "expert_llm",
+        lambda role, tier="normal", max_tokens=None: (
+            composer if max_tokens == 12000 else search_model
+        ),
+    )
+    conversation = ScriptedConversation(
+        [
+            AIMessage(
+                content="我来调查。",
+                tool_calls=[
+                    _tool_call(
+                        "investigate",
+                        {"question": "调查问题"},
+                        "investigate-disconnect",
+                    )
+                ],
+            ),
+            AIMessage(content="我接着说。"),
+        ]
+    )
+    toolset = agent_graph.base_tools + [experts.investigate]
+    connection = await install_process_graph(
+        tmp_path, monkeypatch, toolset, conversation
+    )
+    thread_id = "investigate-disconnect"
+    generator = agent_graph.process_query("调查问题", thread_id)
+    events = []
+    try:
+        async for event in generator:
+            events.append(event)
+            if event["type"] == "report.delta":
+                break
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await generator.aclose()
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        report = (await session_store.list_reports(thread_id))[0]
+        emitted = "".join(
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        )
+        assert composer.cancelled
+        assert report["markdown"] == emitted + "\n\n（生成中断）\n"
+
+        next_events = [
+            event
+            async for event in agent_graph.process_query("继续", thread_id)
+        ]
+        assert next_events[-1]["type"] == "done"
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        messages = state.values["messages"]
+        assert any(
+            isinstance(message, ToolMessage)
+            and message.tool_call_id == "investigate-disconnect"
+            and message.content == "Tool call interrupted."
+            for message in messages
+        )
+    finally:
+        await generator.aclose()
+        await close_process_graph(connection)
 
 
 @pytest.mark.asyncio
