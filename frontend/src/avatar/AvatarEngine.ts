@@ -7,6 +7,17 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { VRM, VRMLoaderPlugin, VRMUtils, type VRMHumanBoneName } from "@pixiv/three-vrm";
 import { VISEMES, visemeTargets, type Viseme, type VisemeCue } from "./lipsync";
 import { LOOKS, applyMToonLook, createBackdrop, type LightingPreset } from "./look";
+import { VRMLookAtQuaternionProxy } from "@pixiv/three-vrm-animation";
+import {
+    EMOTION_EXPRESSIONS, EMOTION_KEYS, EMOTION_POSES, gestureClips, loadVRMAClip,
+    type Emotion, type EmotionKey, type Gesture,
+} from "./motion";
+
+export { EMOTIONS, GESTURES, type Emotion, type Gesture } from "./motion";
+
+const IDLE_VRMA = "/vrm/motions/idle_loop.vrma";
+const GESTURE_FADE = 0.3;
+const PROC_GESTURE_SECONDS = 1.1;
 
 export { LIGHTING_PRESETS, type LightingPreset } from "./look";
 
@@ -77,6 +88,19 @@ export class AvatarEngine {
     private onSpeechEnd: (() => void) | null = null;
     private mouth: Record<Viseme, number> = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
     private overrides = new Map<string, number>();
+    private emotion: Emotion = "neutral";
+    private speechEmotion: Emotion | null = null;
+    private emo: Record<EmotionKey, number> = { happy: 0, angry: 0, sad: 0, relaxed: 0, surprised: 0 };
+    /** Peak weight of emotion expressions (tunable from the debug panel). */
+    emotionWeight = 0.7;
+    private mixer: THREE.AnimationMixer | null = null;
+    private baseAction: THREE.AnimationAction | null = null;
+    private clips: Partial<Record<Gesture, THREE.AnimationClip>> = {};
+    private gestureAction: THREE.AnimationAction | null = null;
+    private fadingGesture: THREE.AnimationAction | null = null;
+    private procGesture: { name: "nod" | "shake"; t0: number } | null = null;
+    private qTmp = new THREE.Quaternion();
+    private eTmp = new THREE.Euler();
 
     private frames = 0;
     private fpsWindowStart = 0;
@@ -126,6 +150,23 @@ export class AvatarEngine {
         this.vrm = vrm;
 
         applyMToonLook(vrm, LOOKS[this.lighting]);
+        // Emotions must not mute the mouth: visemes are scaled down instead (see animate()).
+        for (const name of EMOTION_KEYS) {
+            const ex = vrm.expressionManager?.getExpression(name);
+            if (ex) ex.overrideMouth = "none";
+        }
+        if (vrm.lookAt) {
+            const proxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
+            proxy.name = "VRMLookAtQuaternionProxy";
+            vrm.scene.add(proxy);
+        }
+        this.mixer = new THREE.AnimationMixer(vrm.scene);
+        this.clips = gestureClips(vrm, this.axis);
+        loadVRMAClip(IDLE_VRMA, vrm).then(clip => {
+            if (this.vrm !== vrm || !this.mixer) return;
+            this.baseAction = this.mixer.clipAction(clip);
+            this.baseAction.play();
+        }).catch(err => console.warn("[VRM] idle motion unavailable, using procedural idle:", err));
         const head = vrm.humanoid.getNormalizedBoneNode("head");
         if (head) {
             vrm.scene.updateMatrixWorld(true);
@@ -143,9 +184,30 @@ export class AvatarEngine {
 
     react = () => { this.reactUntil = this.timer.getElapsed() + 1.6; };
 
+    /** Base emotion; while speaking, the sentence's own emotion (if any) wins. */
+    setEmotion(emotion: Emotion) { this.emotion = emotion; }
+    getEmotion() { return this.emotion; }
+    get motionSource(): "vrma" | "procedural" { return this.baseAction ? "vrma" : "procedural"; }
+
+    /** One-shot gesture; ignored until the model is loaded. */
+    gesture(name: Gesture) {
+        if (!this.vrm || !this.mixer) return;
+        const t = this.timer.getElapsed();
+        if (name === "nod" || name === "shake") { this.procGesture = { name, t0: t }; return; }
+        const clip = this.clips[name];
+        if (!clip) return;
+        this.gestureAction?.stop();
+        const action = this.mixer.clipAction(clip);
+        action.reset().setLoop(THREE.LoopOnce, 1);
+        action.fadeIn(GESTURE_FADE).play();
+        this.baseAction?.fadeOut(GESTURE_FADE);
+        this.gestureAction = action;
+    }
+
     /** Play audio with a timed viseme track; resolves when playback ends or is interrupted. */
-    speak(audioUrl: string, cues: VisemeCue[], onEnd?: () => void) {
+    speak(audioUrl: string, cues: VisemeCue[], onEnd?: () => void, emotion?: Emotion) {
         this.stopSpeech();
+        this.speechEmotion = emotion ?? null;
         this.cues = cues;
         this.onSpeechEnd = onEnd ?? null;
         this.audio.src = audioUrl;
@@ -154,8 +216,9 @@ export class AvatarEngine {
     }
 
     /** Drive the mouth from a viseme track on a silent clock (no audio). */
-    speakSilent(cues: VisemeCue[], duration: number, onEnd?: () => void) {
+    speakSilent(cues: VisemeCue[], duration: number, onEnd?: () => void, emotion?: Emotion) {
         this.stopSpeech();
+        this.speechEmotion = emotion ?? null;
         this.cues = cues;
         this.onSpeechEnd = onEnd ?? null;
         const t0 = performance.now();
@@ -172,6 +235,7 @@ export class AvatarEngine {
         this.cues = [];
         this.clock = null;
         this.onSpeechEnd = null;
+        this.speechEmotion = null;
     }
 
     isSpeaking() { return this.clock !== null; }
@@ -242,6 +306,7 @@ export class AvatarEngine {
         this.stopSpeech();
         this.audio.removeEventListener("ended", this.endSpeech);
         this.timer.dispose();
+        this.mixer?.stopAllAction();
         this.disposeComposer();
         this.backdrop.mesh.geometry.dispose();
         (this.backdrop.mesh.material as THREE.Material).dispose();
@@ -270,6 +335,19 @@ export class AvatarEngine {
         this.composer.dispose();
         this.composer = null;
         this.bloom = null;
+    }
+
+    /** Hand back to the idle loop shortly before a one-shot clip ends. */
+    private updateGesture() {
+        const a = this.gestureAction;
+        if (!a) return;
+        const left = a.getClip().duration - a.time;
+        if (left <= GESTURE_FADE || !a.isRunning()) {
+            if (this.baseAction) { this.baseAction.enabled = true; this.baseAction.fadeIn(GESTURE_FADE); }
+            a.fadeOut(Math.max(left, 0.01));
+            this.fadingGesture = a;
+            this.gestureAction = null;
+        }
     }
 
     /** Render loop only runs while the tab is visible and the canvas is on screen. */
@@ -363,34 +441,56 @@ export class AvatarEngine {
     };
 
     private animate(vrm: VRM, t: number, dt: number) {
-        const target = POSES[this.state];
+        const emotion = (this.clock ? this.speechEmotion : null) ?? this.emotion;
+        const target = POSES[this.state], ep = EMOTION_POSES[emotion];
         const k = Math.min(1, dt * 4);
-        for (const key of Object.keys(this.pose) as (keyof Pose)[]) this.pose[key] += (target[key] - this.pose[key]) * k;
+        for (const key of Object.keys(this.pose) as (keyof Pose)[]) {
+            const goal = target[key] + (key in ep ? ep[key as keyof typeof ep] : 0);
+            this.pose[key] += (goal - this.pose[key]) * k;
+        }
         const pose = this.pose;
 
         const bone = (name: VRMHumanBoneName) => vrm.humanoid.getNormalizedBoneNode(name);
         const reacting = t < this.reactUntil;
         const talk = this.mouth.aa + this.mouth.oh + this.mouth.ee * 0.6 + this.mouth.ih * 0.4 + this.mouth.ou * 0.5;
+        const s = this.axis;
+        const neck = bone("neck"), chest = bone("chest") ?? bone("spine"), spine = bone("spine");
+
+        // Procedural offsets are layered on top of whatever the mixer wrote this frame.
+        for (const n of [neck, chest, spine]) n?.quaternion.identity();
+        this.updateGesture();
+        this.mixer?.update(dt);
+        const add = (node: THREE.Object3D | null, x: number, y: number, z: number) => {
+            node?.quaternion.multiply(this.qTmp.setFromEuler(this.eTmp.set(x * s, y, z * s)));
+        };
 
         const breath = Math.sin(t * 1.6);
-        const s = this.axis;
-        const lu = bone("leftUpperArm"), ru = bone("rightUpperArm");
-        const ll = bone("leftLowerArm"), rl = bone("rightLowerArm");
-        if (lu) lu.rotation.set(0, 0, s * (-1.2 - breath * 0.02));
-        if (ru) ru.rotation.set(0, 0, s * (1.2 + breath * 0.02));
-        if (ll) ll.rotation.set(0, -0.25, 0);
-        if (rl) rl.rotation.set(0, 0.25, 0);
-        const chest = bone("chest") ?? bone("spine");
-        if (chest) chest.rotation.x = s * (breath * 0.015 + pose.lean);
-        const spine = bone("spine");
-        if (spine) spine.rotation.y = Math.sin(t * 0.5) * 0.04;
-
-        const neck = bone("neck");
-        if (neck) {
-            const nod = reacting ? Math.sin((this.reactUntil - t) * 7) * 0.08 : Math.sin(t * 0.7) * 0.02;
-            neck.rotation.x = s * (nod + pose.headPitch + talk * 0.03);
-            neck.rotation.z = s * (Math.sin(t * 0.43) * 0.04 + pose.headTilt);
+        if (this.fadingGesture && !(this.fadingGesture.isRunning() && this.fadingGesture.getEffectiveWeight() > 0)) {
+            this.fadingGesture = null;
         }
+        // Without the VRMA base loop, let a gesture finish fading before procedural arms take over.
+        if (!this.baseAction && !this.gestureAction && !this.fadingGesture) {
+            const lu = bone("leftUpperArm"), ru = bone("rightUpperArm");
+            const ll = bone("leftLowerArm"), rl = bone("rightLowerArm");
+            if (lu) lu.rotation.set(0, 0, s * (-1.2 - breath * 0.02));
+            if (ru) ru.rotation.set(0, 0, s * (1.2 + breath * 0.02));
+            if (ll) ll.rotation.set(0, -0.25, 0);
+            if (rl) rl.rotation.set(0, 0.25, 0);
+        }
+        add(chest, breath * 0.015 + pose.lean, 0, 0);
+        if (spine !== chest) add(spine, 0, Math.sin(t * 0.5) * 0.04, 0);
+
+        let nod = reacting ? Math.sin((this.reactUntil - t) * 7) * 0.08 : Math.sin(t * 0.7) * 0.02;
+        let shake = 0;
+        if (this.procGesture) {
+            const p = (t - this.procGesture.t0) / PROC_GESTURE_SECONDS;
+            if (p >= 1) this.procGesture = null;
+            else {
+                const wave = Math.sin(p * Math.PI * 4) * Math.sin(p * Math.PI);
+                if (this.procGesture.name === "nod") nod += wave * 0.14; else shake = wave * 0.22;
+            }
+        }
+        add(neck, nod + pose.headPitch + talk * 0.03, shake, Math.sin(t * 0.43) * 0.04 + pose.headTilt);
 
         const cam = this.camera.position;
         this.lookTarget.position.set(
@@ -409,14 +509,25 @@ export class AvatarEngine {
                 if (p >= 1) { this.blinkStart = -1; this.nextBlink = t + 2 + Math.random() * 4; }
             }
             this.happy += ((reacting ? 1 : 0) - this.happy) * Math.min(1, dt * 8);
-            em.setValue("happy", this.happy * 0.8);
-            em.setValue("blink", Math.max(blink, this.happy * 0.6));
+            const goal = EMOTION_EXPRESSIONS[emotion];
+            const ke = Math.min(1, dt * 6);
+            let emoTotal = 0;
+            for (const name of EMOTION_KEYS) {
+                this.emo[name] += ((goal[name] ?? 0) * this.emotionWeight - this.emo[name]) * ke;
+                const w = name === "happy" ? Math.max(this.emo.happy, this.happy * 0.8) : this.emo[name];
+                em.setValue(name, w);
+                emoTotal += w;
+            }
+            // Smiling/relaxed already narrows the eyes; a full blink on top looks like a squint.
+            const eyesNarrowed = Math.min(1, Math.max(this.emo.happy, this.happy * 0.8) + this.emo.relaxed);
+            em.setValue("blink", blink * (1 - eyesNarrowed * 0.85));
+            const mouthScale = 1 - 0.3 * Math.min(1, emoTotal);
 
             const at = this.clock?.() ?? null;
             const targets = at !== null ? visemeTargets(this.cues, at) : null;
             for (const v of VISEMES) {
                 this.mouth[v] += ((targets ? targets[v] : 0) - this.mouth[v]) * Math.min(1, dt * 30);
-                em.setValue(v, this.mouth[v]);
+                em.setValue(v, this.mouth[v] * mouthScale);
             }
             for (const [name, value] of this.overrides) em.setValue(name, value);
         }

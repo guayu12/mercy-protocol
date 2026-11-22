@@ -1,27 +1,43 @@
-import { useEffect, useRef, useState } from "react";
-import { AvatarEngine, type AvatarState } from "./avatar/AvatarEngine";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { AvatarEngine, type AvatarState, type Emotion, type Gesture } from "./avatar/AvatarEngine";
 import { DebugPanel } from "./avatar/DebugPanel";
 import type { VisemeCue } from "./avatar/lipsync";
 
 export type { Viseme, VisemeCue } from "./avatar/lipsync";
-export type { AvatarState } from "./avatar/AvatarEngine";
+export type { AvatarState, Emotion, Gesture } from "./avatar/AvatarEngine";
 
 // See public/vrm/LICENSE.md for the model's licence
 const MODEL_URL = "/vrm/avatar.vrm";
 const DEBUG_ENABLED = import.meta.env.DEV || new URLSearchParams(location.search).has("debug");
 
-export interface Speech { audioUrl: string; visemes: VisemeCue[] }
+export interface Speech {
+    audioUrl: string;
+    visemes: VisemeCue[];
+    /** Emotion for this sentence; falls back to the `emotion` prop. */
+    emotion?: Emotion;
+}
+
+export interface VRMAvatarHandle {
+    /** One-shot gesture; ignored until the model has loaded. */
+    gesture(name: Gesture): void;
+}
 
 interface VRMAvatarProps {
     onLoaded?: () => void;
     speech?: Speech | null;
     onAudioEnd?: () => void;
     state?: AvatarState;
+    /** Base emotion when not speaking (and while speaking if the sentence has none). Default neutral. */
+    emotion?: Emotion;
 }
 
-export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMAvatarProps) {
+export const VRMAvatar = forwardRef<VRMAvatarHandle, VRMAvatarProps>(function VRMAvatar(
+    { onLoaded, speech, onAudioEnd, state = "idle", emotion = "neutral" }, ref,
+) {
     const [error, setError] = useState<string | null>(null);
     const [engine, setEngine] = useState<AvatarEngine | null>(null);
+    // Read by the imperative handle so gesture() works inside onLoaded, before the re-render.
+    const engineRef = useRef<AvatarEngine | null>(null);
     const [showDebug, setShowDebug] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -48,21 +64,24 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
         let disposed = false;
         eng.load(MODEL_URL).then(() => {
             if (disposed) return;
+            engineRef.current = eng;
             setEngine(eng);
             onLoadedRef.current?.();
         }).catch(err => {
             console.error("[VRM] Load failed:", err);
             if (!disposed) { setError(String(err?.message || err)); onLoadedRef.current?.(); }
         });
-        return () => { disposed = true; setEngine(null); eng.dispose(); };
+        return () => { disposed = true; engineRef.current = null; setEngine(null); eng.dispose(); };
     }, []);
 
     useEffect(() => { engine?.setState(state); }, [engine, state]);
+    useEffect(() => { engine?.setEmotion(emotion); }, [engine, emotion]);
+    useImperativeHandle(ref, () => ({ gesture: name => engineRef.current?.gesture(name) }), []);
 
     useEffect(() => {
         if (!speech) return;
         if (engine) {
-            engine.speak(speech.audioUrl, speech.visemes, () => onAudioEndRef.current?.());
+            engine.speak(speech.audioUrl, speech.visemes, () => onAudioEndRef.current?.(), speech.emotion);
             return () => engine.stopSpeech();
         }
         if (!error) return;
@@ -83,9 +102,11 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
             {DEBUG_ENABLED && engine && (
                 showDebug
                     ? <DebugPanel engine={engine} />
-                    : <button className="absolute top-10 left-3 z-40 px-1.5 py-0.5 rounded bg-black/60 border border-[#00e5ff]/40 text-[9px] font-mono text-cyan-200"
+                    // Bottom-left, above the subtitle bar; inline so it wins over the host's positioning rules.
+                    : <button className="absolute z-40 px-1.5 py-0.5 rounded bg-black/60 border text-[9px] font-mono"
+                        style={{ top: "auto", bottom: "6.5rem", left: "0.75rem", borderColor: "rgba(229,169,109,0.45)", color: "#e5a96d" }}
                         onClick={() => setShowDebug(true)} data-testid="avatar-debug-toggle">DBG</button>
             )}
         </div>
     );
-}
+});
