@@ -64,7 +64,7 @@ async def format_search_result(
         next_number += 1
         if section:
             sections.append(section)
-        sources.append((result_number, title or url, quote(url, safe=":/?#[]@!$&'*,;=%")))
+        sources.append((result_number, title or url, quote(url, safe=":/?#[]@!$&'*+,;=%")))
 
     image_lines = []
     image_mimes = {

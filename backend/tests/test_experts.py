@@ -1635,3 +1635,30 @@ async def test_search_sources_stay_aligned_across_numbered_searches():
         "(https://example.test/first_%28report%29)"
     ) in appendix
     assert "2. 第二条 \\[研究\\] 标题\n" in appendix
+
+
+@pytest.mark.asyncio
+async def test_search_source_urls_preserve_plus_and_encode_parentheses():
+    _, sources = await experts.format_search_result(
+        {
+            "results": [
+                {
+                    "title": "带查询参数",
+                    "url": "https://s.test/?q=climate+change",
+                    "content": "正文",
+                },
+                {
+                    "title": "带括号路径",
+                    "url": "https://w.test/A_(b)",
+                    "content": "正文",
+                },
+            ]
+        },
+        "search-url-encoding",
+        numbered_from=1,
+    )
+
+    assert sources == [
+        (1, "带查询参数", "https://s.test/?q=climate+change"),
+        (2, "带括号路径", "https://w.test/A_%28b%29"),
+    ]
