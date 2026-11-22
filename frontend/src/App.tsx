@@ -235,6 +235,7 @@ export function App() {
   const reportAtBottomRef = useRef(true);
   const shouldFollowReportRef = useRef(false);
   const viewingReportIdRef = useRef<string | null>(null);
+  const sessionRestoredRef = useRef(false);
   const requestControllerRef = useRef<AbortController | null>(null);
   const activeTurnIdRef = useRef<string | null>(null);
   const pendingInterruptedRef = useRef<{ turn_id: string; spoken_sentence_ids: string[] } | null>(null);
@@ -551,10 +552,14 @@ export function App() {
   }, [backendConnected]);
 
   useEffect(() => {
+    if (!backendConnected || sessionRestoredRef.current) return;
     const controller = new AbortController();
     fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`, { signal: controller.signal })
       .then(async (response) => {
-        if (!response.ok) throw new Error(`Session request failed: ${response.status}`);
+        if (!response.ok) {
+          addSystemNotice("无法恢复本地会话记录。");
+          return null;
+        }
         return (await response.json()) as {
           reports?: Report[];
           stage?: MediaStageData | null;
@@ -569,6 +574,8 @@ export function App() {
         };
       })
       .then((session) => {
+        if (!session || controller.signal.aborted) return;
+        sessionRestoredRef.current = true;
         const restoredReports = session.reports ?? [];
         const restoredMessages = (session.utterances ?? [])
           .filter((utterance) => utterance.text.trim())
@@ -589,10 +596,10 @@ export function App() {
         shouldFollowReportRef.current = true;
       })
       .catch((error: unknown) => {
-        if (!isAbortError(error)) addSystemNotice("无法恢复本地会话记录。");
+        if (isAbortError(error)) return;
       });
     return () => controller.abort();
-  }, [addSystemNotice, sessionId]);
+  }, [addSystemNotice, backendConnected, sessionId]);
 
   useEffect(() => {
     const feed = logFeedRef.current;
