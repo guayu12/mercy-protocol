@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { AvatarEngine, type AvatarState } from "./avatar/AvatarEngine";
+import { AvatarEngine, type AvatarState, type Quality } from "./avatar/AvatarEngine";
 import { DebugPanel } from "./avatar/DebugPanel";
 import type { VisemeCue } from "./avatar/lipsync";
 
 export type { Viseme, VisemeCue } from "./avatar/lipsync";
-export type { AvatarState } from "./avatar/AvatarEngine";
+export type { AvatarState, Quality } from "./avatar/AvatarEngine";
 
 // See public/vrm/LICENSE.md for the model's licence
 const MODEL_URL = "/vrm/avatar.vrm";
 const DEBUG_ENABLED = import.meta.env.DEV || new URLSearchParams(location.search).has("debug");
+const URL_QUALITY: Quality | null = (() => {
+    const q = new URLSearchParams(location.search);
+    return q.get("quality") === "high" || q.get("bloom") === "1" ? "high" : null;
+})();
 
 export interface Speech { audioUrl: string; visemes: VisemeCue[] }
 
@@ -17,9 +21,10 @@ interface VRMAvatarProps {
     speech?: Speech | null;
     onAudioEnd?: () => void;
     state?: AvatarState;
+    quality?: Quality;
 }
 
-export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMAvatarProps) {
+export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle", quality = "balanced" }: VRMAvatarProps) {
     const [error, setError] = useState<string | null>(null);
     const [engine, setEngine] = useState<AvatarEngine | null>(null);
     const [showDebug, setShowDebug] = useState(false);
@@ -36,8 +41,6 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
         let eng: AvatarEngine;
         try {
             eng = new AvatarEngine(container);
-            const q = new URLSearchParams(location.search);
-            if (q.get("quality") === "high" || q.get("bloom") === "1") eng.setQuality("high");
             if (DEBUG_ENABLED) (window as unknown as { __avatar?: AvatarEngine }).__avatar = eng;
         } catch (err: any) {
             console.error("[VRM] WebGL init failed:", err);
@@ -58,6 +61,10 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle" }: VRMA
     }, []);
 
     useEffect(() => { engine?.setState(state); }, [engine, state]);
+
+    useEffect(() => {
+        if (engine && engine.getQuality() !== (URL_QUALITY ?? quality)) engine.setQuality(URL_QUALITY ?? quality);
+    }, [engine, quality]);
 
     useEffect(() => {
         if (!speech) return;
