@@ -258,12 +258,15 @@ class ReportStream:
         return "".join(self.emitted)
 
 
+_URL_HOST_PATTERN = (
+    r"(?:[A-Za-z0-9\-._~%@:]|[^\x00-\x7F\s，。！？；：、“”‘’（）《》【】])+"
+)
 _HTTP_URL_PATTERN = (
-    r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+"
+    rf"https?://{_URL_HOST_PATTERN}"
     r"(?:[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]|\([^()\s]*\))*"
 )
 _WWW_URL_PATTERN = (
-    r"\bwww\.[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+"
+    rf"\bwww\.{_URL_HOST_PATTERN}"
     r"[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]*"
 )
 _PROTOCOL_RELATIVE_LINK_PATTERN = (

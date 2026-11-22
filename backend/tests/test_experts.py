@@ -1583,6 +1583,20 @@ async def test_investigate_fenced_code_preserves_urls_but_strips_prose(
             None,
         ),
         (
+            "json_code_block",
+            '```json\n{"url":"https://x.test","b":1}\n```',
+            '{"url":"（网址已省略）","b":1}',
+            None,
+        ),
+        (
+            "json_prose",
+            '{"url":"https://x.test","b":1}\n',
+            '{"url":"","b":1}',
+            None,
+        ),
+        ("inline_code", "`https://x.test`", "`（网址已省略）`", None),
+        ("quoted_www", '"www.x.test"', '""', None),
+        (
             "email_addresses",
             "contact user@example.com; mailto:alice@example.com\n",
             "user@example.com; mailto:alice@example.com",
