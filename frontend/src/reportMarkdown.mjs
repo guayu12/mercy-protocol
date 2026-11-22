@@ -5,6 +5,20 @@ import { isMediaRef, mediaUrl } from "./mediaHelpers.js";
 export const markdownUrlTransform = (url) =>
   isMediaRef(url) ? url : defaultUrlTransform(url);
 
+export function reportLink({ children, href }) {
+  return createElement(
+    "a",
+    {
+      className: "report-link",
+      href,
+      title: href,
+      target: "_blank",
+      rel: "noreferrer",
+    },
+    children,
+  );
+}
+
 export function reportImage({ alt, src }) {
   if (!isMediaRef(src ?? "")) {
     return createElement(

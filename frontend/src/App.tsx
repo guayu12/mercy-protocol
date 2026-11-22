@@ -19,7 +19,11 @@ import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Speech } from "./VRMAvatar";
 import { Stage, type MediaStageData, type StageItem } from "./Stage";
 import { API_BASE } from "./api";
-import { markdownUrlTransform, reportImage } from "./reportMarkdown.mjs";
+import {
+  markdownUrlTransform,
+  reportImage,
+  reportLink,
+} from "./reportMarkdown.mjs";
 import "./App.css";
 
 const ASSISTANT_NAME = "Aura";
@@ -80,11 +84,7 @@ type ChatEvent =
 type BackendState = "idle" | "thinking" | "working";
 
 const markdownComponents: Components = {
-  a: ({ children, href }) => (
-    <a className="report-link" href={href} target="_blank" rel="noreferrer">
-      {children}
-    </a>
-  ),
+  a: reportLink,
   img: reportImage,
   code: ({ children, className }) =>
     className ? (

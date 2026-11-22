@@ -6,6 +6,7 @@ import { API_BASE, mediaUrl } from "../src/mediaHelpers.js";
 import {
   markdownUrlTransform,
   reportImage,
+  reportLink,
 } from "../src/reportMarkdown.mjs";
 
 function renderMarkdown(markdown) {
@@ -13,7 +14,7 @@ function renderMarkdown(markdown) {
     React.createElement(
       ReactMarkdown,
       {
-        components: { img: reportImage },
+        components: { a: reportLink, img: reportImage },
         urlTransform: markdownUrlTransform,
       },
       markdown,
@@ -34,5 +35,11 @@ assert.ok(!blockedMarkup.includes("<img"), "untrusted images must not render");
 assert.ok(blockedMarkup.includes("［图片：恶意］"));
 assert.ok(blockedMarkup.includes("［图片：外部］"));
 assert.equal(mediaUrl("m_abc_123"), `${API_BASE}/api/media/m_abc_123`);
+
+const linkMarkup = renderMarkdown("[报告来源](https://example.com/report)");
+assert.ok(
+  linkMarkup.includes('title="https://example.com/report"'),
+  "report links should expose their target URL as the title",
+);
 
 console.log("media rendering checks passed");
