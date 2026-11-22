@@ -212,6 +212,8 @@ export function App() {
   const [backendState, setBackendState] = useState<BackendState>("idle");
   const [workingLabel, setWorkingLabel] = useState("");
   const [backendConnected, setBackendConnected] = useState(false);
+  const [maxTierAvailable, setMaxTierAvailable] = useState(false);
+  const [deepMode, setDeepMode] = useState(false);
   const [leftExpanded, setLeftExpanded] = useState(false);
   const [clock, setClock] = useState("");
   const [reports, setReports] = useState<Report[]>([]);
@@ -525,6 +527,26 @@ export function App() {
     };
     return () => eventSource.close();
   }, []);
+
+  useEffect(() => {
+    if (!backendConnected) {
+      setMaxTierAvailable(false);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`${API_BASE}/api/capabilities`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Capabilities request failed: ${response.status}`);
+        return (await response.json()) as { max_tier?: boolean };
+      })
+      .then((capabilities) => {
+        const available = capabilities.max_tier === true;
+        setMaxTierAvailable(available);
+        if (!available) setDeepMode(false);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [backendConnected]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -897,6 +919,7 @@ export function App() {
             stage_media_ids: stage?.items.map((item) => item.media_id) ?? [],
             stage_current_media_id: stageCurrentMediaId,
           },
+          model_tier: deepMode ? "max" : "normal",
           interrupted,
         }),
       });
@@ -948,7 +971,7 @@ export function App() {
         activeTurnIdRef.current = null;
       }
     }
-  }, [addSystemNotice, attachments, handleChatEvent, interruptActiveTurn, query, sessionId, stage, stageCurrentMediaId]);
+  }, [addSystemNotice, attachments, deepMode, handleChatEvent, interruptActiveTurn, query, sessionId, stage, stageCurrentMediaId]);
 
   const handleImageSelect = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -1093,6 +1116,17 @@ export function App() {
           <span className="session-pill">#{sessionId.slice(-8).toUpperCase()}</span>
         </div>
         <div className="topbar-right">
+          {maxTierAvailable && (
+            <button
+              className={`deep-mode-toggle ${deepMode ? "active" : ""}`}
+              type="button"
+              aria-pressed={deepMode}
+              onClick={() => setDeepMode((value) => !value)}
+            >
+              {deepMode && <span className="deep-mode-dot" />}
+              <span>{deepMode ? "深度模式 · 开" : "深度模式"}</span>
+            </button>
+          )}
           <div className="layout-pill">
             布局：<strong>{layoutLabel}</strong>
           </div>
