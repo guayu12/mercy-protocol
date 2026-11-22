@@ -650,11 +650,14 @@ async def investigate(question: str, config: RunnableConfig) -> str:
                 result for result in numbered_results if result
             ) or "（没有搜到资料）"
             title = "调查：" + question[:24]
+            no_sources = not sources
             suffix = _append_sources(sources)
+            if no_sources:
+                suffix += "\n\n本次没有搜到可用来源，内容未经核实。\n"
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 raise asyncio.TimeoutError()
-            return await _run_report_tool(
+            result = await _run_report_tool(
                 tool_name="investigate",
                 role="research",
                 tier=tier,
@@ -667,6 +670,9 @@ async def investigate(question: str, config: RunnableConfig) -> str:
                 suffix=suffix,
                 human_suffix=f"\n\n搜索资料：\n{source_material}",
             )
+            if no_sources and result.startswith("报告已上屏"):
+                result += "\n注意：本次没有搜到可用来源。"
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as error:

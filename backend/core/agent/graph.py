@@ -286,7 +286,7 @@ def build_tools():
     configured_tools = list(base_tools)
     if role_available("report"):
         configured_tools.append(write_report)
-    if role_available("research"):
+    if role_available("research") and os.environ.get("TAVILY_API_KEY", "").strip():
         configured_tools.append(investigate)
     if role_available("vision"):
         configured_tools.append(inspect_image)

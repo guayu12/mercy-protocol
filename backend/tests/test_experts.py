@@ -163,6 +163,11 @@ def test_build_tools_and_prompt_guidance_are_role_gated(monkeypatch):
     monkeypatch.setenv("MODEL_REPORT", "openai:report-model")
     monkeypatch.setenv("MODEL_RESEARCH", "openai:research-model")
     monkeypatch.setenv("MODEL_VISION", "openai:vision-model")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    assert "investigate" not in {
+        item.name for item in agent_graph.build_tools()
+    }
+    monkeypatch.setenv("TAVILY_API_KEY", "not-a-real-key")
     assert {
         "write_report",
         "investigate",
@@ -1168,6 +1173,46 @@ async def test_investigate_search_uses_transient_fallback(tmp_path, monkeypatch)
         assert len(fallback_search.inputs) == 1
     finally:
         experts.clear_turn_budget("investigate-fallback-turn")
+        await close_stores()
+
+
+@pytest.mark.asyncio
+async def test_investigate_without_sources_marks_report_unverified(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    search_model = SearchModel([AIMessage(content="资料不足")])
+    report_model = StreamModel(["初步报告。\n"])
+
+    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+        return report_model if max_tokens is not None else search_model
+
+    monkeypatch.setattr(experts, "expert_llm", expert_model)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    turn_id = "investigate-no-sources-turn"
+    try:
+        result = await experts.investigate.ainvoke(
+            {"question": "调查未检索到资料"},
+            config=turn_config("investigate-no-sources", turn_id),
+        )
+        report = (await session_store.list_reports("investigate-no-sources"))[0]
+        no_source_delta = "\n\n本次没有搜到可用来源，内容未经核实。\n"
+
+        assert report["markdown"].endswith(no_source_delta)
+        assert events[-2] == {
+            "type": "report.delta",
+            "report_id": report["report_id"],
+            "markdown": no_source_delta,
+        }
+        assert result.endswith("注意：本次没有搜到可用来源。")
+    finally:
+        experts.clear_turn_budget(turn_id)
         await close_stores()
 
 
