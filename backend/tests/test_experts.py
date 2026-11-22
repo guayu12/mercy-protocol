@@ -1352,7 +1352,11 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
         ]
     )
     report_model = StreamModel(
-        ["结论见 [官方链接](https://model.invalid/page)，还有裸链接 https://bare.invalid/page。\n"]
+        [
+            "结论见 [官方链接](https://model.invalid/page)，见 "
+            "https://a.test/x，后面的文字。另见 "
+            "https://bare.invalid/page 后续文字。\n"
+        ]
     )
 
     async def search_raw(query, config):
@@ -1393,6 +1397,9 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
         assert "官方链接" in report["markdown"]
         assert "model.invalid" not in report["markdown"]
         assert "bare.invalid" not in report["markdown"]
+        assert "a.test" not in report["markdown"]
+        assert "见 ，后面的文字。" in report["markdown"]
+        assert "后续文字。" in report["markdown"]
         assert "## 来源" in report["markdown"]
         assert "https://source.invalid/a_%28b%29" in report["markdown"]
         assert report["markdown"] == "".join(deltas)
