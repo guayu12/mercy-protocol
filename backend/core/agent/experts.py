@@ -264,7 +264,13 @@ async def _emit_report_delta(
             flags=re.IGNORECASE,
         )
         markdown = re.sub(
-            r"https?://[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]+",
+            r"<https?://[^>\s]+>",
+            "",
+            markdown,
+            flags=re.IGNORECASE,
+        )
+        markdown = re.sub(
+            r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]*",
             "",
             markdown,
             flags=re.IGNORECASE,

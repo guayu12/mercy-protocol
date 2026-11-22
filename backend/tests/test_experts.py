@@ -1355,7 +1355,9 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
         [
             "结论见 [官方链接](https://model.invalid/page)，见 "
             "https://a.test/x，后面的文字。另见 "
-            "https://bare.invalid/page 后续文字。\n"
+            "https://bare.invalid/page 后续文字。\n",
+            "另见 <https://政府.香港>。\n"
+            "见 https://政府.香港/a，后面",
         ]
     )
 
@@ -1399,6 +1401,8 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
         assert "bare.invalid" not in report["markdown"]
         assert "a.test" not in report["markdown"]
         assert "见 ，后面的文字。" in report["markdown"]
+        assert "政府.香港" not in report["markdown"]
+        assert "见 ，后面" in report["markdown"]
         assert "后续文字。" in report["markdown"]
         assert "## 来源" in report["markdown"]
         assert "https://source.invalid/a_%28b%29" in report["markdown"]
