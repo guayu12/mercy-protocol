@@ -50,7 +50,7 @@ from core.agent.report_utils import rewrite_report_media
 from core.agent.search import (
     _without_urls,
     format_search_result,
-    format_sources,
+    report_full_text,
     tavily_raw,
 )
 from core.safe_fetch import safe_media_fetcher
@@ -259,11 +259,7 @@ async def read_report(report_id: str, config: RunnableConfig) -> str:
     report = await session_store.get_report(thread_id, report_id)
     if not report:
         return "找不到这份报告"
-    if report["link_policy"] == "sources_only":
-        if report["sources"]:
-            return report["markdown"] + format_sources(report["sources"])
-        return report["markdown"] + "\n\n注意：本次没有搜到可用来源。"
-    return report["markdown"]
+    return report_full_text(report)
 
 
 @tool

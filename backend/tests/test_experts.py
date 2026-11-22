@@ -391,6 +391,49 @@ async def test_based_on_report_ownership_is_checked_before_budget(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_revising_sources_only_report_includes_citations_in_expert_context(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+    thread_id = "sources-only-revision"
+    turn_id = "sources-only-revision-turn"
+    original = await session_store.create_report(
+        thread_id,
+        "调查报告",
+        "研究主题",
+        "# 报告正文",
+        link_policy="sources_only",
+        sources=[
+            {
+                "number": 1,
+                "title": "官方来源",
+                "url": "https://source.test/report",
+            }
+        ],
+    )
+    model = StreamModel(["修订完成。"])
+    monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
+    try:
+        await experts.write_report.ainvoke(
+            {
+                "title": "修订版",
+                "brief": "修订原报告",
+                "based_on_report_id": original["report_id"],
+            },
+            config=turn_config(thread_id, turn_id),
+        )
+        human = model.inputs[0][0][1].content
+        assert "需要修订的报告" in human
+        assert "# 报告正文" in human
+        assert "## 来源" in human
+        assert "官方来源" in human
+        assert "https://source.test/report" in human
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_report_error_emits_incomplete_marker_without_leaking_exception(
     tmp_path, monkeypatch
 ):

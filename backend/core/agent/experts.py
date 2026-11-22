@@ -24,6 +24,7 @@ from core.agent.search import (
     _without_urls,
     format_search_result,
     format_sources,
+    report_full_text,
     tavily_raw,
 )
 from core.models import ModelSpec, get_llm, get_model_spec, is_transient
@@ -807,7 +808,7 @@ async def write_report(
         if based_on:
             task += (
                 f"\n\n需要修订的报告 {based_on_report_id}《{based_on['title']}》全文：\n"
-                f"<<<\n{based_on['markdown']}\n>>>"
+                f"<<<\n{report_full_text(based_on)}\n>>>"
             )
         assistant_name = os.environ.get("ASSISTANT_NAME", "Aura")
         return await _run_report_tool(

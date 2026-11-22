@@ -122,3 +122,13 @@ def format_sources(sources: list[dict] | list[tuple[int, str, str]]) -> str:
         else:
             formatted.append(f"{number}. {title or '（无链接）'}\n")
     return "\n\n## 来源\n" + "".join(formatted)
+
+
+def report_full_text(report: dict) -> str:
+    markdown = report["markdown"]
+    if report.get("link_policy") != "sources_only":
+        return markdown
+    sources = report.get("sources")
+    if sources:
+        return markdown + format_sources(sources)
+    return markdown + "\n\n注意：本次没有搜到可用来源。"
