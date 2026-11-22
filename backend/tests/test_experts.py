@@ -1414,6 +1414,62 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
 
 
 @pytest.mark.asyncio
+async def test_investigate_strips_links_only_outside_code(tmp_path, monkeypatch):
+    await init_stores(tmp_path)
+    research_model = SearchModel([AIMessage(content="资料已足够")])
+    report_model = StreamModel(
+        [
+            "```bash\n",
+            "curl https://api.test/v1\n",
+            "```\n",
+            "用 `curl https://api.test/v1` 调用\n",
+            "正文见 https://plain.test/path 结束。\n",
+        ]
+    )
+
+    monkeypatch.setattr(
+        experts,
+        "expert_llm",
+        lambda role, tier, max_tokens=None, *, fallback=False: (
+            report_model if max_tokens is not None else research_model
+        ),
+    )
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    turn_id = "investigate-code-links-turn"
+    thread_id = "investigate-code-links"
+    expected = (
+        "```bash\n"
+        "curl https://api.test/v1\n"
+        "```\n"
+        "用 `curl https://api.test/v1` 调用\n"
+        "正文见 结束。\n"
+        "\n\n本次没有搜到可用来源，内容未经核实。\n"
+    )
+    try:
+        await experts.investigate.ainvoke(
+            {"question": "展示如何调用"},
+            config=turn_config(thread_id, turn_id),
+        )
+        report = (await session_store.list_reports(thread_id))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+
+        assert report["markdown"] == expected
+        assert report["markdown"] == "".join(deltas)
+        assert "plain.test" not in report["markdown"]
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_inspect_image_uses_transient_fallback(tmp_path, monkeypatch):
     from PIL import Image
 

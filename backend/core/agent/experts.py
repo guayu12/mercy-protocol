@@ -249,10 +249,67 @@ class ReportStream:
     done: bool = False
     response: object | None = None
     strip_external_links: bool = False
+    code_fence: str | None = None
 
     @property
     def text(self) -> str:
         return "".join(self.emitted)
+
+
+def _strip_external_links_from_text(markdown: str) -> str:
+    markdown = re.sub(
+        r"!?\[([^\]]+)\]\(https?://[^)\s]+\)",
+        r"\1",
+        markdown,
+        flags=re.IGNORECASE,
+    )
+    markdown = re.sub(
+        r"<https?://[^>\s]+>",
+        "",
+        markdown,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]*",
+        "",
+        markdown,
+        flags=re.IGNORECASE,
+    )
+
+
+_INLINE_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)")
+
+
+def _strip_external_links_outside_code(
+    markdown: str, state: ReportStream
+) -> str:
+    output = []
+    for line in markdown.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if state.code_fence:
+            output.append(line)
+            if stripped.startswith(state.code_fence):
+                state.code_fence = None
+            continue
+
+        fence = next(
+            (marker for marker in ("```", "~~~") if stripped.startswith(marker)),
+            None,
+        )
+        if fence:
+            state.code_fence = fence
+            output.append(line)
+            continue
+
+        position = 0
+        parts = []
+        for match in _INLINE_CODE_SPAN.finditer(line):
+            parts.append(_strip_external_links_from_text(line[position : match.start()]))
+            parts.append(match.group(0))
+            position = match.end()
+        parts.append(_strip_external_links_from_text(line[position:]))
+        output.append("".join(parts))
+    return "".join(output)
 
 
 async def _emit_report_delta(
@@ -262,24 +319,7 @@ async def _emit_report_delta(
     config: RunnableConfig,
 ) -> None:
     if state.strip_external_links:
-        markdown = re.sub(
-            r"!?\[([^\]]+)\]\(https?://[^)\s]+\)",
-            r"\1",
-            markdown,
-            flags=re.IGNORECASE,
-        )
-        markdown = re.sub(
-            r"<https?://[^>\s]+>",
-            "",
-            markdown,
-            flags=re.IGNORECASE,
-        )
-        markdown = re.sub(
-            r"https?://[^\s/<>\]\)，。！？；：、“”‘’（）《》【】]+[A-Za-z0-9\-._~:/?#@!$&'*+,;=%]*",
-            "",
-            markdown,
-            flags=re.IGNORECASE,
-        )
+        markdown = _strip_external_links_outside_code(markdown, state)
     rewritten, _ = await rewrite_report_media(markdown, thread_id)
     if not rewritten:
         return
