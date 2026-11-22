@@ -218,7 +218,7 @@ async def test_wrong_interruption_turn_is_ignored(monkeypatch, tmp_path):
                 "spoken_sentence_ids": ["t_wrong.1"],
             },
         )
-        assert (await anext(generator))["type"] == "turn"
+        assert (await generator.__anext__())["type"] == "turn"
         await generator.aclose()
 
         state = await agent_graph.app_graph.aget_state(
@@ -274,7 +274,7 @@ async def test_missing_interruption_sentence_preserves_checkpoint_and_utterance(
                 "spoken_sentence_ids": [first_sentence["id"]],
             },
         )
-        assert (await anext(generator))["type"] == "turn"
+        assert (await generator.__anext__())["type"] == "turn"
         await generator.aclose()
 
         state = await agent_graph.app_graph.aget_state(
@@ -431,7 +431,7 @@ async def test_next_turn_rewrites_checkpoint_to_spoken_interruption(
                 "spoken_sentence_ids": [first_sentence["id"]],
             },
         )
-        await anext(generator)
+        await generator.__anext__()
         await generator.aclose()
         state = await agent_graph.app_graph.aget_state(
             {"configurable": {"thread_id": "protocol-interrupt"}}
@@ -618,7 +618,7 @@ async def test_tool_start_advances_interruption_segment_before_tool_finishes(
                 "spoken_sentence_ids": [first_sentence["id"]],
             },
         )
-        assert (await anext(interruption))["type"] == "turn"
+        assert (await interruption.__anext__())["type"] == "turn"
         await interruption.aclose()
 
         state = await agent_graph.app_graph.aget_state(
@@ -646,7 +646,7 @@ async def test_disconnect_before_speech_does_not_persist_empty_assistant(
         "稍后", "protocol-empty-disconnect"
     )
     try:
-        assert (await anext(generator))["type"] == "turn"
+        assert (await generator.__anext__())["type"] == "turn"
         await generator.aclose()
         utterances = await session_store.recent_utterances(
             "protocol-empty-disconnect"

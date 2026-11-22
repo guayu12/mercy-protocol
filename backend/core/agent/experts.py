@@ -1140,19 +1140,20 @@ def _record_gemini_analysis(
     video_seconds: float | None = None,
     pages: tuple[int, int] | None = None,
     quota_kind: str | None = None,
-    outcome: str = "success",
+    outcome: str | None = "success",
 ) -> None:
     latency_ms = round((time.time() - started_at) * 1000)
-    usage_stats.record(
-        role,
-        "gemini",
-        model,
-        input_tokens=usage.get("total_input_tokens"),
-        output_tokens=usage.get("total_output_tokens"),
-        reasoning_tokens=usage.get("total_thought_tokens"),
-        latency_ms=latency_ms,
-        outcome=outcome,
-    )
+    if outcome is not None:
+        usage_stats.record(
+            role,
+            "gemini",
+            model,
+            input_tokens=usage.get("total_input_tokens"),
+            output_tokens=usage.get("total_output_tokens"),
+            reasoning_tokens=usage.get("total_thought_tokens"),
+            latency_ms=latency_ms,
+            outcome=outcome,
+        )
     values = {
         "total_tokens": usage.get("total_tokens", "?"),
         "input_tokens": usage.get("total_input_tokens", "?"),
@@ -1414,7 +1415,7 @@ async def analyze_video(
     usage = {}
     video_seconds = None
     quota_kind = None
-    outcome = "failed"
+    outcome = None
 
     async def analyze():
         nonlocal video_seconds, outcome
@@ -1434,6 +1435,7 @@ async def analyze_video(
                 return f"视频时长超过 {limit} 分钟限制，暂时不能分析。"
             return None
 
+        outcome = "failed"
         answer, file, refusal = await _ask_gemini_media(
             media_id,
             record,
@@ -1442,7 +1444,7 @@ async def analyze_video(
             validate_file=validate_file,
             required_modality="video",
         )
-        outcome = "success"
+        outcome = None if answer is None and refusal is not None else "success"
         video_seconds = file.duration_seconds
         if refusal is not None:
             return refusal
@@ -1481,7 +1483,8 @@ async def analyze_video(
             except gemini_files.GeminiRejected:
                 return _failure("analyze_video", gemini_files.GeminiError())
             except asyncio.CancelledError:
-                outcome = "cancelled"
+                if outcome is not None:
+                    outcome = "cancelled"
                 raise
             except Exception as error:
                 return _failure("analyze_video", error)
@@ -1511,7 +1514,7 @@ async def analyze_document(
     model_name = spec.model if spec else "unavailable"
     usage = {}
     quota_kind = None
-    outcome = "failed"
+    outcome = None
     page_start = start_page if start_page is not None else 1
     page_end = page_start
 
@@ -1553,6 +1556,7 @@ async def analyze_document(
                 return DOCUMENT_ANALYSIS_LIMIT_TEXT
             try:
                 await session_store.set_flag("gemini_notice_given", "true")
+                outcome = "failed"
                 answer, _, refusal = await _ask_gemini_media(
                     media_id,
                     record,
@@ -1562,7 +1566,7 @@ async def analyze_document(
                     required_modality="image",
                     discard_on_reject=page_start == 1,
                 )
-                outcome = "success"
+                outcome = None if answer is None and refusal is not None else "success"
                 if refusal is not None:
                     return refusal
                 if isinstance(answer.usage, dict):
@@ -1594,7 +1598,8 @@ async def analyze_document(
             except asyncio.TimeoutError as error:
                 return _failure("analyze_document", error)
             except asyncio.CancelledError:
-                outcome = "cancelled"
+                if outcome is not None:
+                    outcome = "cancelled"
                 raise
             except Exception as error:
                 return _failure("analyze_document", error)
