@@ -771,7 +771,7 @@ async def test_video_answer_records_success_usage(tmp_path, monkeypatch):
         assert rows[0]["failed_calls"] == 0
         assert rows[0]["cancelled_calls"] == 0
         assert rows[0]["input_tokens"] == 40
-        assert rows[0]["output_tokens"] == 12
+        assert rows[0]["output_tokens"] == 15
         assert rows[0]["reasoning_tokens"] == 3
     finally:
         experts.clear_turn_budget(turn_id)

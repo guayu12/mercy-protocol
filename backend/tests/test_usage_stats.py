@@ -192,8 +192,8 @@ def test_gemini_analysis_records_thought_tokens():
         time.time() - 0.1,
         {
             "total_input_tokens": 40,
-            "total_output_tokens": 30,
-            "total_thought_tokens": 11,
+            "total_output_tokens": 164,
+            "total_thought_tokens": 459,
         },
         pages=(1, 4),
     )
@@ -203,10 +203,38 @@ def test_gemini_analysis_records_thought_tokens():
     assert row["provider"] == "gemini"
     assert row["model"] == "gemini-model"
     assert row["input_tokens"] == 40
-    assert row["output_tokens"] == 30
-    assert row["reasoning_tokens"] == 11
+    assert row["output_tokens"] == 623
+    assert row["reasoning_tokens"] == 459
     assert row["avg_ttft_ms"] is None
     assert row["avg_tokens_per_sec"] is None
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected_output_tokens"),
+    [
+        ({"total_output_tokens": 164}, 164),
+        ({"total_thought_tokens": 459}, 459),
+        ({}, None),
+    ],
+)
+def test_gemini_analysis_handles_missing_token_counts(
+    monkeypatch, usage, expected_output_tokens
+):
+    recorded = {}
+    monkeypatch.setattr(
+        usage_stats,
+        "record",
+        lambda *args, **kwargs: recorded.update(kwargs),
+    )
+
+    experts._record_gemini_analysis(
+        "document",
+        "gemini-model",
+        time.time(),
+        usage,
+    )
+
+    assert recorded["output_tokens"] == expected_output_tokens
 
 
 def test_graph_imports_without_tavily_key_and_search_is_unbound():

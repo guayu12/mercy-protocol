@@ -1144,12 +1144,19 @@ def _record_gemini_analysis(
 ) -> None:
     latency_ms = round((time.time() - started_at) * 1000)
     if outcome is not None:
+        total_output_tokens = usage.get("total_output_tokens")
+        total_thought_tokens = usage.get("total_thought_tokens")
+        output_tokens = (
+            (total_output_tokens or 0) + (total_thought_tokens or 0)
+            if total_output_tokens is not None or total_thought_tokens is not None
+            else None
+        )
         usage_stats.record(
             role,
             "gemini",
             model,
             input_tokens=usage.get("total_input_tokens"),
-            output_tokens=usage.get("total_output_tokens"),
+            output_tokens=output_tokens,
             reasoning_tokens=usage.get("total_thought_tokens"),
             latency_ms=latency_ms,
             outcome=outcome,
