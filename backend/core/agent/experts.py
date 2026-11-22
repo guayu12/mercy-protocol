@@ -386,6 +386,15 @@ async def _stream_report(
         if suffix:
             await _buffer_report_text(state, suffix, thread_id, event_config)
             await _flush_report_buffer(state, thread_id, event_config)
+        if (
+            getattr(state.response, "response_metadata", {}).get("finish_reason")
+            == "length"
+        ):
+            state.incomplete = True
+            await _buffer_report_text(
+                state, INTERRUPTED_MARKER, thread_id, event_config
+            )
+            await _flush_report_buffer(state, thread_id, event_config)
         await _emit_report_done(state, event_config)
     except asyncio.CancelledError:
         state.cancelled = True

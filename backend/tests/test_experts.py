@@ -371,6 +371,48 @@ async def test_report_error_emits_incomplete_marker_without_leaking_exception(
 
 
 @pytest.mark.asyncio
+async def test_report_finish_reason_length_marks_stream_incomplete(
+    tmp_path, monkeypatch
+):
+    await init_stores(tmp_path)
+
+    class TruncatedModel(StreamModel):
+        async def astream(self, messages, config=None):
+            self.inputs.append((messages, config))
+            yield AIMessageChunk(content="报告正文。\n")
+            yield AIMessageChunk(
+                content="", response_metadata={"finish_reason": "length"}
+            )
+
+    model = TruncatedModel()
+    monkeypatch.setattr(experts, "expert_llm", lambda *args: model)
+    events = []
+
+    async def dispatch(name, data, config=None):
+        if name == "report":
+            events.append(data)
+
+    monkeypatch.setattr(experts, "adispatch_custom_event", dispatch)
+    try:
+        result = await experts.write_report.ainvoke(
+            {"title": "截断报告", "brief": "写一份"},
+            config=turn_config("length-report"),
+        )
+        report = (await session_store.list_reports("length-report"))[0]
+        deltas = [
+            event["markdown"] for event in events if event["type"] == "report.delta"
+        ]
+
+        assert "报告正文。\n" in report["markdown"]
+        assert report["markdown"] == "".join(deltas)
+        assert any("（生成中断）" in delta for delta in deltas)
+        assert events[-1]["type"] == "report.done"
+        assert "内容不完整" in result
+    finally:
+        await close_stores()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_report_persists_marker_without_emitting_it(tmp_path, monkeypatch):
     await init_stores(tmp_path)
     started = asyncio.Event()
