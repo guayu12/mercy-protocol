@@ -435,17 +435,28 @@ def save_profiles(profiles: dict) -> None:
     with config_lock(path):
         existing_text = None
         has_bom = False
+        active = "full"
         if path.exists():
             try:
                 existing_bytes = path.read_bytes()
                 has_bom = existing_bytes.startswith(b"\xef\xbb\xbf")
                 existing_text = existing_bytes.decode("utf-8-sig")
-                existing = json.loads(existing_text)
-                active = existing.get("active", "full") if isinstance(existing, dict) else "full"
-            except (OSError, UnicodeError, json.JSONDecodeError) as error:
-                raise _profile_error("profiles.json", "invalid configuration file") from error
-        else:
-            active = seed_document()["active"]
+            except OSError:
+                existing_text = None
+                has_bom = False
+            except UnicodeError:
+                existing_text = None
+                has_bom = False
+            if existing_text is not None:
+                try:
+                    existing = json.loads(existing_text)
+                except json.JSONDecodeError:
+                    existing = None
+                if isinstance(existing, dict) and existing.get("active") in {
+                    "full",
+                    "lite",
+                }:
+                    active = existing["active"]
         if active not in {"full", "lite"}:
             active = "full"
         document = {"version": 1, "active": active, "profiles": profiles}

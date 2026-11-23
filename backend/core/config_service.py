@@ -173,16 +173,37 @@ async def _fetch_models(provider: str, key: str) -> list[dict]:
             if any(part in model_id.lower() for part in _NON_CHAT_MODEL_PARTS):
                 continue
             image_input = True
-            efforts = sorted(models.REASONING_EFFORTS)
+            efforts = [
+                effort
+                for effort in (
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                )
+                if effort in models.REASONING_EFFORTS
+            ]
         else:
             modalities = entry.get("input_modalities", [])
             image_input = isinstance(modalities, list) and "image" in modalities
-            supported = entry.get("supported_reasoning_efforts", [])
+            effort = entry.get("effort", {})
+            supported = (
+                effort.get("supported_levels", [])
+                if isinstance(effort, dict)
+                else []
+            )
             if not isinstance(supported, list):
                 supported = []
-            efforts = ["none", *sorted(
-                value for value in supported if isinstance(value, str)
-            )]
+            efforts = ["none"]
+            for value in supported:
+                if (
+                    isinstance(value, str)
+                    and value in models.DEEPSEEK_EFFORTS
+                    and value not in efforts
+                ):
+                    efforts.append(value)
         result.append(
             {"id": model_id, "image_input": image_input, "efforts": efforts}
         )
@@ -403,17 +424,32 @@ async def save_profile_configuration(
     request: ProfilesRequest, *, editable: bool = False
 ) -> dict:
     profiles = request.profiles
-    previous = _profile_file_document()
+    try:
+        previous = _profile_file_document()
+    except ConfigApiError:
+        previous = None
+    active = (
+        previous.get("active")
+        if isinstance(previous, dict)
+        and previous.get("active") in {"full", "lite"}
+        else "full"
+    )
+    valid_previous = previous
+    if previous is not None:
+        try:
+            runtime._parse_profiles_document(previous)
+        except models.ModelConfigError:
+            valid_previous = None
     document = {
         "version": 1,
-        "active": (previous or {}).get("active", "full"),
+        "active": active,
         "profiles": profiles,
     }
     try:
         runtime._parse_profiles_document(document)
     except models.ModelConfigError as error:
         raise ConfigApiError(400, "invalid_profiles", str(error)) from None
-    old_profiles = previous.get("profiles", {}) if previous else {}
+    old_profiles = valid_previous.get("profiles", {}) if valid_previous else {}
     tests = []
     untested = []
     for profile, profile_data in profiles.items():
@@ -455,13 +491,24 @@ async def save_profile_configuration(
 async def switch_active_profile(
     request: ActiveRequest, *, editable: bool = False
 ) -> dict:
-    document = _profile_file_document()
+    try:
+        document = _profile_file_document()
+    except ConfigApiError:
+        raise ConfigApiError(
+            400,
+            "invalid_profiles",
+            "配置文件格式不正确，请先在界面保存一次配置",
+        ) from None
     if document is None:
         raise ConfigApiError(400, "profiles_missing", "请先保存配置")
     try:
         snapshot = runtime.candidate_snapshot(document, request.active)
-    except models.ModelConfigError as error:
-        raise ConfigApiError(400, "invalid_profiles", str(error)) from None
+    except models.ModelConfigError:
+        raise ConfigApiError(
+            400,
+            "invalid_profiles",
+            "配置文件格式不正确，请先在界面保存一次配置",
+        ) from None
     spec = snapshot.spec("conversation")
     if spec is None:
         raise ConfigApiError(400, "configuration", "目标配置未设置对话模型")
@@ -486,11 +533,11 @@ async def switch_active_profile(
 def config_view(snapshot=None, *, editable: bool = False) -> dict:
     snapshot = snapshot or runtime.current_snapshot()
     config = current_config(snapshot)
-    profile_document = _profile_file_document()
-    config["profile_source"] = "file" if profile_document is not None else "env"
-    if profile_document is not None:
+    if runtime.profiles_path().exists():
+        config["profile_source"] = "file"
         config["profiles"] = snapshot.profiles_dict()
     else:
+        config["profile_source"] = "env"
         config["seed"] = runtime.seed_document()["profiles"]
         config["seed_dropped"] = runtime.seed_dropped()
     config["editable"] = bool(editable and not env.env_error())

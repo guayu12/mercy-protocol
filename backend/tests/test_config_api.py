@@ -1,3 +1,4 @@
+import json
 import os
 
 import httpx
@@ -177,7 +178,17 @@ async def test_provider_model_listing_filters_and_auth_headers(monkeypatch):
                         {
                             "id": "deepseek-chat",
                             "input_modalities": ["text", "image"],
-                            "supported_reasoning_efforts": ["high", "low"],
+                            "effort": {
+                                "supported_levels": [
+                                    "low",
+                                    "high",
+                                    "max",
+                                    "unsupported",
+                                    "high",
+                                    "none",
+                                ],
+                                "default_level": "high",
+                            },
                         }
                     ]
                 }
@@ -203,14 +214,25 @@ async def test_provider_model_listing_filters_and_auth_headers(monkeypatch):
         {
             "id": "gpt-chat",
             "image_input": True,
-            "efforts": sorted(models.REASONING_EFFORTS),
+            "efforts": [
+                effort
+                for effort in (
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                )
+                if effort in models.REASONING_EFFORTS
+            ],
         }
     ]
     assert deepseek_models == [
         {
             "id": "deepseek-chat",
             "image_input": True,
-            "efforts": ["none", "high", "low"],
+            "efforts": ["none", "low", "high", "max"],
         }
     ]
     assert gemini_models == [
@@ -266,6 +288,49 @@ def test_invalid_provider_key_leaves_env_file_unchanged(tmp_path, monkeypatch):
         "/api/config/key",
         headers=_headers(),
         json={"provider": "openai", "api_key": "fake-invalid-key"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"category": "invalid_key", "message": "key 无效"}
+    assert path.read_bytes() == before
+
+
+def test_gemini_invalid_key_400_does_not_write_env_file(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    path = tmp_path / ".env"
+    path.write_text("OTHER=fake-value\n", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", path)
+    env.load_env()
+    before = path.read_bytes()
+    body = {
+        "error": {
+            "code": 400,
+            "message": "API key not valid. Please pass a valid API key.",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "API_KEY_INVALID",
+                    "domain": "googleapis.com",
+                }
+            ],
+        }
+    }
+
+    async def invalid(_provider, _key):
+        request = httpx.Request(
+            "GET", "https://generativelanguage.googleapis.com/v1beta/models"
+        )
+        response = httpx.Response(400, json=body, request=request)
+        raise httpx.HTTPStatusError(
+            "fake Gemini error", request=request, response=response
+        )
+
+    monkeypatch.setattr(config_service, "_validate_provider_key", invalid)
+    response = _client().post(
+        "/api/config/key",
+        headers=_headers(),
+        json={"provider": "gemini", "api_key": "fake-invalid-gemini-key"},
     )
 
     assert response.status_code == 400
@@ -490,4 +555,99 @@ def test_get_config_has_seed_and_key_source_without_raw_key(tmp_path, monkeypatc
     assert body["keys"]["openai"]["source"] is None
     assert body["env_error"] is None
     assert body["editable"] is True
+    runtime.reset_runtime_cache()
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        b"{not json",
+        b'{"version":1,"active":"invalid","profiles":{}}',
+    ],
+)
+def test_get_config_keeps_last_valid_profiles_after_corruption(
+    tmp_path, monkeypatch, corrupt
+):
+    _clear_keys(monkeypatch)
+    path = tmp_path / "profiles.json"
+    monkeypatch.setenv("MERCY_PROFILES_PATH", str(path))
+    profiles = {
+        "full": {"roles": {"conversation": "openai:last-valid"}},
+        "lite": {"roles": {"conversation": "openai:lite"}},
+    }
+    runtime.save_profiles(profiles)
+    runtime.current_snapshot()
+    path.write_bytes(corrupt)
+
+    response = _client().get("/api/config", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile_source"] == "file"
+    assert body["profiles"] == {
+        "full": {"conversation": "openai:last-valid"},
+        "lite": {"conversation": "openai:lite"},
+    }
+    assert body["profile_error"]
+    runtime.reset_runtime_cache()
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "active"),
+    [
+        (b"{not json", "full"),
+        (b'{"version":1,"active":"invalid","profiles":{}}', "full"),
+        (b'{"version":2,"active":"lite","profiles":{"unknown":{}}}', "lite"),
+    ],
+)
+def test_save_profiles_overwrites_corrupt_file(tmp_path, monkeypatch, corrupt, active):
+    _clear_keys(monkeypatch)
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", env_path)
+    env.load_env()
+    path = tmp_path / "profiles.json"
+    path.write_bytes(corrupt)
+    monkeypatch.setenv("MERCY_PROFILES_PATH", str(path))
+    runtime.reset_runtime_cache()
+    profiles = {
+        "full": {"roles": {"conversation": "openai:fake-full"}},
+        "lite": {"roles": {"conversation": "openai:fake-lite"}},
+    }
+
+    response = _client().post(
+        "/api/config/profiles",
+        headers=_headers(),
+        json={"profiles": profiles},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(path.read_bytes()) == {
+        "version": 1,
+        "active": active,
+        "profiles": profiles,
+    }
+    assert len(response.json()["untested"]) == 2
+    runtime.reset_runtime_cache()
+
+
+def test_active_profile_rejects_corrupt_file_with_save_guidance(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "profiles.json"
+    path.write_bytes(b"{not json")
+    monkeypatch.setenv("MERCY_PROFILES_PATH", str(path))
+    runtime.reset_runtime_cache()
+
+    response = _client().post(
+        "/api/config/active",
+        headers=_headers(),
+        json={"active": "full"},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "category": "invalid_profiles",
+        "message": "配置文件格式不正确，请先在界面保存一次配置",
+    }
     runtime.reset_runtime_cache()

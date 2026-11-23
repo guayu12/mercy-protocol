@@ -12,6 +12,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from core.models import provider_key
+from core.provider_errors import is_api_key_invalid_body
 
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -30,7 +31,9 @@ _analyze_lock_refs: dict[str, int] = {}
 
 
 class GeminiError(Exception):
-    def __init__(self):
+    def __init__(self, *, status_code: int | None = None, body=None):
+        self.status_code = status_code
+        self.body = body
         super().__init__("Gemini request failed.")
 
 
@@ -47,6 +50,8 @@ class GeminiFileUnavailable(GeminiError):
 
 class GeminiRejected(GeminiError):
     def __init__(self):
+        self.status_code = 400
+        self.body = None
         Exception.__init__(
             self,
             "Gemini rejected the supplied document.",
@@ -142,6 +147,16 @@ async def _request(
         return await client.request(method, url, **kwargs)
     except asyncio.CancelledError:
         raise
+    except httpx.HTTPStatusError as error:
+        response = error.response
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+        raise GeminiError(
+            status_code=response.status_code,
+            body=body,
+        ) from None
     except Exception:
         raise GeminiError() from None
 
@@ -154,10 +169,19 @@ def _check_response(
 ) -> None:
     if response.status_code == 429:
         raise GeminiQuotaExceeded(_quota_kind(response)) from None
+    if response.status_code == 400:
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+        if is_api_key_invalid_body(body):
+            raise GeminiError(status_code=400, body=body) from None
     if reject_400 and response.status_code == 400:
         raise GeminiRejected() from None
     if file_request and response.status_code in {403, 404}:
         raise GeminiFileUnavailable() from None
+    if response.status_code == 400:
+        raise GeminiError(status_code=400, body=body) from None
     if not 200 <= response.status_code < 300:
         raise GeminiError() from None
 

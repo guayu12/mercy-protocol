@@ -1,9 +1,10 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage
 
-from core import models
+from core import gemini_files, models
 from core.agent import graph
 from core.provider_errors import classify
 import main
@@ -51,3 +52,50 @@ def test_bad_request_error_has_fixed_provider_classification():
 
     assert classify(error).category == "bad_request"
     assert classify(error).message == "模型不接受这个设置"
+
+
+def test_gemini_api_key_invalid_400_is_distinct_from_bad_request():
+    body = {
+        "error": {
+            "code": 400,
+            "message": "API key not valid. Please pass a valid API key.",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "API_KEY_INVALID",
+                    "domain": "googleapis.com",
+                }
+            ],
+        }
+    }
+    request = httpx.Request("GET", "https://example.invalid")
+    response = httpx.Response(400, json=body, request=request)
+    error = httpx.HTTPStatusError(
+        "fake Gemini error", request=request, response=response
+    )
+    plain_response = httpx.Response(
+        400,
+        json={"error": {"status": "INVALID_ARGUMENT"}},
+        request=request,
+    )
+    plain_error = httpx.HTTPStatusError(
+        "fake bad request", request=request, response=plain_response
+    )
+
+    assert classify(error).category == "invalid_key"
+    assert classify(error).message == "key 无效"
+    assert classify(plain_error).category == "bad_request"
+    with pytest.raises(gemini_files.GeminiError) as wrapped:
+        gemini_files._check_response(response)
+    assert classify(wrapped.value).category == "invalid_key"
+    with pytest.raises(gemini_files.GeminiRejected) as rejected:
+        gemini_files._check_response(plain_response, reject_400=True)
+    assert classify(rejected.value).category == "bad_request"
+
+    sdk_error = type(
+        "GeminiSdkError",
+        (Exception,),
+        {"status_code": 400, "body": body},
+    )()
+    assert classify(sdk_error).category == "invalid_key"
