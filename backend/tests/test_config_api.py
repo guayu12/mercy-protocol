@@ -295,6 +295,32 @@ def test_invalid_provider_key_leaves_env_file_unchanged(tmp_path, monkeypatch):
     assert path.read_bytes() == before
 
 
+def test_sourced_env_key_can_be_saved_from_config(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    path = tmp_path / ".env"
+    path.write_text("OPENAI_API_KEY=fake-original-openai-key\n", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", path)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-original-openai-key")
+    env.load_env()
+    assert env.provider_key_source("openai") == "env_file"
+
+    async def valid(_provider, _key):
+        return []
+
+    monkeypatch.setattr(config_service, "_validate_provider_key", valid)
+    response = _client().post(
+        "/api/config/key",
+        headers=_headers(),
+        json={"provider": "openai", "api_key": "fake-replacement-openai-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["key"]["source"] == "env_file"
+    assert "OPENAI_API_KEY=fake-replacement-openai-key" in path.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_gemini_invalid_key_400_does_not_write_env_file(tmp_path, monkeypatch):
     _clear_keys(monkeypatch)
     path = tmp_path / ".env"

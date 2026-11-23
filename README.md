@@ -54,12 +54,12 @@ cd backend
 python3.12 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 cp .env.example .env        # then fill in your API keys / model names
-set -a; [ ! -f .env ] || . ./.env; set +a
-./venv/bin/python -m uvicorn main:app --host "${BACKEND_HOST:-127.0.0.1}" --port 8000
+./venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
 Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_BASE_URL`.
-The backend binds to `127.0.0.1` by default; set `BACKEND_HOST` in `.env` to override it.
+The backend binds to `127.0.0.1` by default; pass `--host` explicitly to override it,
+or run `./venv/bin/python main.py` to use `BACKEND_HOST` from `.env`.
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
 When `backend/data/profiles.json` exists, it takes precedence over the `.env`
 `MODEL_*` settings; set `MERCY_PROFILES_PATH` to use a different profile file.

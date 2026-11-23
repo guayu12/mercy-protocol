@@ -508,6 +508,7 @@ def test_lite_profile_imports_main_without_openai_client_or_network(
             "GEMINI_API_KEY": "",
             "GOOGLE_API_KEY": "",
             "TAVILY_API_KEY": "",
+            "MERCY_SYSTEM_KEYS": '["DEEPSEEK_API_KEY"]',
         }
     )
     code = """

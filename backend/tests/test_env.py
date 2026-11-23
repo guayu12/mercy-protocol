@@ -52,6 +52,19 @@ def test_system_key_is_not_overridden(tmp_path, monkeypatch):
     assert env.provider_key_source("openai") == "system"
 
 
+def test_process_key_matching_env_value_is_not_system(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", " file-fake-key ")
+    path = tmp_path / ".env"
+    path.write_text("OPENAI_API_KEY=file-fake-key\n", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", path)
+
+    env.load_env()
+
+    assert env.key_source("OPENAI_API_KEY") == "env_file"
+    assert env.provider_key_source("openai") == "env_file"
+
+
 def test_child_reload_uses_new_env_file_value(tmp_path, monkeypatch):
     _clear_keys(monkeypatch)
     path = tmp_path / ".env"

@@ -24,7 +24,7 @@ _env_error: str | None = None
 _encoding_error_logged = False
 
 
-def _system_baseline() -> frozenset[str]:
+def _system_baseline(values: dict | None = None) -> frozenset[str]:
     marker = os.environ.get("MERCY_SYSTEM_KEYS")
     if marker is not None:
         try:
@@ -35,10 +35,21 @@ def _system_baseline() -> frozenset[str]:
                 return frozenset(parsed)
         except (json.JSONDecodeError, TypeError):
             pass
+    if values is None:
+        try:
+            values = _read_values()
+        except OSError:
+            values = {}
     baseline = frozenset(
         variable
         for variable in KEY_VARS
         if os.environ.get(variable, "").strip()
+        and os.environ.get(variable, "").strip()
+        != (
+            values.get(variable).strip()
+            if isinstance(values.get(variable), str)
+            else None
+        )
     )
     os.environ["MERCY_SYSTEM_KEYS"] = json.dumps(sorted(baseline))
     return baseline
@@ -70,8 +81,8 @@ def _read_values() -> dict:
 
 
 def load_env() -> None:
-    baseline = _system_baseline()
     values = _read_values()
+    baseline = _system_baseline(values)
     for variable in KEY_VARS - baseline:
         value = values.get(variable)
         if isinstance(value, str) and value.strip():
