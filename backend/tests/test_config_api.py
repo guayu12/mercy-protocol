@@ -534,6 +534,77 @@ async def test_deepseek_vision_fallback_checks_image_capability(monkeypatch):
     assert llm_requests == [("vision", "normal", True, True)]
 
 
+@pytest.mark.asyncio
+async def test_profile_save_waits_for_active_profile_ping(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    env_path = tmp_path / ".env"
+    env_path.write_text("OPENAI_API_KEY=fake-profile-key\n", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", env_path)
+    env.load_env()
+    profile_path = tmp_path / "profiles.json"
+    monkeypatch.setenv("MERCY_PROFILES_PATH", str(profile_path))
+    runtime.reset_runtime_cache()
+    original_profiles = {
+        "full": {"roles": {"conversation": "openai:full-model"}},
+        "lite": {"roles": {"conversation": "openai:lite-original"}},
+    }
+    runtime.save_profiles(original_profiles)
+    active_ping_started = asyncio.Event()
+    release_active_ping = asyncio.Event()
+    save_ping_started = asyncio.Event()
+
+    async def controlled_test(snapshot, profile, role):
+        model = snapshot.spec("conversation").model
+        if profile == "lite" and model == "lite-original":
+            active_ping_started.set()
+            await release_active_ping.wait()
+        elif profile == "lite" and model == "lite-replacement":
+            save_ping_started.set()
+
+    monkeypatch.setattr(config_service, "_run_role_test", controlled_test)
+    switch_task = asyncio.create_task(
+        config_service.switch_active_profile(
+            config_service.ActiveRequest(active="lite")
+        )
+    )
+    save_task = None
+    try:
+        await asyncio.wait_for(active_ping_started.wait(), timeout=1)
+        save_task = asyncio.create_task(
+            config_service.save_profile_configuration(
+                config_service.ProfilesRequest(
+                    profiles={
+                        "full": {
+                            "roles": {"conversation": "openai:full-model"}
+                        },
+                        "lite": {
+                            "roles": {
+                                "conversation": "openai:lite-replacement"
+                            }
+                        },
+                    }
+                )
+            )
+        )
+        await asyncio.sleep(0.05)
+        save_started_before_active_ping_finished = save_ping_started.is_set()
+    finally:
+        release_active_ping.set()
+    tasks = [switch_task]
+    if save_task is not None:
+        tasks.append(save_task)
+    await asyncio.gather(*tasks)
+
+    assert not save_started_before_active_ping_finished
+    saved = json.loads(profile_path.read_bytes())
+    assert saved["active"] == "lite"
+    assert (
+        saved["profiles"]["lite"]["roles"]["conversation"]
+        == "openai:lite-replacement"
+    )
+    runtime.reset_runtime_cache()
+
+
 def test_profiles_without_keys_are_saved_as_untested(tmp_path, monkeypatch):
     _clear_keys(monkeypatch)
     env_path = tmp_path / ".env"

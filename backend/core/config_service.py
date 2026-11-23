@@ -36,6 +36,7 @@ _model_cache: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
 _provider_key_locks = {
     provider: asyncio.Lock() for provider in PROVIDER_VARIABLES
 }
+_profile_operation_lock = asyncio.Lock()
 
 
 class ConfigApiError(Exception):
@@ -433,6 +434,15 @@ async def _run_role_test(snapshot, profile: str, role: str):
 async def save_profile_configuration(
     request: ProfilesRequest, *, editable: bool = False
 ) -> dict:
+    async with _profile_operation_lock:
+        return await _save_profile_configuration_locked(
+            request, editable=editable
+        )
+
+
+async def _save_profile_configuration_locked(
+    request: ProfilesRequest, *, editable: bool = False
+) -> dict:
     profiles = request.profiles
     try:
         previous = _profile_file_document()
@@ -513,6 +523,15 @@ async def save_profile_configuration(
 
 
 async def switch_active_profile(
+    request: ActiveRequest, *, editable: bool = False
+) -> dict:
+    async with _profile_operation_lock:
+        return await _switch_active_profile_locked(
+            request, editable=editable
+        )
+
+
+async def _switch_active_profile_locked(
     request: ActiveRequest, *, editable: bool = False
 ) -> dict:
     try:
