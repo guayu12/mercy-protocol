@@ -11,6 +11,8 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from core.models import provider_key
+
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -96,12 +98,10 @@ async def _client_context(client: httpx.AsyncClient | None):
 
 
 def _api_key() -> str:
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key:
-        key = os.environ.get("GOOGLE_API_KEY", "").strip()
-    if not key:
+    key = provider_key("gemini")
+    if key is None:
         raise GeminiError() from None
-    return key
+    return key[0]
 
 
 def _quota_kind(response: httpx.Response) -> str:

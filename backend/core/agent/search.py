@@ -6,6 +6,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_tavily import TavilySearch
 
 from core import media_store
+from core.provider_errors import classify
 
 
 web_search = None
@@ -31,7 +32,7 @@ async def tavily_raw(query: str, config: RunnableConfig) -> dict:
     try:
         result = await _web_search().ainvoke({"query": query}, config=config)
     except Exception as error:
-        return {"error": str(error)}
+        return {"error": f"联网搜索失败：{classify(error).message}"}
     if isinstance(result, dict):
         return result
     return {"answer": str(result)}

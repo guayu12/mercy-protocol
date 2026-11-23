@@ -22,11 +22,11 @@ from core.agent.graph import (
     close_graph,
     init_graph,
     process_query,
-    tools as graph_tools,
 )
 from core import media_store, session_store, speech_queue, usage_stats
 from core.gemini_file_cache import cleanup_gemini_files, gemini_file_cleanup_loop
-from core.models import role_available
+from core.provider_errors import classify as classify_provider_error
+from core.runtime import load_snapshot
 from core.runtime_config import current_config
 from core.safe_fetch import DownloadTooLarge, SafeFetchError, safe_media_fetcher
 from core.speech import synthesize
@@ -151,7 +151,8 @@ async def root():
 
 @app.get("/api/capabilities")
 async def capabilities():
-    return current_config({item.name for item in graph_tools})["capabilities"]
+    runtime = await load_snapshot()
+    return current_config(runtime)["capabilities"]
 
 
 @app.get("/api/stats")
@@ -161,7 +162,8 @@ async def stats_endpoint():
 
 @app.get("/api/config")
 async def config_endpoint():
-    config = current_config({item.name for item in graph_tools})
+    runtime = await load_snapshot()
+    config = current_config(runtime)
     config.pop("capabilities")
     return config
 
@@ -217,9 +219,25 @@ async def chat_endpoint(request: ChatRequest):
                 request.model_tier,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            log_bus.emit("error", "ERROR", f"chat_endpoint exception: {str(e)[:200]}")
-            error_event = {"type": "error", "message": f"Agent error: {e}"}
+        except Exception as error:
+            classified = classify_provider_error(error)
+            status = getattr(error, "status_code", None)
+            if status is None:
+                status = getattr(
+                    getattr(error, "response", None), "status_code", None
+                )
+            if not isinstance(status, int):
+                status = None
+            log_bus.emit(
+                "error",
+                "ERROR",
+                f"chat_endpoint exception: {type(error).__name__} "
+                f"HTTP {status} category={classified.category}",
+            )
+            error_event = {
+                "type": "error",
+                "message": f"模型调用失败：{classified.message}",
+            }
             yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=SSE_HEADERS)

@@ -61,6 +61,10 @@ set -a; [ ! -f .env ] || . ./.env; set +a
 Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_BASE_URL`.
 The backend binds to `127.0.0.1` by default; set `BACKEND_HOST` in `.env` to override it.
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
+When `backend/data/profiles.json` exists, it takes precedence over the `.env`
+`MODEL_*` settings; set `MERCY_PROFILES_PATH` to use a different profile file.
+In profile mode, `.env` model selections are ignored, while API keys remain
+environment-based.
 
 Gemini video and PDF analysis is optional (`GEMINI_API_KEY` or `GOOGLE_API_KEY`
 plus `MODEL_VIDEO=gemini:gemini-3.8-flash`). PDFs are upload-only, limited to

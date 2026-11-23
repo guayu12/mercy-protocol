@@ -322,6 +322,7 @@ export function App() {
   const [workingLabel, setWorkingLabel] = useState("");
   const [backendConnected, setBackendConnected] = useState(false);
   const [maxTierAvailable, setMaxTierAvailable] = useState(false);
+  const [imageInputAvailable, setImageInputAvailable] = useState<boolean | null>(null);
   const [deepMode, setDeepMode] = useState(false);
   const [leftExpanded, setLeftExpanded] = useState(false);
   const [avatarQuality, setAvatarQuality] = useState<Quality>(() => {
@@ -654,17 +655,22 @@ export function App() {
   useEffect(() => {
     if (!backendConnected) {
       setMaxTierAvailable(false);
+      setImageInputAvailable(null);
       return;
     }
     const controller = new AbortController();
     fetch(`${API_BASE}/api/capabilities`, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(`Capabilities request failed: ${response.status}`);
-        return (await response.json()) as { max_tier?: boolean };
+        return (await response.json()) as {
+          max_tier?: boolean;
+          image_input?: boolean;
+        };
       })
       .then((capabilities) => {
         const available = capabilities.max_tier === true;
         setMaxTierAvailable(available);
+        setImageInputAvailable(capabilities.image_input === true);
         if (!available) setDeepMode(false);
       })
       .catch(() => undefined);
@@ -1705,6 +1711,12 @@ export function App() {
             </div>
           )}
 
+          {imageInputAvailable === false &&
+            attachments.some((attachment) => attachment.kind === "image") && (
+              <div className="composer-capability-hint">
+                当前对话模型看不到图片内容
+              </div>
+            )}
           <div id="input-bar">
             <input
               type="file"

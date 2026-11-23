@@ -19,6 +19,8 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from core import media_store, session_store, speech_queue
 from core.agent import experts, graph as agent_graph, media_utils, search as search_module
+from conftest import make_test_runtime
+from core.runtime import BASE_TOOL_NAMES
 
 
 def turn_config(thread_id, turn_id="expert-turn", model_tier="normal"):
@@ -124,12 +126,24 @@ def _tool_call(name, args, call_id="call-1"):
     }
 
 
+def _set_conversation_models(monkeypatch, primary, fallback=None):
+    def select_model(_runtime, *, fallback=False):
+        return fallback_model if fallback else primary
+
+    fallback_model = fallback
+    monkeypatch.setattr(agent_graph, "conversation_llm", select_model)
+
+
 async def install_process_graph(tmp_path, monkeypatch, toolset, conversation):
     speech_queue.clear()
-    monkeypatch.setattr(agent_graph, "tools", toolset)
-    monkeypatch.setattr(agent_graph, "llm_with_tools", conversation)
-    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", None)
-    monkeypatch.setattr(agent_graph.memory_manager, "format_context", lambda _: "")
+    runtime = make_test_runtime({item.name for item in toolset})
+
+    async def load_runtime():
+        return runtime
+
+    monkeypatch.setattr(agent_graph, "load_snapshot", load_runtime)
+    monkeypatch.setattr(agent_graph, "runtime_from", lambda _config: runtime)
+    _set_conversation_models(monkeypatch, conversation)
     connection = await aiosqlite.connect(str(tmp_path / "checkpoints.db"))
     checkpointer = AsyncSqliteSaver(connection)
     await checkpointer.setup()
@@ -156,6 +170,8 @@ async def close_process_graph(connection):
 
 
 def test_build_tools_and_prompt_guidance_are_role_gated(monkeypatch):
+    from core.runtime import current_snapshot
+
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
     for role in ("REPORT", "RESEARCH", "VISION", "VIDEO"):
         monkeypatch.delenv(f"MODEL_{role}", raising=False)
@@ -167,28 +183,28 @@ def test_build_tools_and_prompt_guidance_are_role_gated(monkeypatch):
         "inspect_image",
         "analyze_video",
         "analyze_document",
-    } & {item.name for item in agent_graph.build_tools()}
+    } & {item.name for item in agent_graph.tools_for(current_snapshot())}
 
     monkeypatch.setenv("MODEL_REPORT", "openai:report-model")
     monkeypatch.setenv("MODEL_RESEARCH", "openai:research-model")
     monkeypatch.setenv("MODEL_VISION", "openai:vision-model")
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     assert "investigate" not in {
-        item.name for item in agent_graph.build_tools()
+        item.name for item in agent_graph.tools_for(current_snapshot())
     }
     monkeypatch.setenv("TAVILY_API_KEY", "not-a-real-key")
     assert {
         "write_report",
         "investigate",
         "inspect_image",
-    } <= {item.name for item in agent_graph.build_tools()}
+    } <= {item.name for item in agent_graph.tools_for(current_snapshot())}
     monkeypatch.setenv("MODEL_VIDEO", "gemini:video-model")
     monkeypatch.setenv("GEMINI_API_KEY", "not-a-real-key")
     assert "analyze_video" in {
-        item.name for item in agent_graph.build_tools()
+        item.name for item in agent_graph.tools_for(current_snapshot())
     }
     assert "analyze_document" in {
-        item.name for item in agent_graph.build_tools()
+        item.name for item in agent_graph.tools_for(current_snapshot())
     }
 
 
@@ -196,18 +212,11 @@ def test_build_tools_and_prompt_guidance_are_role_gated(monkeypatch):
 async def test_prompt_contains_only_bound_expert_guidance(tmp_path, monkeypatch):
     await init_stores(tmp_path)
     model = StreamModel(["答复。"])
-    monkeypatch.setattr(agent_graph.memory_manager, "format_context", lambda _: "")
-    monkeypatch.setattr(agent_graph, "llm_with_tools", model)
-    monkeypatch.setattr(
-        agent_graph,
-        "tools",
-        agent_graph.base_tools
-        + [
-            experts.write_report,
-            experts.analyze_video,
-            experts.analyze_document,
-        ],
+    runtime = make_test_runtime(
+        {"write_report", "analyze_video", "analyze_document"}
     )
+    monkeypatch.setattr(agent_graph, "runtime_from", lambda _config: runtime)
+    _set_conversation_models(monkeypatch, model)
     try:
         await agent_graph.agent_node(
             {"messages": [HumanMessage(content="问题")], "context": ""},
@@ -227,7 +236,7 @@ async def test_prompt_contains_only_bound_expert_guidance(tmp_path, monkeypatch)
 
         await session_store.set_flag("gemini_notice_given", "true")
         later_model = StreamModel(["答复。"])
-        monkeypatch.setattr(agent_graph, "llm_with_tools", later_model)
+        _set_conversation_models(monkeypatch, later_model)
         await agent_graph.agent_node(
             {"messages": [HumanMessage(content="问题")], "context": ""},
             turn_config("prompt-test-after-notice"),
@@ -291,7 +300,9 @@ async def test_write_report_streams_complete_lines_rewrites_media_and_updates_db
         assert "外部图片" in report["markdown"]
         assert foreign["media_id"] not in report["markdown"]
         assert "报告已上屏" in result
-        assert model_requests == [("report", "normal", 8000)]
+        assert len(model_requests) == 1
+        assert model_requests[0][:3] == ("report", "normal", 8000)
+        assert model_requests[0][3] is not None
         assert model.inputs[0][0][0].content.startswith("你是报告撰写专家")
         assert model.inputs[0][0][1].content.startswith("任务：写一份报告")
     finally:
@@ -716,7 +727,7 @@ async def test_investigate_uses_three_numbered_searches_without_model_urls(
     compose = StreamModel(["结论见 [1]。\n"])
     model_requests = []
 
-    def research_model(role, tier="normal", max_tokens=None):
+    def research_model(role, tier="normal", max_tokens=None, runtime=None):
         model_requests.append((role, tier, max_tokens))
         return compose if max_tokens == 12000 else searches
 
@@ -808,7 +819,7 @@ async def test_investigate_search_cap_is_four(tmp_path, monkeypatch):
     compose = StreamModel(["报告完成。\n"])
     model_requests = []
 
-    def max_research_model(role, tier="normal", max_tokens=None):
+    def max_research_model(role, tier="normal", max_tokens=None, runtime=None):
         model_requests.append((role, tier, max_tokens))
         return compose if max_tokens == 12000 else search_model
 
@@ -1016,7 +1027,7 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
     monkeypatch.setattr(
         experts,
         "expert_llm",
-        lambda role, tier="normal", max_tokens=None, *, fallback=False: (
+        lambda role, tier="normal", max_tokens=None, runtime=None, *, fallback=False: (
             compose if max_tokens == 12000 else search_model
         ),
     )
@@ -1029,7 +1040,9 @@ async def test_process_query_hides_expert_stream_and_advances_one_segment(
             AIMessage(content="报告已经完成。"),
         ]
     )
-    toolset = agent_graph.base_tools + [experts.investigate]
+    toolset = agent_graph.tools_for(
+        make_test_runtime(BASE_TOOL_NAMES | {"investigate"})
+    )
     connection = await install_process_graph(
         tmp_path, monkeypatch, toolset, conversation
     )
@@ -1089,7 +1102,9 @@ async def test_three_report_tool_calls_are_serial_and_third_is_limited(
             AIMessage(content="两份报告已经完成。"),
         ]
     )
-    toolset = agent_graph.base_tools + [experts.write_report]
+    toolset = agent_graph.tools_for(
+        make_test_runtime(BASE_TOOL_NAMES | {"write_report"})
+    )
     connection = await install_process_graph(
         tmp_path, monkeypatch, toolset, conversation
     )
@@ -1161,7 +1176,7 @@ async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_ca
     monkeypatch.setattr(
         experts,
         "expert_llm",
-        lambda role, tier="normal", max_tokens=None: (
+        lambda role, tier="normal", max_tokens=None, runtime=None: (
             composer if max_tokens == 12000 else search_model
         ),
     )
@@ -1180,7 +1195,9 @@ async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_ca
             AIMessage(content="我接着说。"),
         ]
     )
-    toolset = agent_graph.base_tools + [experts.investigate]
+    toolset = agent_graph.tools_for(
+        make_test_runtime(BASE_TOOL_NAMES | {"investigate"})
+    )
     connection = await install_process_graph(
         tmp_path, monkeypatch, toolset, conversation
     )
@@ -1272,9 +1289,7 @@ async def test_investigate_disconnect_persists_marker_and_closes_pending_tool_ca
 async def test_image_turn_uses_the_conversation_model(tmp_path, monkeypatch):
     await init_stores(tmp_path)
     model = StreamModel(["收到。"])
-    monkeypatch.setattr(agent_graph.memory_manager, "format_context", lambda _: "")
-    monkeypatch.setattr(agent_graph, "llm_with_tools", model)
-    monkeypatch.setattr(agent_graph, "tools", agent_graph.base_tools)
+    _set_conversation_models(monkeypatch, model)
     image_message = HumanMessage(
         content=[
             {"type": "text", "text": "描述这张图"},
@@ -1308,15 +1323,14 @@ def rate_limit_error():
 
 def test_expert_llm_caches_fallback_model(monkeypatch):
     monkeypatch.setattr(experts, "_expert_models", {})
-    spec = experts.ModelSpec("openai", "fallback-model", None)
+    runtime = make_test_runtime(BASE_TOOL_NAMES | {"write_report"})
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     calls = []
     model = object()
 
-    monkeypatch.setattr(
-        experts, "get_model_spec", lambda role, tier, fallback=False: spec
-    )
+    monkeypatch.setattr(experts, "current_snapshot", lambda: runtime)
 
-    def get_llm(role, tier, fallback=False, max_tokens=None):
+    def get_llm(role, tier, fallback=False, max_tokens=None, runtime=None):
         calls.append((role, tier, fallback, max_tokens))
         return model
 
@@ -1336,7 +1350,7 @@ async def test_report_uses_transient_fallback_only_before_first_delta(
     fallback_model = StreamModel(["备用报告。\n"])
     fallback_calls = []
 
-    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+    def expert_model(role, tier, max_tokens=None, runtime=None, *, fallback=False):
         fallback_calls.append(fallback)
         return fallback_model if fallback else primary
 
@@ -1378,7 +1392,7 @@ async def test_report_does_not_fallback_after_first_delta(tmp_path, monkeypatch)
     fallback_model = StreamModel(["不应使用。\n"])
     fallback_calls = []
 
-    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+    def expert_model(role, tier, max_tokens=None, runtime=None, *, fallback=False):
         fallback_calls.append(fallback)
         return fallback_model if fallback else primary
 
@@ -1423,7 +1437,7 @@ async def test_investigate_search_uses_transient_fallback(tmp_path, monkeypatch)
     fallback_search = SearchModel([AIMessage(content="搜索结束")])
     report_model = StreamModel(["报告正文。\n"])
 
-    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+    def expert_model(role, tier, max_tokens=None, runtime=None, *, fallback=False):
         if max_tokens is not None:
             return report_model
         return fallback_search if fallback else primary
@@ -1460,7 +1474,7 @@ async def test_investigate_report_fallback_strips_final_model_url(
     fallback_report = StreamModel(["结论：见 https://x.test/a"])
     fallback_calls = []
 
-    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+    def expert_model(role, tier, max_tokens=None, runtime=None, *, fallback=False):
         if max_tokens is not None:
             fallback_calls.append(fallback)
             return fallback_report if fallback else primary_report
@@ -1526,7 +1540,7 @@ async def test_investigate_without_sources_marks_report_unverified(
     search_model = SearchModel([AIMessage(content="资料不足")])
     report_model = StreamModel(["初步报告。\n"])
 
-    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+    def expert_model(role, tier, max_tokens=None, runtime=None, *, fallback=False):
         return report_model if max_tokens is not None else search_model
 
     monkeypatch.setattr(experts, "expert_llm", expert_model)
@@ -1590,7 +1604,7 @@ async def test_investigate_strips_model_links_but_preserves_source_appendix(
             ]
         }
 
-    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+    def expert_model(role, tier, max_tokens=None, runtime=None, *, fallback=False):
         return report_model if max_tokens is not None else search_model
 
     monkeypatch.setattr(experts, "expert_llm", expert_model)
@@ -1659,7 +1673,7 @@ async def test_investigate_replaces_code_urls_and_strips_prose_links(
     monkeypatch.setattr(
         experts,
         "expert_llm",
-        lambda role, tier, max_tokens=None, *, fallback=False: (
+        lambda role, tier, max_tokens=None, runtime=None, *, fallback=False: (
             report_model if max_tokens is not None else research_model
         ),
     )
@@ -1730,7 +1744,7 @@ async def test_investigate_fenced_code_preserves_urls_but_strips_prose(
     monkeypatch.setattr(
         experts,
         "expert_llm",
-        lambda role, tier, max_tokens=None, *, fallback=False: (
+        lambda role, tier, max_tokens=None, runtime=None, *, fallback=False: (
             report_model if max_tokens is not None else research_model
         ),
     )
@@ -1907,7 +1921,7 @@ async def test_investigate_strips_titled_and_reference_links_and_parenthesized_u
     monkeypatch.setattr(
         experts,
         "expert_llm",
-        lambda role, tier, max_tokens=None, *, fallback=False: (
+        lambda role, tier, max_tokens=None, runtime=None, *, fallback=False: (
             report_model if max_tokens is not None else research_model
         ),
     )
@@ -1970,7 +1984,7 @@ async def test_inspect_image_uses_transient_fallback(tmp_path, monkeypatch):
     primary = FailingVisionModel()
     fallback_model = StreamModel([])
 
-    def expert_model(role, tier, max_tokens=None, *, fallback=False):
+    def expert_model(role, tier, max_tokens=None, runtime=None, *, fallback=False):
         return fallback_model if fallback else primary
 
     monkeypatch.setattr(experts.media_store, "get_media", get_media)
@@ -2051,11 +2065,10 @@ async def test_inspect_image_has_serialized_independent_four_call_budget(
 @pytest.mark.asyncio
 async def test_conversation_fallback_runs_only_before_any_output(tmp_path, monkeypatch):
     await init_stores(tmp_path)
+    monkeypatch.setenv("MODEL_CONVERSATION_FALLBACK", "openai:test-fallback")
     primary = StreamModel([], rate_limit_error())
     fallback = StreamModel(["备用回答。"])
-    monkeypatch.setattr(agent_graph.memory_manager, "format_context", lambda _: "")
-    monkeypatch.setattr(agent_graph, "llm_with_tools", primary)
-    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", fallback)
+    _set_conversation_models(monkeypatch, primary, fallback)
     try:
         result = await agent_graph.agent_node(
             {"messages": [HumanMessage(content="问题")], "context": ""},
@@ -2075,9 +2088,7 @@ async def test_conversation_does_not_fallback_after_output_or_for_bad_request(
     await init_stores(tmp_path)
     primary = StreamModel(["已经说出。"], rate_limit_error())
     fallback = StreamModel(["不应使用。"])
-    monkeypatch.setattr(agent_graph.memory_manager, "format_context", lambda _: "")
-    monkeypatch.setattr(agent_graph, "llm_with_tools", primary)
-    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", fallback)
+    _set_conversation_models(monkeypatch, primary, fallback)
     request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
     response = httpx.Response(400, request=request)
     bad_request_model = StreamModel(
@@ -2107,14 +2118,14 @@ async def test_conversation_does_not_fallback_after_output_or_for_bad_request(
                 turn_config("no-fallback-after-output"),
             )
         assert not fallback.inputs
-        monkeypatch.setattr(agent_graph, "llm_with_tools", bad_request_model)
+        _set_conversation_models(monkeypatch, bad_request_model, fallback)
         with pytest.raises(openai.BadRequestError):
             await agent_graph.agent_node(
                 {"messages": [HumanMessage(content="问题")], "context": ""},
                 turn_config("no-fallback-bad-request"),
             )
         assert not fallback.inputs
-        monkeypatch.setattr(agent_graph, "llm_with_tools", ToolThenFailure())
+        _set_conversation_models(monkeypatch, ToolThenFailure(), fallback)
         with pytest.raises(openai.RateLimitError):
             await agent_graph.agent_node(
                 {"messages": [HumanMessage(content="问题")], "context": ""},

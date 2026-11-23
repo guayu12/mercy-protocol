@@ -1041,6 +1041,8 @@ async def test_video_tool_rejects_missing_and_nonvideo_media_without_upload(
 async def test_uploaded_video_notice_depends_on_analyze_video_binding(
     tmp_path, monkeypatch
 ):
+    from conftest import make_test_runtime
+
     from core.agent import graph
 
     await _init_stores(tmp_path / "session.db")
@@ -1048,20 +1050,18 @@ async def test_uploaded_video_notice_depends_on_analyze_video_binding(
         "notice-thread", "video", "upload", "video/mp4", "video"
     )
     try:
-        monkeypatch.setattr(
-            graph, "tools", graph.base_tools + [experts.analyze_video]
-        )
+        with_tool_runtime = make_test_runtime({"analyze_video"})
         with_tool, _ = await graph._prepare_user_media(
-            "问题", "notice-thread", [record["media_id"]], None
+            "问题", "notice-thread", [record["media_id"]], None, with_tool_runtime
         )
         assert (
             f"［用户上传了视频 {record['media_id']}，需要了解内容时用 analyze_video］"
             in with_tool
         )
 
-        monkeypatch.setattr(graph, "tools", graph.base_tools)
+        without_tool_runtime = make_test_runtime(set())
         without_tool, _ = await graph._prepare_user_media(
-            "问题", "notice-thread", [record["media_id"]], None
+            "问题", "notice-thread", [record["media_id"]], None, without_tool_runtime
         )
         assert (
             f"［用户上传了视频 {record['media_id']}，你看不到画面内容］"
