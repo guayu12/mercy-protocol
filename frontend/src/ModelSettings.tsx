@@ -199,6 +199,24 @@ export function ModelSettings({
   };
 
   const save = async (): Promise<boolean> => {
+    const incompleteRole = (["full", "lite"] as const)
+      .flatMap((profile) =>
+        Object.entries(draft[profile]).map(([role, value]) => ({ profile, role, value })),
+      )
+      .find(({ value }) => {
+        const spec = parseSpec(value);
+        return spec !== null && Boolean(spec.provider) && !spec.model.trim();
+      });
+    if (incompleteRole) {
+      setFormError(null);
+      setRoleNotes({});
+      setRoleErrors({
+        [`${incompleteRole.profile}.${incompleteRole.role}`]: "还没选模型",
+      });
+      setView(incompleteRole.profile);
+      setExpanded(incompleteRole.role);
+      return false;
+    }
     setBusy(true);
     setFormError(null);
     setRoleErrors({});
@@ -317,6 +335,10 @@ export function ModelSettings({
     const option = options.find((item) => item.id === spec?.model);
     const efforts = effortsFor(role, provider, option);
     const pick = (model: string, effort: string | null) => {
+      if (!model) {
+        setRole(role, `${provider}:`);
+        return;
+      }
       const nextOption = options.find((item) => item.id === model);
       const allowed = effortsFor(role, provider, nextOption);
       const nextEffort =
@@ -342,11 +364,7 @@ export function ModelSettings({
                 className={item === provider ? "active" : ""}
                 onClick={() => {
                   if (item === provider) return;
-                  setRole(role, null);
-                  setDraft((current) => ({
-                    ...current,
-                    [view]: { ...current[view], [role]: `${item}:` },
-                  }));
+                  setRole(role, `${item}:`);
                   void loadModels(item);
                 }}
               >
@@ -444,6 +462,12 @@ export function ModelSettings({
           const missingKey = spec && !config.keys[spec.provider]?.configured;
           const unavailable = runtime ? !runtime.available : !spec || Boolean(missingKey);
           const reason = roleErrors[key] ?? roleNotes[key] ?? (!spec ? null : runtime && !runtime.available ? runtime.reason : missingKey ? "缺少 key" : null);
+          const modelLabel =
+            role === "memory"
+              ? spec
+                ? "开"
+                : "关"
+              : spec?.model || (spec ? PROVIDER_LABELS[spec.provider] : "未配置");
           return (
             <div key={role} className="model-role">
               <button
@@ -455,8 +479,8 @@ export function ModelSettings({
               >
                 <span className={`config-status-dot ${!spec ? "unset" : unavailable ? "offline" : "online"}`} />
                 <span className="config-role-label">{label}</span>
-                <span className="config-role-model" title={spec?.model ?? "未配置"}>
-                  {role === "memory" ? (spec ? "开" : "关") : spec?.model || "未配置"}
+                <span className="config-role-model" title={spec?.model || (spec ? PROVIDER_LABELS[spec.provider] : "未配置")}>
+                  {modelLabel}
                 </span>
                 {spec?.effort && spec.effort !== "none" && role !== "memory" ? (
                   <span className="config-effort">{EFFORT_LABELS[spec.effort] ?? spec.effort}</span>
