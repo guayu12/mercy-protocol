@@ -2430,3 +2430,179 @@ textarea:focus-visible {
   outline: 2px solid var(--accent-strong);
   outline-offset: 1px;
 }
+
+/* ─── Editable model settings ─── */
+.model-segment {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.model-segment button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 6px;
+  white-space: nowrap;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease-out), color var(--dur) var(--ease-out);
+}
+
+.model-segment button.active {
+  background: var(--bg-surface-3);
+  color: var(--text-primary);
+}
+
+.model-profile-switch {
+  align-self: flex-start;
+  margin-bottom: 8px;
+}
+
+.model-active-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.model-role {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-role-button {
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-role-button:disabled {
+  cursor: default;
+}
+
+.model-role-button:not(:disabled):hover .config-role-model {
+  color: var(--accent-strong);
+}
+
+.config-reason.muted {
+  color: var(--text-muted);
+}
+
+.model-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px 14px;
+}
+
+.model-input {
+  min-width: 0;
+  flex: 1 1 140px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  outline: none;
+}
+
+.model-input:focus {
+  border-color: var(--border-accent);
+}
+
+.model-link,
+.model-primary {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.model-link {
+  padding: 2px 4px;
+  color: var(--text-muted);
+}
+
+.model-link:hover {
+  color: var(--text-primary);
+}
+
+.model-primary {
+  height: 24px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.model-primary:disabled,
+.model-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.model-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.model-actions .config-reason {
+  flex-basis: 100%;
+}
+
+.model-key {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-key-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-key-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: 14px;
+}
+
+.model-key-form .config-reason {
+  flex-basis: 100%;
+}
+
+.config-status-dot.unset {
+  background: var(--text-muted);
+  box-shadow: none;
+  opacity: 0.5;
+}
+
+.model-key-form .model-input {
+  flex-basis: 100px;
+}

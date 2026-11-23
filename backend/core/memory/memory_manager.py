@@ -1,8 +1,6 @@
 import hashlib
 import os
 import threading
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from datetime import datetime
 from typing import List, Optional
 
@@ -11,6 +9,10 @@ from core.models import provider_key
 # Separate collection name: the previous collection was built with Chroma's
 # local ONNX embedder (384-dim), which is incompatible with OpenAI vectors.
 COLLECTION_NAME = "personal_assistant_memory_openai"
+
+
+class MemoryInitError(Exception):
+    pass
 
 
 class MemoryManager:
@@ -28,29 +30,41 @@ class MemoryManager:
         self.collection = None
         self._key_fingerprint = None
 
+    def initialize(self) -> bool:
+        return self._ensure_collection() is not None
+
     def _ensure_collection(self):
         key = provider_key("openai")
         if key is None:
             return None
         fingerprint = hashlib.sha256(key[0].encode()).hexdigest()[:12]
-        if self.chroma_client is None:
-            self.chroma_client = chromadb.PersistentClient(path=self.db_path)
-        if self.collection is None or fingerprint != self._key_fingerprint:
-            self.embedding_function = OpenAIEmbeddingFunction(
-                api_key=key[0],
-                model_name=os.environ.get(
-                    "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
-                ),
-                api_base=os.environ.get(
-                    "OPENAI_BASE_URL", "https://api.openai.com/v1"
-                ),
-            )
-            self.collection = self.chroma_client.get_or_create_collection(
-                name=COLLECTION_NAME,
-                embedding_function=self.embedding_function,
-                metadata={"hnsw:space": "cosine"},
-            )
-            self._key_fingerprint = fingerprint
+        try:
+            if self.chroma_client is None:
+                import chromadb
+
+                self.chroma_client = chromadb.PersistentClient(path=self.db_path)
+            if self.collection is None or fingerprint != self._key_fingerprint:
+                from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+
+                embedding_function = OpenAIEmbeddingFunction(
+                    api_key=key[0],
+                    model_name=os.environ.get(
+                        "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
+                    ),
+                    api_base=os.environ.get(
+                        "OPENAI_BASE_URL", "https://api.openai.com/v1"
+                    ),
+                )
+                collection = self.chroma_client.get_or_create_collection(
+                    name=COLLECTION_NAME,
+                    embedding_function=embedding_function,
+                    metadata={"hnsw:space": "cosine"},
+                )
+                self.embedding_function = embedding_function
+                self.collection = collection
+                self._key_fingerprint = fingerprint
+        except Exception as error:
+            raise MemoryInitError from error
         return self.collection
 
     def find_duplicate(self, memory_text: str) -> Optional[str]:

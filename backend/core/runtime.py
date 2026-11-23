@@ -13,6 +13,7 @@ from typing import Mapping
 import httpx
 
 from core import models
+from core.env_file import atomic_write_bytes, config_lock
 
 
 PROFILE_CHAT_ROLES = (
@@ -85,6 +86,8 @@ class RuntimeSnapshot:
         return self.roles.get(role)
 
     def available(self, role: str, tier: str = "normal") -> bool:
+        if role.lower() == "memory" and memory_unavailable_reason() is not None:
+            return False
         spec = self.spec(role, tier)
         if spec is None or models.provider_key(spec.provider) is None:
             return False
@@ -116,7 +119,9 @@ class RuntimeSnapshot:
         if tool_name == "tavily_search":
             return None if self.tavily else "未配置 Tavily key"
         if tool_name == "save_memory":
-            return self._role_reason("memory", "长期记忆已关闭")
+            return memory_unavailable_reason() or self._role_reason(
+                "memory", "长期记忆已关闭"
+            )
         if tool_name == "write_report":
             return self._role_reason("report", "当前配置没有写报告模型")
         if tool_name == "investigate":
@@ -179,6 +184,24 @@ _snapshot_version = 0
 _capability_version = 0
 _capability_cache: dict[str, _CapabilityEntry] = {}
 _startup_profile_logged = False
+_memory_unavailable_reason: str | None = None
+
+
+def mark_memory_unavailable() -> None:
+    global _memory_unavailable_reason
+    with _lock:
+        _memory_unavailable_reason = "长期记忆初始化失败"
+
+
+def clear_memory_unavailable() -> None:
+    global _memory_unavailable_reason
+    with _lock:
+        _memory_unavailable_reason = None
+
+
+def memory_unavailable_reason() -> str | None:
+    with _lock:
+        return _memory_unavailable_reason
 
 
 def profiles_path() -> Path:
@@ -242,11 +265,6 @@ def _config_signature():
     return str(path), stat_signature, env_signature
 
 
-def _format_spec(spec: models.ModelSpec) -> str:
-    suffix = f"@{spec.effort}" if spec.effort is not None else ""
-    return f"{spec.provider}:{spec.model}{suffix}"
-
-
 def _profile_error(field: str, message: str) -> models.ModelConfigError:
     return models.ModelConfigError(f"profiles.json: {field}: {message}")
 
@@ -288,11 +306,20 @@ def _validate_profile_spec(role_name: str, field: str, value) -> models.ModelSpe
     return spec
 
 
-def _read_profiles(path: Path):
+def _read_profiles_unlocked(path: Path):
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(path.read_bytes().decode("utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise _profile_error("profiles.json", "invalid configuration file") from error
+    return _parse_profiles_document(document)
+
+
+def _read_profiles(path: Path):
+    with config_lock(path):
+        return _read_profiles_unlocked(path)
+
+
+def _parse_profiles_document(document):
     if not isinstance(document, dict):
         raise _profile_error("profiles.json", "expected an object")
     unknown_top_level = set(document) - {"version", "active", "profiles"}
@@ -357,6 +384,139 @@ def _read_profiles(path: Path):
         profiles_view[profile_name] = view_roles
 
     return active, parsed_profiles[active], profiles_view
+
+
+def format_spec(spec: models.ModelSpec) -> str:
+    suffix = f"@{spec.effort}" if spec.effort is not None else ""
+    return f"{spec.provider}:{spec.model}{suffix}"
+
+
+_format_spec = format_spec
+
+
+def seed_document() -> dict:
+    roles = {
+        name: format_spec(spec)
+        for name, spec in _environment_roles().items()
+        if name in PROFILE_ROLE_NAMES and spec is not None
+    }
+    return {
+        "version": 1,
+        "active": "full",
+        "profiles": {
+            "full": {"roles": roles},
+            "lite": {
+                "roles": {
+                    "conversation": "deepseek:deepseek-flash@none",
+                    "research": "deepseek:deepseek-flash@none",
+                    "vision": "deepseek:deepseek-flash@none",
+                    "report": "deepseek:deepseek-flash@high",
+                }
+            },
+        },
+    }
+
+
+def seed_dropped() -> list[str]:
+    names = [
+        *(f"MODEL_{role}_MAX" for role in ("CONVERSATION", "REPORT", "VISION")),
+        *(
+            f"MODEL_{role}_MAX_FALLBACK"
+            for role in ("CONVERSATION", "REPORT", "VISION")
+        ),
+        "MODEL_VIDEO_MAX",
+        "MODEL_VIDEO_FALLBACK",
+        "MODEL_VIDEO_MAX_FALLBACK",
+    ]
+    return sorted(name for name in names if os.environ.get(name, "").strip())
+
+
+def candidate_snapshot(document: dict, profile: str) -> RuntimeSnapshot:
+    candidate = dict(document)
+    candidate["active"] = profile
+    active, roles, profiles_view = _parse_profiles_document(candidate)
+    return _make_snapshot(
+        source="profiles",
+        active=active,
+        version=_snapshot_version + 1,
+        roles=roles,
+        profiles_view=profiles_view,
+    )
+
+
+def _invalidate_snapshot() -> None:
+    global _snapshot, _snapshot_signature, _snapshot_capability_version
+    with _lock:
+        _snapshot = None
+        _snapshot_signature = None
+        _snapshot_capability_version = -1
+
+
+def save_profiles(profiles: dict) -> None:
+    path = profiles_path()
+    with config_lock(path):
+        existing_text = None
+        has_bom = False
+        active = "full"
+        if path.exists():
+            try:
+                existing_bytes = path.read_bytes()
+                has_bom = existing_bytes.startswith(b"\xef\xbb\xbf")
+                existing_text = existing_bytes.decode("utf-8-sig")
+            except OSError:
+                existing_text = None
+                has_bom = False
+            except UnicodeError:
+                existing_text = None
+                has_bom = False
+            if existing_text is not None:
+                try:
+                    existing = json.loads(existing_text)
+                except json.JSONDecodeError:
+                    existing = None
+                if isinstance(existing, dict) and existing.get("active") in {
+                    "full",
+                    "lite",
+                }:
+                    active = existing["active"]
+        if active not in {"full", "lite"}:
+            active = "full"
+        document = {"version": 1, "active": active, "profiles": profiles}
+        _parse_profiles_document(document)
+        newline = "\r\n" if existing_text and "\r\n" in existing_text else "\n"
+        text = json.dumps(document, ensure_ascii=False, indent=2)
+        if newline == "\r\n":
+            text = text.replace("\n", "\r\n")
+        if has_bom:
+            text = "\ufeff" + text
+        atomic_write_bytes(path, text.encode("utf-8"))
+    _invalidate_snapshot()
+
+
+def set_active(active: str) -> None:
+    path = profiles_path()
+    with config_lock(path):
+        if not path.exists():
+            raise _profile_error("profiles.json", "请先保存配置")
+        try:
+            existing_bytes = path.read_bytes()
+            has_bom = existing_bytes.startswith(b"\xef\xbb\xbf")
+            existing_text = existing_bytes.decode("utf-8-sig")
+            document = json.loads(existing_text)
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise _profile_error("profiles.json", "invalid configuration file") from error
+        if not isinstance(document, dict):
+            raise _profile_error("profiles.json", "expected an object")
+        document["active"] = active
+        _parse_profiles_document(document)
+        newline = "\r\n" if "\r\n" in existing_text else "\n"
+        text = json.dumps(document, ensure_ascii=False, indent=2)
+        if newline == "\r\n":
+            text = text.replace("\n", "\r\n")
+        if has_bom:
+            text = "\ufeff" + text
+        atomic_write_bytes(path, text.encode("utf-8"))
+    _invalidate_snapshot()
 
 
 def validate_profiles_file() -> bool:
@@ -625,7 +785,7 @@ def runtime_from(config) -> RuntimeSnapshot:
 def reset_runtime_cache() -> None:
     global _snapshot, _last_valid_snapshot, _snapshot_signature
     global _snapshot_capability_version, _snapshot_version, _capability_version
-    global _startup_profile_logged
+    global _startup_profile_logged, _memory_unavailable_reason
     with _lock:
         _snapshot = None
         _last_valid_snapshot = None
@@ -635,3 +795,24 @@ def reset_runtime_cache() -> None:
         _capability_version = 0
         _capability_cache.clear()
         _startup_profile_logged = False
+        _memory_unavailable_reason = None
+
+
+def clear_capability_cache() -> None:
+    global _capability_version
+    with _lock:
+        _capability_cache.clear()
+        _capability_version += 1
+
+
+def cache_deepseek_capabilities(key: str, capabilities: Mapping[str, bool]) -> None:
+    global _capability_version
+    fingerprint = _capability_fingerprint(key)
+    entry = _CapabilityEntry(
+        expires_at=time.monotonic() + DEEPSEEK_SUCCESS_TTL_SECONDS,
+        models=MappingProxyType(dict(capabilities)),
+        success=True,
+    )
+    with _lock:
+        _capability_cache[fingerprint] = entry
+        _capability_version += 1

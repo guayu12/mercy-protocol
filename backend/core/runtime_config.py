@@ -1,5 +1,6 @@
 import os
 
+from core.env import provider_key_source
 from core.models import provider_key, provider_key_variable
 from core.runtime import RuntimeSnapshot, current_snapshot
 
@@ -23,6 +24,7 @@ def _key_status(provider: str) -> dict:
         "configured": bool(value),
         "hint": f"••••{value[-4:]}" if len(value) >= 20 else None,
         "variable": variable,
+        "source": provider_key_source(provider),
     }
 
 
@@ -95,7 +97,10 @@ def current_config(runtime: RuntimeSnapshot | None = None) -> dict:
                 else (
                     "长期记忆已关闭"
                     if runtime.spec("memory") is None
-                    else "缺少 OPENAI_API_KEY"
+                    else (
+                        runtime.unavailable_reason("save_memory")
+                        or "缺少 OPENAI_API_KEY"
+                    )
                 )
             ),
         },

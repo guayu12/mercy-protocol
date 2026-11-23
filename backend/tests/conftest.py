@@ -87,6 +87,16 @@ def disable_deepseek_capability_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_profiles_file(tmp_path, monkeypatch):
+    from core import runtime
+
+    monkeypatch.setenv("MERCY_PROFILES_PATH", str(tmp_path / "profiles.json"))
+    runtime.reset_runtime_cache()
+    yield
+    runtime.reset_runtime_cache()
+
+
+@pytest.fixture(autouse=True)
 def isolate_memory_database(monkeypatch):
     from core.agent import graph
 

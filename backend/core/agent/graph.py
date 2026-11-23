@@ -7,11 +7,10 @@ import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
+from core.env import load_env
 
-# Load environment variables FIRST — before any module reads them
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-load_dotenv(os.path.join(BACKEND_DIR, ".env"))
+load_env()
 from typing import TypedDict, Annotated, AsyncIterator, Optional, Literal
 import aiosqlite
 from langchain_core.messages import (
@@ -30,7 +29,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from core.memory.memory_manager import MemoryManager
+from core.memory.memory_manager import MemoryInitError, MemoryManager
 from core import log_bus  # ← real-time log broadcaster
 from core import media_store, session_store, speech_queue
 from core.agent.history import prepare_history
@@ -47,6 +46,8 @@ from core.runtime import (
     RuntimeSnapshot,
     current_snapshot,
     load_snapshot,
+    mark_memory_unavailable,
+    memory_unavailable_reason,
     runtime_from,
 )
 from core.agent.experts import (
@@ -75,21 +76,61 @@ _memory_manager_lock = threading.Lock()
 _conversation_models: dict[tuple, object] = {}
 
 
-def get_memory_manager() -> MemoryManager:
+def get_memory_manager() -> MemoryManager | None:
     global _memory_manager
+    if memory_unavailable_reason() is not None:
+        return None
     if _memory_manager is None:
         with _memory_manager_lock:
             if _memory_manager is None:
-                _memory_manager = MemoryManager(
-                    os.path.join(BACKEND_DIR, "data", "chroma_db")
-                )
+                try:
+                    _memory_manager = MemoryManager(
+                        os.path.join(BACKEND_DIR, "data", "chroma_db")
+                    )
+                except Exception as error:
+                    raise MemoryInitError from error
     return _memory_manager
+
+
+def _mark_memory_unavailable(error: Exception) -> None:
+    global _memory_manager
+    with _memory_manager_lock:
+        _memory_manager = None
+    mark_memory_unavailable()
+    log_bus.emit(
+        "warn", "MEMORY", f"Long-term memory unavailable ({type(error).__name__})"
+    )
+
+
+def _log_memory_request_failure(error: Exception) -> None:
+    log_bus.emit(
+        "warn", "MEMORY", f"Long-term memory request failed ({type(error).__name__})"
+    )
+
+
+def _initialize_memory() -> bool:
+    try:
+        manager = get_memory_manager()
+        return manager.initialize() if manager is not None else False
+    except Exception as error:
+        _mark_memory_unavailable(error)
+        return False
 
 
 async def _memory_context(runtime: RuntimeSnapshot, query: str) -> str:
     if not runtime.available("memory"):
         return ""
-    return await asyncio.to_thread(get_memory_manager().format_context, query)
+    try:
+        manager = get_memory_manager()
+        if manager is None:
+            return ""
+        return await asyncio.to_thread(manager.format_context, query)
+    except MemoryInitError as error:
+        _mark_memory_unavailable(error)
+        return ""
+    except Exception as error:
+        _log_memory_request_failure(error)
+        return ""
 
 # 2. Define the State
 class AgentState(TypedDict):
@@ -115,7 +156,17 @@ def get_current_time() -> str:
 async def save_memory(fact: str) -> str:
     """Save an important fact about the user or instructions to long-term memory. USE EXACTLY when user says 'remember' or explicitly tells you a preference."""
     log_bus.emit("tool", "TOOL", f"save_memory: {fact[:80]}")
-    saved = await asyncio.to_thread(get_memory_manager().add_memory, fact)
+    try:
+        manager = get_memory_manager()
+        if manager is None:
+            return "长期记忆当前不可用。"
+        saved = await asyncio.to_thread(manager.add_memory, fact)
+    except MemoryInitError as error:
+        _mark_memory_unavailable(error)
+        return "长期记忆当前不可用。"
+    except Exception as error:
+        _log_memory_request_failure(error)
+        return "长期记忆当前不可用。"
     if not saved:
         log_bus.emit("tool", "TOOL", "save_memory skipped — near-duplicate already stored")
         return f"Already in permanent memory (duplicate skipped): {fact}"
@@ -378,6 +429,11 @@ def _safe_tool_error(error: Exception) -> str:
 async def _runtime_tool_gate(request, handler):
     call = request.tool_call
     name = call["name"]
+    if name not in {tool.name for tool in ALL_TOOLS}:
+        return ToolMessage(
+            content="没有这个工具。",
+            tool_call_id=call["id"],
+        )
     reason = runtime_from(request.runtime.config).unavailable_reason(name)
     if reason:
         return ToolMessage(
@@ -392,6 +448,15 @@ def _text_of(content) -> str:
     if isinstance(content, str):
         return content
     return " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+
+
+def _actual_api_kind(response, spec) -> str:
+    metadata = getattr(response, "response_metadata", None) or {}
+    response_id = metadata.get("id") if isinstance(metadata, dict) else None
+    response_id = response_id or getattr(response, "id", None)
+    if isinstance(response_id, str) and response_id.startswith("resp_"):
+        return "responses"
+    return api_kind(spec)
 
 async def _media_screen_context(thread_id: str, screen_state: dict) -> str:
     stage = await media_store.get_stage(thread_id)
@@ -703,7 +768,7 @@ async def agent_node(state: AgentState, config: RunnableConfig):
         metadata["mercy_source"] = {
             "provider": spec.provider,
             "model": spec.model,
-            "api": api_kind(spec),
+            "api": _actual_api_kind(response, spec),
         }
         return response.model_copy(update={"response_metadata": metadata})
 
@@ -774,6 +839,8 @@ async def init_graph():
     global app_graph, _conn
     if app_graph is not None:
         return app_graph
+    if current_snapshot().available("memory"):
+        await asyncio.to_thread(_initialize_memory)
     _conn = await aiosqlite.connect(os.path.join(BACKEND_DIR, "aura_checkpoints.db"))
     checkpointer = AsyncSqliteSaver(_conn)
     await checkpointer.setup()

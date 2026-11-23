@@ -81,6 +81,150 @@ def test_profile_snapshot_is_immutable_and_takes_precedence(profile_path, monkey
         snapshot.profiles_view["full"]["conversation"] = "openai:changed"
 
 
+def test_saving_seed_profiles_preserves_environment_roles(profile_path, monkeypatch):
+    _clear_model_environment(monkeypatch)
+    for variable, value in {
+        "MODEL_CONVERSATION": "openai:conversation@none",
+        "MODEL_CONVERSATION_FALLBACK": "deepseek:deepseek-chat@none",
+        "MODEL_RESEARCH": "deepseek:deepseek-chat@none",
+        "MODEL_RESEARCH_FALLBACK": "openai:research-fallback",
+        "MODEL_RESEARCH_MAX": "deepseek:deepseek-reasoner@none",
+        "MODEL_RESEARCH_MAX_FALLBACK": "deepseek:deepseek-chat@none",
+        "MODEL_REPORT": "openai:report",
+    }.items():
+        monkeypatch.setenv(variable, value)
+    for variable in (
+        "MODEL_CONVERSATION_MAX",
+        "MODEL_REPORT_MAX",
+        "MODEL_VISION_MAX",
+        "MODEL_CONVERSATION_MAX_FALLBACK",
+        "MODEL_REPORT_MAX_FALLBACK",
+        "MODEL_VISION_MAX_FALLBACK",
+        "MODEL_VIDEO_MAX",
+        "MODEL_VIDEO_FALLBACK",
+        "MODEL_VIDEO_MAX_FALLBACK",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    expected = {
+        name: spec
+        for name, spec in runtime._environment_roles().items()
+        if name in runtime.PROFILE_ROLE_NAMES
+    }
+
+    runtime.save_profiles(runtime.seed_document()["profiles"])
+
+    assert runtime.current_snapshot().roles == expected
+
+
+def test_set_active_invalidates_snapshot_with_same_signature(profile_path, monkeypatch):
+    roles = {"conversation": "openai:conversation"}
+    runtime.save_profiles(
+        {
+            "full": {"roles": roles},
+            "lite": {"roles": {"conversation": "openai:lite"}},
+        }
+    )
+    monkeypatch.setattr(runtime, "_profile_signature", lambda _path: (1, 1))
+
+    assert runtime.current_snapshot().active == "full"
+    runtime.set_active("lite")
+    assert runtime.current_snapshot().active == "lite"
+    runtime.set_active("full")
+    assert runtime.current_snapshot().active == "full"
+
+
+def test_profile_writes_preserve_crlf_and_existing_active(profile_path):
+    profiles = {
+        "full": {"roles": {"conversation": "openai:full"}},
+        "lite": {"roles": {"conversation": "openai:lite"}},
+    }
+    initial = {
+        "version": 1,
+        "active": "lite",
+        "profiles": profiles,
+    }
+    profile_path.write_bytes(
+        json.dumps(initial, indent=2).replace("\n", "\r\n").encode("utf-8")
+    )
+
+    runtime.save_profiles(profiles)
+
+    saved = profile_path.read_bytes()
+    assert b"\r\n" in saved
+    assert b"\n" not in saved.replace(b"\r\n", b"")
+    assert json.loads(saved)["active"] == "lite"
+    runtime.set_active("full")
+    assert b"\r\n" in profile_path.read_bytes()
+    assert json.loads(profile_path.read_bytes())["active"] == "full"
+
+
+def test_seed_dropped_lists_unrepresentable_environment_models(monkeypatch):
+    values = (
+        "MODEL_CONVERSATION_MAX",
+        "MODEL_REPORT_MAX_FALLBACK",
+        "MODEL_VIDEO_MAX",
+    )
+    for name in values:
+        monkeypatch.setenv(name, "openai:fake-model")
+
+    assert runtime.seed_dropped() == sorted(values)
+
+
+@pytest.mark.parametrize(
+    ("has_max", "has_tavily"),
+    [(False, False), (False, True), (True, False), (True, True)],
+)
+def test_research_status_tracks_model_and_tavily(
+    profile_path, monkeypatch, has_max, has_tavily
+):
+    _clear_model_environment(monkeypatch)
+    monkeypatch.setenv("MODEL_RESEARCH", "openai:research")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
+    if has_max:
+        monkeypatch.setenv("MODEL_RESEARCH_MAX", "openai:research-max")
+    if has_tavily:
+        monkeypatch.setenv("TAVILY_API_KEY", "fake-tavily-key")
+    runtime.reset_runtime_cache()
+
+    config = runtime_config.current_config()
+    rows = {row["role"]: row for row in config["roles"]}
+    assert config["capabilities"]["max_tier"] is (has_max and has_tavily)
+    assert rows["research"]["available"] is has_tavily
+    assert rows["research"]["reason"] == (
+        None if has_tavily else "未配置 Tavily key"
+    )
+    assert rows["research_max"]["available"] is (has_max and has_tavily)
+    assert rows["research_max"]["reason"] == (
+        None
+        if has_max and has_tavily
+        else "未配置 MODEL_RESEARCH_MAX"
+        if not has_max
+        else "未配置 Tavily key"
+    )
+
+
+def test_profile_research_status_requires_tavily(profile_path, monkeypatch):
+    _clear_model_environment(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
+    _write(
+        profile_path,
+        _document(
+            {
+                "conversation": "openai:conversation",
+                "research": "openai:research",
+                "research_max": "openai:research-max",
+            }
+        ),
+    )
+
+    config = runtime_config.current_config()
+    rows = {row["role"]: row for row in config["roles"]}
+    assert config["capabilities"]["max_tier"] is False
+    for role in ("research", "research_max"):
+        assert rows[role]["available"] is False
+        assert rows[role]["reason"] == "未配置 Tavily key"
+
+
 @pytest.mark.parametrize(
     ("document", "field"),
     [
@@ -364,6 +508,7 @@ def test_lite_profile_imports_main_without_openai_client_or_network(
             "GEMINI_API_KEY": "",
             "GOOGLE_API_KEY": "",
             "TAVILY_API_KEY": "",
+            "MERCY_SYSTEM_KEYS": '["DEEPSEEK_API_KEY"]',
         }
     )
     code = """
