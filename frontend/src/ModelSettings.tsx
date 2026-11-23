@@ -125,10 +125,10 @@ export function ModelSettings({
   onConfigChanged: (config: EditableConfig) => void;
 }) {
   const active: ProfileId = config.active === "lite" ? "lite" : "full";
-  const saved = useMemo(
-    () => normalizeProfiles(config.profile_source === "file" ? config.profiles : config.seed),
-    [config],
+  const savedKey = JSON.stringify(
+    normalizeProfiles(config.profile_source === "file" ? config.profiles : config.seed),
   );
+  const saved = useMemo(() => JSON.parse(savedKey) as Record<ProfileId, RoleMap>, [savedKey]);
   const [view, setView] = useState<ProfileId>(active);
   const [draft, setDraft] = useState(saved);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -193,8 +193,8 @@ export function ModelSettings({
     setExpanded(next);
     if (!next) return;
     const spec = parseSpec(roles[role]);
-    const provider =
-      spec?.provider ?? ROLES.find((item) => item.role === role)?.providers[view === "lite" ? 1 : 0];
+    const providers = ROLES.find((item) => item.role === role)?.providers ?? [];
+    const provider = spec?.provider ?? providers[view === "lite" && providers.length > 1 ? 1 : 0];
     if (provider && role !== "memory") void loadModels(provider as Provider);
   };
 
@@ -212,7 +212,11 @@ export function ModelSettings({
       if (!ok) {
         if (Array.isArray(payload?.errors)) {
           const errors: Record<string, string> = {};
-          for (const item of payload.errors) errors[`${item.profile}.${item.role}`] = item.message;
+          for (const item of payload.errors) {
+            const fallback = String(item.role).endsWith("_fallback");
+            const base = String(item.role).replace(/_fallback$/, "");
+            errors[`${item.profile}.${base}`] = fallback ? `备用模型：${item.message}` : item.message;
+          }
           setRoleErrors(errors);
         } else {
           setFormError(errorText(payload, "保存失败"));
@@ -220,7 +224,10 @@ export function ModelSettings({
         return false;
       }
       const notes: Record<string, string> = {};
-      for (const item of payload?.untested ?? []) notes[`${item.profile}.${item.role}`] = "缺少 key，未测试";
+      for (const item of payload?.untested ?? [])
+        notes[`${item.profile}.${String(item.role).replace(/_fallback$/, "")}`] = item.reason
+          ? `${item.reason}，未测试`
+          : "未测试";
       setRoleNotes(notes);
       setExpanded(null);
       if (payload?.config) onConfigChanged(payload.config as EditableConfig);
@@ -235,7 +242,14 @@ export function ModelSettings({
   };
 
   const switchProfile = async () => {
-    if (config.profile_source !== "file" && !(await save())) return;
+    if (config.profile_source !== "file") {
+      const conversation = parseSpec(draft[view].conversation);
+      if (!conversation?.model || !config.keys[conversation.provider]?.configured) {
+        setFormError(conversation?.model ? "对话模型缺少 key" : "未设置对话模型");
+        return;
+      }
+      if (!(await save())) return;
+    }
     setBusy(true);
     setFormError(null);
     try {
@@ -306,7 +320,15 @@ export function ModelSettings({
       const nextOption = options.find((item) => item.id === model);
       const allowed = effortsFor(role, provider, nextOption);
       const nextEffort =
-        effort && allowed.includes(effort) ? effort : provider === "deepseek" && role !== "report" ? "none" : allowed.length ? effort ?? allowed[0] : null;
+        allowed.length === 0
+          ? provider === "deepseek" && role !== "report"
+            ? "none"
+            : null
+          : effort && allowed.includes(effort)
+            ? effort
+            : provider === "openai"
+              ? null
+              : allowed[0];
       setRole(role, model ? formatSpec(provider, model, nextEffort) : null);
     };
     return (
@@ -370,14 +392,14 @@ export function ModelSettings({
         )}
         {efforts.length > 1 && spec?.model && (
           <div className="model-segment" role="radiogroup" aria-label="思考">
-            {efforts.map((effort) => (
+            {(provider === "openai" ? [null, ...efforts] : efforts).map((effort) => (
               <button
                 type="button"
-                key={effort}
-                className={(spec.effort ?? "none") === effort ? "active" : ""}
+                key={effort ?? "default"}
+                className={(spec.effort ?? (provider === "openai" ? null : "none")) === effort ? "active" : ""}
                 onClick={() => pick(spec.model, effort)}
               >
-                {EFFORT_LABELS[effort] ?? effort}
+                {effort ? EFFORT_LABELS[effort] ?? effort : "默认"}
               </button>
             ))}
           </div>
