@@ -996,6 +996,10 @@ async def test_locked_cleanup_keeps_original_errors_and_eviction(tmp_path, monke
         "locked-cache", "image", "search", "image/jpeg", "bad",
         url="https://media.test/bad.jpg",
     )
+    full = await media_store.register_media(
+        "locked-cache", "image", "search", "image/jpeg", "full",
+        url="https://media.test/full.jpg",
+    )
     locked_path = media_store.cache_directory() / locked["media_id"]
     old_path = media_store.cache_directory() / old["media_id"]
     locked_path.write_bytes(b"l" * 4)
@@ -1004,7 +1008,7 @@ async def test_locked_cleanup_keeps_original_errors_and_eviction(tmp_path, monke
     await media_store.set_cached_path(old["media_id"], str(old_path), 4)
     _lock_files(
         monkeypatch,
-        lambda path: path.name in {locked["media_id"], bad["media_id"]},
+        lambda path: path.name in {locked["media_id"], bad["media_id"], full["media_id"]},
     )
 
     class Fetcher:
@@ -1022,6 +1026,12 @@ async def test_locked_cleanup_keeps_original_errors_and_eviction(tmp_path, monke
 
         with pytest.raises(ValueError, match="not a supported image"):
             await media_store.cache_remote_image(bad["media_id"], Fetcher(), 100)
+
+        full_path = media_store.cache_directory() / full["media_id"]
+        with pytest.raises(ValueError, match="cache is full"):
+            await media_store.cache_remote_image(full["media_id"], Fetcher(), 5)
+        assert full_path.is_file()
+        assert (await media_store.get_media(full["media_id"]))["path"] == str(full_path)
     finally:
         await media_store.close_store()
 

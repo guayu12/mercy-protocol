@@ -606,8 +606,8 @@ async def cache_remote_image(media_id: str, fetcher, max_cache_bytes: int) -> di
                         total -= size
                     await clear_cached_path(entry["media_id"])
                 if total > max_cache_bytes:
-                    discard_file(destination)
-                    await clear_cached_path(media_id)
+                    if discard_file(destination):
+                        await clear_cached_path(media_id)
                     raise ValueError("Remote media cache is full")
                 await update_last_used(media_id)
                 return await get_media(media_id)
