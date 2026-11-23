@@ -80,6 +80,7 @@ app = FastAPI(title="Mercy Protocol — AI Judicial Interface", version="2.0.0",
 
 UPLOAD_MULTIPART_OVERHEAD = 1024 * 1024
 GEMINI_FILE_SHUTDOWN_TIMEOUT_SECONDS = 10
+GRACEFUL_SHUTDOWN_SECONDS = 3
 
 
 @app.middleware("http")
@@ -583,4 +584,5 @@ if __name__ == "__main__":
         host=os.environ.get("BACKEND_HOST", "127.0.0.1"),
         port=8000,
         reload=True,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )

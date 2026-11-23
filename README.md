@@ -54,9 +54,10 @@ cd backend
 python3.12 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 cp .env.example .env        # then fill in your API keys / model names
-./venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
+./venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 3
 ```
 
+This bounds the wait for open streams, such as the log panel, on Ctrl+C or reload.
 Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_BASE_URL`.
 The backend binds to `127.0.0.1` by default; pass `--host` explicitly to override it,
 or run `./venv/bin/python main.py` to use `BACKEND_HOST` from `.env`.
