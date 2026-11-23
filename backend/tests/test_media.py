@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessageChunk, HumanMessage
 from core import media_store, session_store
 from core.agent import graph
 from core.safe_fetch import (
+    DownloadTooLarge,
     SafeHTTPXTransport,
     SafeMediaFetcher,
     UnsafeAddress,
@@ -958,3 +959,101 @@ async def test_register_message_links_trims_unbalanced_closers(monkeypatch):
         "https://example.com/g.png",
         "https://example.com/h.webp",
     ]
+
+
+def _lock_files(monkeypatch, is_locked):
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if is_locked(self):
+            raise PermissionError(
+                13, "The process cannot access the file because it is being used by another process", str(self)
+            )
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+@pytest.mark.asyncio
+async def test_locked_cleanup_keeps_original_errors_and_eviction(tmp_path, monkeypatch):
+    monkeypatch.setattr(media_store, "_store_lock", asyncio.Lock())
+    monkeypatch.setattr(media_store, "_cache_eviction_lock", asyncio.Lock())
+    monkeypatch.setattr(media_store, "_cache_locks", {})
+    await media_store.init_store(str(tmp_path / "session.db"))
+    locked = await media_store.register_media(
+        "locked-cache", "image", "search", "image/jpeg", "locked",
+        url="https://media.test/locked.jpg",
+    )
+    old = await media_store.register_media(
+        "locked-cache", "image", "search", "image/jpeg", "old",
+        url="https://media.test/old.jpg",
+    )
+    fresh = await media_store.register_media(
+        "locked-cache", "image", "search", "image/jpeg", "fresh",
+        url="https://media.test/fresh.jpg",
+    )
+    bad = await media_store.register_media(
+        "locked-cache", "image", "search", "image/jpeg", "bad",
+        url="https://media.test/bad.jpg",
+    )
+    full = await media_store.register_media(
+        "locked-cache", "image", "search", "image/jpeg", "full",
+        url="https://media.test/full.jpg",
+    )
+    locked_path = media_store.cache_directory() / locked["media_id"]
+    old_path = media_store.cache_directory() / old["media_id"]
+    locked_path.write_bytes(b"l" * 4)
+    old_path.write_bytes(b"o" * 4)
+    await media_store.set_cached_path(locked["media_id"], str(locked_path), 4)
+    await media_store.set_cached_path(old["media_id"], str(old_path), 4)
+    _lock_files(
+        monkeypatch,
+        lambda path: path.name in {locked["media_id"], bad["media_id"], full["media_id"]},
+    )
+
+    class Fetcher:
+        async def download_to_file(self, url, destination, max_bytes):
+            Path(destination).write_bytes(b"n" * 4)
+            content_type = "text/html" if url.endswith("bad.jpg") else "image/jpeg"
+            return {"content_type": content_type}
+
+    try:
+        record = await media_store.cache_remote_image(fresh["media_id"], Fetcher(), 9)
+        assert Path(record["path"]).is_file()
+        assert locked_path.is_file()
+        assert not old_path.exists()
+        assert (await media_store.get_media(locked["media_id"]))["path"] == str(locked_path)
+
+        with pytest.raises(ValueError, match="not a supported image"):
+            await media_store.cache_remote_image(bad["media_id"], Fetcher(), 100)
+
+        full_path = media_store.cache_directory() / full["media_id"]
+        with pytest.raises(ValueError, match="cache is full"):
+            await media_store.cache_remote_image(full["media_id"], Fetcher(), 5)
+        assert full_path.is_file()
+        assert (await media_store.get_media(full["media_id"]))["path"] == str(full_path)
+    finally:
+        await media_store.close_store()
+
+
+@pytest.mark.asyncio
+async def test_safe_fetch_size_limit_survives_locked_partial_file(tmp_path, monkeypatch):
+    async def resolver(host, port):
+        return ["8.8.8.8"]
+
+    async def body():
+        yield b"x" * 8
+        yield b"x" * 8
+
+    def transport_factory():
+        return httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, headers={"content-type": "video/mp4"}, content=body()
+            )
+        )
+
+    destination = tmp_path / "partial.video"
+    _lock_files(monkeypatch, lambda path: path == destination)
+    fetcher = SafeMediaFetcher(resolver=resolver, transport_factory=transport_factory)
+    with pytest.raises(DownloadTooLarge):
+        await fetcher.download_to_file("https://media.test/video.mp4", destination, 10)

@@ -1192,6 +1192,81 @@ async def test_remote_video_uses_tmp_directory_and_removes_temp_file(
 
 
 @pytest.mark.asyncio
+async def test_remote_video_result_survives_locked_temp_file(
+    tmp_path, monkeypatch
+):
+    await _init_stores(tmp_path / "session.db")
+    record = await media_store.register_media(
+        "remote-thread",
+        "video",
+        "search",
+        "video/mp4",
+        "remote video",
+        url="https://media.example/video.mp4",
+    )
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:gemini-test")
+    monkeypatch.setenv("GEMINI_FILE_RETENTION_SECONDS", "0")
+    uploaded_paths = []
+    download_paths = []
+
+    async def download_to_file(url, destination, max_bytes):
+        assert url == "https://media.example/video.mp4"
+        assert max_bytes == media_store.VIDEO_LIMIT
+        destination.write_bytes(b"remote-video")
+        download_paths.append(Path(destination))
+        return {"content_type": "video/webm"}
+
+    async def upload_file(source, mime, display_name, *, poll_timeout=None):
+        uploaded_paths.append(Path(source))
+        assert mime == "video/webm"
+        return gemini_files.GeminiFile(FILE_NAME, FILE_URI, mime, 60)
+
+    async def ask(*args):
+        return gemini_files.GeminiAnswer(
+            "结果",
+            "completed",
+            {"input_tokens_by_modality": [{"modality": "video", "tokens": 5460}]},
+        )
+
+    async def delete_file(name):
+        return True
+
+    real_unlink = Path.unlink
+
+    def locked_unlink(self, missing_ok=False):
+        if self in download_paths:
+            raise PermissionError(13, "file is being used by another process", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+    monkeypatch.setattr(experts.safe_media_fetcher, "download_to_file", download_to_file)
+    monkeypatch.setattr(gemini_files, "upload_file", upload_file)
+    monkeypatch.setattr(gemini_files, "ask", ask)
+    monkeypatch.setattr(gemini_files, "delete_file", delete_file)
+    config = {
+        "configurable": {
+            "thread_id": "remote-thread",
+            "turn_id": "remote-video-turn",
+            "turn_query": "看视频",
+        }
+    }
+    try:
+        result = await experts.analyze_video.ainvoke(
+            {"media_id": record["media_id"], "question": "描述"},
+            config=config,
+        )
+        media_root = media_store.media_directory().resolve()
+        assert result.startswith("视频分析结果")
+        assert len(download_paths) == 1
+        assert uploaded_paths == download_paths
+        assert uploaded_paths[0].parent == media_root / "tmp"
+        assert uploaded_paths[0].exists()
+    finally:
+        experts.clear_turn_budget("remote-video-turn")
+        await _close_stores()
+
+
+@pytest.mark.asyncio
 async def test_remote_video_rejects_invalid_content_type_and_cleans_temp(
     tmp_path, monkeypatch
 ):

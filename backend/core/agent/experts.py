@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from langchain_core.callbacks import adispatch_custom_event
 
 from core import gemini_files, log_bus, media_store, session_store, usage_stats
+from core.file_cleanup import discard_file
 from core.agent.media_utils import ImageTooLarge, cache_limit_bytes, image_data_url_from_path
 from core.agent.prompts import (
     REPORT_PROMPT,
@@ -1292,7 +1293,7 @@ async def _upload_gemini_media(
         return file
     finally:
         if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+            discard_file(temporary_path)
 
 
 def _cached_gemini_file(record: dict) -> gemini_files.GeminiFile:
