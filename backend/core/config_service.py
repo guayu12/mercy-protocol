@@ -453,16 +453,30 @@ async def save_profile_configuration(
     tests = []
     untested = []
     for profile, profile_data in profiles.items():
-        snapshot = runtime.candidate_snapshot(document, profile)
         old_roles = (
             old_profiles.get(profile, {}).get("roles", {}) if previous else {}
         )
         new_roles = profile_data.get("roles", {})
-        for role in sorted(set(old_roles) | set(new_roles)):
-            if old_roles.get(role) == new_roles.get(role):
-                continue
-            if role not in new_roles:
-                continue
+        changed_roles = [
+            role
+            for role in sorted(set(old_roles) | set(new_roles))
+            if old_roles.get(role) != new_roles.get(role) and role in new_roles
+        ]
+        if not changed_roles:
+            continue
+        try:
+            snapshot = runtime.candidate_snapshot(document, profile)
+        except models.ModelConfigError:
+            untested.extend(
+                {
+                    "profile": profile,
+                    "role": role,
+                    "reason": "未设置对话模型",
+                }
+                for role in changed_roles
+            )
+            continue
+        for role in changed_roles:
             spec = snapshot.spec(*_role_parts(role)[:2], fallback=_role_parts(role)[2])
             if spec is None:
                 continue

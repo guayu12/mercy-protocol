@@ -409,6 +409,37 @@ def test_active_without_profiles_returns_fixed_error(tmp_path, monkeypatch):
     runtime.reset_runtime_cache()
 
 
+def test_save_profiles_allows_inactive_profile_without_conversation(
+    tmp_path, monkeypatch
+):
+    _clear_keys(monkeypatch)
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", env_path)
+    env.load_env()
+    monkeypatch.setenv("MERCY_PROFILES_PATH", str(tmp_path / "profiles.json"))
+    runtime.reset_runtime_cache()
+    profiles = {
+        "full": {"roles": {"conversation": "openai:fake-full"}},
+        "lite": {"roles": {"report": "openai:fake-lite-report"}},
+    }
+
+    response = _client().post(
+        "/api/config/profiles",
+        headers=_headers(),
+        json={"profiles": profiles},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config"]["active"] == "full"
+    assert {
+        "profile": "lite",
+        "role": "report",
+        "reason": "未设置对话模型",
+    } in response.json()["untested"]
+    runtime.reset_runtime_cache()
+
+
 def test_profiles_without_keys_are_saved_as_untested(tmp_path, monkeypatch):
     _clear_keys(monkeypatch)
     env_path = tmp_path / ".env"
