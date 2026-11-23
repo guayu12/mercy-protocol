@@ -10,6 +10,8 @@ from urllib.parse import urljoin, urlsplit
 import httpcore
 import httpx
 
+from core.file_cleanup import discard_file
+
 
 CONNECT_TIMEOUT = 3.0
 READ_TIMEOUT = 10.0
@@ -333,7 +335,7 @@ class SafeMediaFetcher:
                     "length": total,
                 }
             except Exception:
-                destination.unlink(missing_ok=True)
+                discard_file(destination)
                 raise
             finally:
                 await response.aclose()

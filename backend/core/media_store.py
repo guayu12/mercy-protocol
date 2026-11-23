@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 import aiosqlite
 
+from core.file_cleanup import discard_file
+
 
 _connection: aiosqlite.Connection | None = None
 _store_lock: asyncio.Lock | None = None
@@ -304,7 +306,7 @@ async def register_upload(thread_id: str, upload) -> dict:
             byte_count=total,
         )
     except Exception:
-        path.unlink(missing_ok=True)
+        discard_file(path)
         raise
 
 
@@ -323,7 +325,7 @@ async def register_legacy_image(thread_id: str, data: bytes) -> dict:
             thread_id, kind, "upload", mime, "用户上传图片", path=str(path), byte_count=len(data)
         )
     except Exception:
-        path.unlink(missing_ok=True)
+        discard_file(path)
         raise
 
 
@@ -599,15 +601,16 @@ async def cache_remote_image(media_id: str, fetcher, max_cache_bytes: int) -> di
                     path = Path(entry["path"])
                     if path.is_file():
                         size = path.stat().st_size
-                        path.unlink(missing_ok=True)
+                        if not discard_file(path):
+                            continue
                         total -= size
                     await clear_cached_path(entry["media_id"])
                 if total > max_cache_bytes:
-                    destination.unlink(missing_ok=True)
+                    discard_file(destination)
                     await clear_cached_path(media_id)
                     raise ValueError("Remote media cache is full")
                 await update_last_used(media_id)
                 return await get_media(media_id)
         except Exception:
-            destination.unlink(missing_ok=True)
+            discard_file(destination)
             raise
