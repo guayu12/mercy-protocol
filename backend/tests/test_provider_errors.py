@@ -123,7 +123,8 @@ async def test_toolnode_errors_and_stale_tool_calls_are_safe(monkeypatch):
         },
         config,
     )
-    assert "当前配置下不可用" in stale_result["messages"][0].content
+    assert stale_result["messages"][0].content == "没有这个工具。"
+    assert "unavailable_tool" not in stale_result["messages"][0].content
     assert execution == ["x"]
 
 

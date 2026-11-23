@@ -66,6 +66,16 @@ When `backend/data/profiles.json` exists, it takes precedence over the `.env`
 In profile mode, `.env` model selections are ignored, while API keys remain
 environment-based.
 
+System environment API keys override `.env` keys and cannot be changed in the
+configuration UI (the API returns HTTP 409); update those keys in the operating
+system environment instead. The `.env` file must be UTF-8 encoded.
+
+The first configuration UI save creates `backend/data/profiles.json`. After
+that, `MODEL_*` environment selections no longer apply; settings listed as
+`seed_dropped` cannot be represented by profiles and are lost when saving.
+Tavily keys are validated through its `/usage` endpoint, which does not consume
+search credit.
+
 Gemini video and PDF analysis is optional (`GEMINI_API_KEY` or `GOOGLE_API_KEY`
 plus `MODEL_VIDEO=gemini:gemini-3.8-flash`). PDFs are upload-only, limited to
 50 MB and Google's 1,000-page limit. Each call reads a window of up to

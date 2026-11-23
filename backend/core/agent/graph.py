@@ -7,11 +7,10 @@ import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
+from core.env import load_env
 
-# Load environment variables FIRST — before any module reads them
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-load_dotenv(os.path.join(BACKEND_DIR, ".env"))
+load_env()
 from typing import TypedDict, Annotated, AsyncIterator, Optional, Literal
 import aiosqlite
 from langchain_core.messages import (
@@ -378,6 +377,11 @@ def _safe_tool_error(error: Exception) -> str:
 async def _runtime_tool_gate(request, handler):
     call = request.tool_call
     name = call["name"]
+    if name not in {tool.name for tool in ALL_TOOLS}:
+        return ToolMessage(
+            content="没有这个工具。",
+            tool_call_id=call["id"],
+        )
     reason = runtime_from(request.runtime.config).unavailable_reason(name)
     if reason:
         return ToolMessage(
@@ -392,6 +396,15 @@ def _text_of(content) -> str:
     if isinstance(content, str):
         return content
     return " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+
+
+def _actual_api_kind(response, spec) -> str:
+    metadata = getattr(response, "response_metadata", None) or {}
+    response_id = metadata.get("id") if isinstance(metadata, dict) else None
+    response_id = response_id or getattr(response, "id", None)
+    if isinstance(response_id, str) and response_id.startswith("resp_"):
+        return "responses"
+    return api_kind(spec)
 
 async def _media_screen_context(thread_id: str, screen_state: dict) -> str:
     stage = await media_store.get_stage(thread_id)
@@ -703,7 +716,7 @@ async def agent_node(state: AgentState, config: RunnableConfig):
         metadata["mercy_source"] = {
             "provider": spec.provider,
             "model": spec.model,
-            "api": api_kind(spec),
+            "api": _actual_api_kind(response, spec),
         }
         return response.model_copy(update={"response_metadata": metadata})
 

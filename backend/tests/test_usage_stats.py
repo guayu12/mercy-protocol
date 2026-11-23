@@ -293,6 +293,7 @@ async def test_config_key_hints_roles_and_secret_exclusion(monkeypatch):
     }
     for name, value in env_values.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MERCY_SYSTEM_KEYS", "[]")
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=main.app), base_url="http://test"
@@ -316,21 +317,25 @@ async def test_config_key_hints_roles_and_secret_exclusion(monkeypatch):
         "configured": True,
         "hint": "••••1234",
         "variable": "OPENAI_API_KEY",
+        "source": "env_file",
     }
     assert config["keys"]["gemini"] == {
         "configured": True,
         "hint": "••••5678",
         "variable": "GEMINI_API_KEY",
+        "source": "env_file",
     }
     assert config["keys"]["deepseek"] == {
         "configured": True,
         "hint": None,
         "variable": "DEEPSEEK_API_KEY",
+        "source": "env_file",
     }
     assert config["keys"]["tavily"] == {
         "configured": True,
         "hint": "••••9012",
         "variable": "TAVILY_API_KEY",
+        "source": "env_file",
     }
     assert config["services"][0]["reason"] is None
     assert config["services"][2]["detail"] == "zh-CN-TestVoice"

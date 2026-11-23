@@ -37,6 +37,8 @@ def _code(error: Exception) -> str | None:
 def classify(error: Exception) -> ProviderError:
     status = _status(error)
     code = _code(error)
+    if status == 400:
+        return ProviderError("bad_request", "模型不接受这个设置")
     if status == 401:
         return ProviderError("invalid_key", "key 无效")
     if status in {403, 404} or code == "model_not_found":

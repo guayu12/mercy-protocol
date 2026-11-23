@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import asyncio
+import ipaddress
 import json
 import logging
 from pathlib import Path
@@ -17,7 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from contextlib import asynccontextmanager
 from typing import Literal, Optional
+from core.env import load_env
+
+load_env()
+
 from core import log_bus  # real-time log broadcaster
+from core import config_service
+from core.config_service import (
+    ActiveRequest,
+    ConfigApiError,
+    KeyRequest,
+    ModelsRequest,
+    ProfilesRequest,
+)
 from core.agent.graph import (
     close_graph,
     init_graph,
@@ -113,6 +126,79 @@ app.add_middleware(
     expose_headers=["Accept-Ranges", "Content-Range", "Content-Length", "X-Content-Type-Options"],
 )
 
+
+def _loopback_host(value: str | None) -> bool:
+    if not value:
+        return False
+    value = value.strip().strip("[]")
+    if value.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_loopback
+
+
+def _allowed_config_host(value: str | None) -> bool:
+    if not value:
+        return False
+    value = value.strip().lower()
+    if value.startswith("[::1]"):
+        hostname, suffix = "[::1]", value[5:]
+        if suffix and (
+            not suffix.startswith(":")
+            or not suffix[1:].isdigit()
+            or not 0 <= int(suffix[1:]) <= 65535
+        ):
+            return False
+    else:
+        hostname, separator, port = value.partition(":")
+        suffix = f":{port}" if separator else ""
+        if separator and (not port.isdigit() or not 0 <= int(port) <= 65535):
+            return False
+    return hostname in {"127.0.0.1", "localhost", "[::1]"} and (
+        not suffix or suffix.startswith(":")
+    )
+
+
+def _config_client_is_local(request: Request) -> bool:
+    backend_host = os.environ.get("BACKEND_HOST", "127.0.0.1")
+    client_host = request.client.host if request.client else None
+    return _loopback_host(backend_host) and _loopback_host(client_host)
+
+
+async def _require_local_config_request(request: Request, schema):
+    if (
+        not _config_client_is_local(request)
+        or not _allowed_config_host(request.headers.get("host"))
+        or request.headers.get("origin") not in CORS_ORIGINS
+        or "*" in CORS_ORIGINS
+    ):
+        raise ConfigApiError(403, "forbidden", "只能在本机修改配置")
+    content_type = request.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != "application/json":
+        raise ConfigApiError(415, "unsupported_media_type", "仅支持 JSON 请求")
+    try:
+        content_length = int(request.headers.get("content-length", "0"))
+    except ValueError:
+        raise ConfigApiError(400, "invalid_request", "请求格式不正确") from None
+    if content_length < 0:
+        raise ConfigApiError(400, "invalid_request", "请求格式不正确")
+    if content_length > 65536:
+        raise ConfigApiError(413, "payload_too_large", "请求内容过大")
+    body = await request.body()
+    if len(body) > 65536:
+        raise ConfigApiError(413, "payload_too_large", "请求内容过大")
+    return config_service.parse_payload(body, schema)
+
+
+@app.exception_handler(ConfigApiError)
+async def _config_api_error_handler(_request: Request, error: ConfigApiError):
+    return JSONResponse(status_code=error.status_code, content=error.payload)
+
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 class ScreenState(BaseModel):
@@ -161,11 +247,41 @@ async def stats_endpoint():
 
 
 @app.get("/api/config")
-async def config_endpoint():
+async def config_endpoint(request: Request):
     runtime = await load_snapshot()
-    config = current_config(runtime)
+    config = config_service.config_view(
+        runtime, editable=_config_client_is_local(request)
+    )
     config.pop("capabilities")
     return config
+
+
+@app.post("/api/config/models")
+async def config_models_endpoint(request: Request):
+    payload = await _require_local_config_request(request, ModelsRequest)
+    return await config_service.discover_models(payload)
+
+
+@app.post("/api/config/key")
+async def config_key_endpoint(request: Request):
+    payload = await _require_local_config_request(request, KeyRequest)
+    return await config_service.save_key(payload)
+
+
+@app.post("/api/config/profiles")
+async def config_profiles_endpoint(request: Request):
+    payload = await _require_local_config_request(request, ProfilesRequest)
+    return await config_service.save_profile_configuration(
+        payload, editable=_config_client_is_local(request)
+    )
+
+
+@app.post("/api/config/active")
+async def config_active_endpoint(request: Request):
+    payload = await _require_local_config_request(request, ActiveRequest)
+    return await config_service.switch_active_profile(
+        payload, editable=_config_client_is_local(request)
+    )
 
 
 # ─── SSE Log Stream ──────────────────────────────────────────────────

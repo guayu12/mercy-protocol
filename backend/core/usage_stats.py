@@ -1,8 +1,10 @@
 """In-memory usage aggregates for model calls."""
 
 import asyncio
+import contextvars
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +14,16 @@ from langchain_core.callbacks import AsyncCallbackHandler
 _since = time.time()
 _lock = threading.Lock()
 _model_stats: dict[tuple[str, str, str], dict] = {}
+_recording_suppressed = contextvars.ContextVar("usage_recording_suppressed", default=False)
+
+
+@contextmanager
+def suppress_recording():
+    token = _recording_suppressed.set(True)
+    try:
+        yield
+    finally:
+        _recording_suppressed.reset(token)
 
 
 def _token_count(value: int | None) -> int:
@@ -156,6 +168,8 @@ class UsageCallback(AsyncCallbackHandler):
         started_at = state["started_at"] or finished_at
         first_output_at = state["first_output_at"]
         usage = _usage_from_response(response)
+        if _recording_suppressed.get():
+            return
         output_details = usage.get("output_token_details") or {}
         record(
             self.role,
