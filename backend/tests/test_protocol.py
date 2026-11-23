@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -147,6 +148,70 @@ async def test_process_query_splits_reports_from_speech(monkeypatch, tmp_path):
         ]
         assert ai_messages[0].content == "我整理一下。"
         assert ai_messages[-1].content == "三种语言各有取舍。我建议按项目需求选择。你更看重哪一项？"
+    finally:
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
+async def test_process_query_persists_original_text_and_thread_attachments(
+    monkeypatch, tmp_path
+):
+    connection = await _install_graph(
+        monkeypatch, tmp_path, [AIMessage(content="我会读这份文档。")]
+    )
+    thread_id = "protocol-attachments"
+    document = await media_store.register_media(
+        thread_id,
+        "document",
+        "upload",
+        "application/pdf",
+        "notes.pdf",
+        path="/not-read-by-this-test.pdf",
+    )
+    foreign = await media_store.register_media(
+        "other-thread",
+        "document",
+        "upload",
+        "application/pdf",
+        "foreign.pdf",
+        path="/not-read-by-this-test.pdf",
+    )
+    monkeypatch.setattr(
+        agent_graph,
+        "tools",
+        agent_graph.base_tools + [SimpleNamespace(name="analyze_document")],
+    )
+    try:
+        events = [
+            event
+            async for event in agent_graph.process_query(
+                "请读这份资料",
+                thread_id,
+                attachments=[document["media_id"], foreign["media_id"]],
+            )
+        ]
+        assert events[-1]["type"] == "done"
+        utterance = next(
+            item
+            for item in await session_store.recent_utterances(thread_id)
+            if item["role"] == "user"
+        )
+        assert utterance["text"] == "请读这份资料"
+        assert utterance["attachments"] == [
+            {
+                "media_id": document["media_id"],
+                "kind": "document",
+                "filename": "notes.pdf",
+            }
+        ]
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        human_message = next(
+            message for message in state.values["messages"] if message.type == "human"
+        )
+        assert "用户上传了文档" in human_message.content
+        assert document["media_id"] in human_message.content
     finally:
         await _close_graph(connection)
 

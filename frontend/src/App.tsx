@@ -688,6 +688,11 @@ export function App() {
             turn_id: string;
             role: "user" | "assistant";
             text: string;
+            attachments?: Array<{
+              media_id: string;
+              kind: "image" | "video" | "document";
+              filename: string;
+            }>;
             interrupted?: boolean;
             created_at: number;
           }>;
@@ -702,12 +707,13 @@ export function App() {
           link_policy: report.link_policy ?? "open",
         }));
         const restoredMessages = (session.utterances ?? [])
-          .filter((utterance) => utterance.text.trim())
+          .filter((utterance) => utterance.text.trim() || utterance.attachments?.length)
           .map((utterance) => ({
             id: `utterance_${utterance.id}`,
             turnId: utterance.turn_id,
             role: utterance.role,
             content: utterance.text,
+            attachments: utterance.attachments ?? [],
             interrupted: utterance.interrupted,
             createdAt: utterance.created_at,
           }));
@@ -1813,9 +1819,11 @@ export function App() {
                             : "系统"}
                       </span>
                       <time>{timeLabel(message.createdAt)}</time>
-                      {message.interrupted && <span className="interrupted-tag">已打断</span>}
+                      {message.interrupted ? (
+                        <span className="interrupted-tag">已打断</span>
+                      ) : null}
                     </div>
-                    {(message.content || message.attachments?.length) && (
+                    {(message.content || message.attachments?.length) ? (
                       <div className="dialogue-bubble">
                         {message.content && <p>{message.content}</p>}
                         {message.attachments?.map((attachment) =>
@@ -1838,7 +1846,7 @@ export function App() {
                           ),
                         )}
                       </div>
-                    )}
+                    ) : null}
                     {message.role === "assistant" && !message.content && isLoading && (
                       <div className="dialogue-bubble thinking-bubble">正在思考…</div>
                     )}

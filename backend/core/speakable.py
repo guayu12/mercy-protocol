@@ -23,6 +23,7 @@ _IMMEDIATE_BOUNDARIES = set("。！？\n")
 _ASCII_BOUNDARIES = set("!?")
 _ASCII_BOUNDARY_QUOTES = set("\"'“”‘’「」『』")
 _LONG_CLAUSE_MARKS = set("，,；;")
+_ZERO_WIDTH_FORMATTING = str.maketrans("", "", "\u200b\u200c\u2060\ufeff")
 
 
 def _remove_emoji_like_symbols(text: str) -> str:
@@ -66,6 +67,7 @@ def _is_cjk_character(char: str) -> bool:
 
 def to_speakable(text: str) -> str:
     """Remove Markdown and decorative symbols while preserving readable text."""
+    text = text.translate(_ZERO_WIDTH_FORMATTING)
     text = _FENCED_CODE.sub("", text)
     text = _LINK.sub(r"\1", text)
     text = _URL.sub("", text)

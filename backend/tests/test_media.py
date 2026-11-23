@@ -645,6 +645,15 @@ async def test_stage_persistence_clear_delete_and_chat_reconcile(tmp_path, monke
     store_path = str(tmp_path / "session.db")
     await session_store.init_store(store_path)
     await media_store.init_store(store_path)
+    await session_store.add_utterance(
+        "stage-test",
+        "t_restore",
+        "user",
+        "查看附件",
+        attachments=[
+            {"media_id": "m_image", "kind": "image", "filename": "photo.png"}
+        ],
+    )
     item = {
         "media_id": "m_stage",
         "kind": "image",
@@ -656,6 +665,11 @@ async def test_stage_persistence_clear_delete_and_chat_reconcile(tmp_path, monke
     response_stage = await main.session_endpoint("stage-test")
     assert response_stage["stage"]["items"] == [item]
     assert response_stage["stage"]["focus"] == "primary"
+    utterance = response_stage["utterances"][0]
+    assert utterance["attachments"] == [
+        {"media_id": "m_image", "kind": "image", "filename": "photo.png"}
+    ]
+    assert utterance["interrupted"] is False
 
     transport = httpx.ASGITransport(app=main.app)
 
@@ -746,6 +760,49 @@ async def test_show_media_partial_and_all_failure(tmp_path, monkeypatch):
     assert "文档不会展示在展示台上" in result
     assert events == []
     assert (await media_store.get_stage("show-test")) is None
+    await media_store.close_store()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "mime", "filename", "contents"),
+    [
+        ("image", "image/png", "upload.png", b"\x89PNG\r\n\x1a\n"),
+        ("video", "video/mp4", "upload.mp4", b"\x00\x00\x00\x18ftypmp42"),
+    ],
+)
+async def test_show_media_uploaded_image_and_video(
+    tmp_path, monkeypatch, kind, mime, filename, contents
+):
+    await media_store.init_store(str(tmp_path / "session.db"))
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(exist_ok=True)
+    file_path = media_dir / filename
+    file_path.write_bytes(contents)
+    record = await media_store.register_media(
+        "uploaded-stage",
+        kind,
+        "upload",
+        mime,
+        filename,
+        path=str(file_path),
+    )
+    events = []
+
+    async def dispatch(name, data, config):
+        events.append(data)
+
+    monkeypatch.setattr(graph, "adispatch_custom_event", dispatch)
+    result = await graph.show_media.ainvoke(
+        {"media_ids": [record["media_id"]], "caption": "已上传的媒体"},
+        config={"configurable": {"thread_id": "uploaded-stage"}},
+    )
+
+    assert "展示台已更新" in result
+    assert [event["type"] for event in events] == ["stage.show"]
+    assert events[0]["items"][0]["kind"] == kind
+    stage = await media_store.get_stage("uploaded-stage")
+    assert stage["items"][0]["media_id"] == record["media_id"]
     await media_store.close_store()
 
 

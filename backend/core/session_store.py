@@ -50,6 +50,7 @@ async def init_store(path: str):
                 role TEXT NOT NULL,
                 text TEXT NOT NULL,
                 interrupted INTEGER DEFAULT 0,
+                attachments TEXT NOT NULL DEFAULT '[]',
                 created_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS app_flags (
@@ -72,6 +73,14 @@ async def init_store(path: str):
             )
         if "sources" not in report_columns:
             await _connection.execute("ALTER TABLE reports ADD COLUMN sources TEXT")
+        cursor = await _connection.execute("PRAGMA table_info(utterances)")
+        utterance_columns = {row["name"] for row in await cursor.fetchall()}
+        await cursor.close()
+        if "attachments" not in utterance_columns:
+            await _connection.execute(
+                "ALTER TABLE utterances ADD COLUMN "
+                "attachments TEXT NOT NULL DEFAULT '[]'"
+            )
         await _connection.commit()
 
 
@@ -96,6 +105,14 @@ def _row_dict(row) -> dict:
     sources = report.get("sources")
     report["sources"] = json.loads(sources) if sources is not None else None
     return report
+
+
+def _utterance_dict(row) -> dict:
+    utterance = dict(row)
+    attachments = utterance.get("attachments")
+    utterance["attachments"] = json.loads(attachments) if attachments else []
+    utterance["interrupted"] = bool(utterance.get("interrupted", False))
+    return utterance
 
 
 async def create_report(
@@ -195,15 +212,25 @@ async def add_utterance(
     role: str,
     text: str,
     interrupted: bool = False,
+    attachments: list[dict] | None = None,
 ):
     if role == "assistant" and not text.strip():
         return
     async with _get_lock():
         db = _db()
         await db.execute(
-            "INSERT INTO utterances (thread_id, turn_id, role, text, interrupted, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (thread_id, turn_id, role, text, int(interrupted), time.time()),
+            "INSERT INTO utterances "
+            "(thread_id, turn_id, role, text, interrupted, attachments, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                thread_id,
+                turn_id,
+                role,
+                text,
+                int(interrupted),
+                json.dumps(attachments or [], ensure_ascii=False),
+                time.time(),
+            ),
         )
         await db.commit()
 
@@ -245,7 +272,7 @@ async def recent_utterances(thread_id: str, limit: int = 50) -> list[dict]:
         )
         rows = await cursor.fetchall()
         await cursor.close()
-    return [_row_dict(row) for row in rows]
+    return [_utterance_dict(row) for row in rows]
 
 
 async def latest_user_or_assistant_utterance(thread_id: str) -> dict | None:
@@ -257,4 +284,4 @@ async def latest_user_or_assistant_utterance(thread_id: str) -> dict | None:
         )
         row = await cursor.fetchone()
         await cursor.close()
-    return _row_dict(row) if row else None
+    return _utterance_dict(row) if row else None
