@@ -102,6 +102,8 @@ def test_profiles_allow_inactive_profile_without_conversation(profile_path):
 def test_environment_mode_includes_memory_and_deepseek(profile_path, monkeypatch):
     profile_path.unlink(missing_ok=True)
     monkeypatch.setenv("MODEL_CONVERSATION", "deepseek:deepseek-chat@none")
+    monkeypatch.setenv("MODEL_RESEARCH", "openai:research-model")
+    monkeypatch.delenv("MODEL_RESEARCH_MAX", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
     monkeypatch.setenv("OPENAI_EMBEDDING_MODEL", "test-embedding")
 
@@ -114,6 +116,8 @@ def test_environment_mode_includes_memory_and_deepseek(profile_path, monkeypatch
     assert snapshot.spec("memory") == models.ModelSpec(
         "openai", "test-embedding", None
     )
+    assert snapshot.spec("research", "max") == snapshot.spec("research")
+    assert not snapshot.available("research_max")
 
 
 def test_startup_validation_seeds_snapshot_before_invalid_profile_reload(profile_path):

@@ -396,9 +396,15 @@ def _environment_roles() -> dict[str, models.ModelSpec | None]:
         roles[f"{role}_max_fallback"] = models._env_model_spec(
             role, "max", fallback=True
         )
-    roles["research_max"] = models._env_model_spec("research", "max")
-    roles["research_max_fallback"] = models._env_model_spec(
-        "research", "max", fallback=True
+    roles["research_max"] = (
+        models._env_model_spec("research", "max")
+        if os.environ.get("MODEL_RESEARCH_MAX", "").strip()
+        else None
+    )
+    roles["research_max_fallback"] = (
+        models._env_model_spec("research", "max", fallback=True)
+        if os.environ.get("MODEL_RESEARCH_MAX_FALLBACK", "").strip()
+        else None
     )
     roles["video"] = models._env_model_spec("video")
     roles["video_max"] = models._env_model_spec("video", "max")

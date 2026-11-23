@@ -338,7 +338,7 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
         monkeypatch.delenv("MODEL_RESEARCH_MAX")
         capabilities = await client.get("/api/capabilities")
         assert capabilities.json() == {
-            "max_tier": True,
+            "max_tier": False,
             "video": False,
             "document": False,
             "image_input": True,
@@ -347,7 +347,7 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
         monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
         capabilities = await client.get("/api/capabilities")
         assert capabilities.json() == {
-            "max_tier": True,
+            "max_tier": False,
             "video": True,
             "document": True,
             "image_input": True,
