@@ -317,11 +317,17 @@ async def _save_key_locked(request: KeyRequest) -> dict:
 def _profile_file_document():
     path = runtime.profiles_path()
     with config_lock(path):
-        if not path.exists():
-            return None
         try:
-            return json.loads(path.read_bytes().decode("utf-8-sig"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            if not path.exists():
+                return None
+            data = path.read_bytes()
+        except OSError:
+            raise ConfigApiError(
+                400, "config_write", "无法读取配置文件（可能被占用）"
+            ) from None
+        try:
+            return json.loads(data.decode("utf-8-sig"))
+        except (UnicodeError, json.JSONDecodeError):
             raise ConfigApiError(
                 400, "invalid_profiles", "配置文件格式不正确"
             ) from None
@@ -451,7 +457,9 @@ async def _save_profile_configuration_locked(
     profiles = request.profiles
     try:
         previous = _profile_file_document()
-    except ConfigApiError:
+    except ConfigApiError as error:
+        if error.payload.get("category") == "config_write":
+            raise
         previous = None
     active = (
         previous.get("active")
@@ -546,7 +554,9 @@ async def _switch_active_profile_locked(
 ) -> dict:
     try:
         document = _profile_file_document()
-    except ConfigApiError:
+    except ConfigApiError as error:
+        if error.payload.get("category") == "config_write":
+            raise
         raise ConfigApiError(
             400,
             "invalid_profiles",
