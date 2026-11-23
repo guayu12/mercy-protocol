@@ -143,7 +143,7 @@ def set_env_value(
         if first:
             if output and not output.endswith(("\n", "\r")):
                 output += newline
-            output += f"{name}={value}"
+            output += f"{name}={value}{newline}"
         encoded = output.encode("utf-8")
         if has_bom:
             encoded = b"\xef\xbb\xbf" + encoded

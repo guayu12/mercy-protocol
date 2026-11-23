@@ -131,7 +131,25 @@ def test_set_env_value_preserves_dotenv_values(tmp_path, source, name, value):
     if source.startswith("export"):
         assert b"export OPENAI_API_KEY=new.fake-key\r\n" in result
     if source == "OTHER=keep":
-        assert result == b"OTHER=keep\nOPENAI_API_KEY=new.fake-key"
+        assert result == b"OTHER=keep\nOPENAI_API_KEY=new.fake-key\n"
+
+
+def test_set_env_value_appends_new_file_with_lf(tmp_path):
+    path = tmp_path / ".env"
+
+    set_env_value(path, "DEEPSEEK_API_KEY", "fake-deepseek-key")
+
+    assert path.read_bytes() == b"DEEPSEEK_API_KEY=fake-deepseek-key\n"
+
+
+def test_set_env_value_appends_with_crlf_and_preserves_existing_bytes(tmp_path):
+    path = tmp_path / ".env"
+    original = b"OTHER=keep\r\n"
+    path.write_bytes(original)
+
+    set_env_value(path, "DEEPSEEK_API_KEY", "fake-deepseek-key")
+
+    assert path.read_bytes() == original + b"DEEPSEEK_API_KEY=fake-deepseek-key\r\n"
 
 
 def test_set_env_value_deduplicates_and_preserves_bom(tmp_path):
