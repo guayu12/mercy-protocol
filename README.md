@@ -66,6 +66,20 @@ When `backend/data/profiles.json` exists, it takes precedence over the `.env`
 In profile mode, `.env` model selections are ignored, while API keys remain
 environment-based.
 
+On Windows, do not pipe or redirect `python main.py` (or any `--reload` start)
+in PowerShell, e.g. `| Tee-Object` or `> log.txt`: on each reload uvicorn sends
+Ctrl+C to the whole console, PowerShell treats it as the user's and stops the
+backend. To keep a log file, start it through `cmd` and follow the log from
+PowerShell:
+
+```powershell
+cmd /c "venv\Scripts\python main.py > log.txt 2>&1"
+Get-Content log.txt -Wait   # in a second window
+```
+
+With `$ErrorActionPreference = 'Stop'`, `2>&1` also aborts at startup, because
+PowerShell turns the first uvicorn log line on stderr into a terminating error.
+
 System environment API keys override `.env` keys and cannot be changed in the
 configuration UI (the API returns HTTP 409); update those keys in the operating
 system environment instead. The `.env` file must be UTF-8 encoded.
