@@ -294,7 +294,9 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
         yield {"type": "done", "turn_id": "test", "spoken_text": ""}
 
     monkeypatch.setattr(main, "process_query", fake_process_query)
+    monkeypatch.setenv("MODEL_RESEARCH", "openai:configured-research")
     monkeypatch.setenv("MODEL_RESEARCH_MAX", "openai:configured-max")
+    monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         invalid = await client.post(
@@ -315,10 +317,28 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
             "document": False,
             "image_input": True,
         }
-        monkeypatch.delenv("MODEL_RESEARCH_MAX")
+        monkeypatch.delenv("TAVILY_API_KEY")
         capabilities = await client.get("/api/capabilities")
         assert capabilities.json() == {
             "max_tier": False,
+            "video": False,
+            "document": False,
+            "image_input": True,
+        }
+        monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
+        monkeypatch.delenv("MODEL_RESEARCH")
+        capabilities = await client.get("/api/capabilities")
+        assert capabilities.json() == {
+            "max_tier": False,
+            "video": False,
+            "document": False,
+            "image_input": True,
+        }
+        monkeypatch.setenv("MODEL_RESEARCH", "openai:configured-research")
+        monkeypatch.delenv("MODEL_RESEARCH_MAX")
+        capabilities = await client.get("/api/capabilities")
+        assert capabilities.json() == {
+            "max_tier": True,
             "video": False,
             "document": False,
             "image_input": True,
@@ -327,7 +347,7 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
         monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
         capabilities = await client.get("/api/capabilities")
         assert capabilities.json() == {
-            "max_tier": False,
+            "max_tier": True,
             "video": True,
             "document": True,
             "image_input": True,

@@ -97,7 +97,7 @@ def current_config(runtime: RuntimeSnapshot | None = None) -> dict:
     ]
     tool_names = runtime.tool_names()
     capabilities = {
-        "max_tier": runtime.available("research_max"),
+        "max_tier": runtime.available("research_max") and "investigate" in tool_names,
         "video": "analyze_video" in tool_names,
         "document": "analyze_document" in tool_names,
         "image_input": runtime.can_see_images(),
