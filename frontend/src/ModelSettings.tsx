@@ -140,9 +140,15 @@ export function ModelSettings({
   const [keyEditing, setKeyEditing] = useState<Provider | null>(null);
   const [keyInput, setKeyInput] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
+  const [keyNotice, setKeyNotice] = useState<Provider | null>(null);
 
   useEffect(() => setDraft(saved), [saved]);
   useEffect(() => setView(active), [active]);
+  useEffect(() => {
+    if (!keyNotice) return;
+    const timeout = window.setTimeout(() => setKeyNotice(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [keyNotice]);
 
   const editable = config.editable === true;
   const roles = draft[view];
@@ -287,6 +293,7 @@ export function ModelSettings({
   };
 
   const saveKey = async (provider: Provider) => {
+    setKeyNotice(null);
     const value = keyInput.trim();
     setKeyInput("");
     if (!value) return;
@@ -299,6 +306,7 @@ export function ModelSettings({
         return;
       }
       setKeyEditing(null);
+      setKeyNotice(provider);
       setLists((current) => ({ ...current, [provider]: undefined }));
       await refresh();
     } catch {
@@ -548,6 +556,7 @@ export function ModelSettings({
                       type="button"
                       className="model-link"
                       onClick={() => {
+                        setKeyNotice(null);
                         setKeyEditing(provider);
                         setKeyInput("");
                         setKeyError(null);
@@ -558,6 +567,9 @@ export function ModelSettings({
                   )}
                 </span>
               </div>
+              {keyNotice === provider && keyEditing !== provider && (
+                <span className="config-reason ok" role="status">已保存，key 有效</span>
+              )}
               {keyEditing === provider && (
                 <form
                   className="model-key-form"
