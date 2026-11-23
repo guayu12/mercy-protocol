@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from core import gemini_files, media_store, session_store
+from core import gemini_files, media_store, session_store, usage_stats
 from core import log_bus
 from core.agent import experts
 from core.gemini_file_cache import cleanup_gemini_files
@@ -27,6 +27,12 @@ def set_gemini_key(monkeypatch):
     monkeypatch.setenv("MODEL_VIDEO", "")
     monkeypatch.setenv("VIDEO_MAX_MINUTES", "30")
     monkeypatch.setenv("GEMINI_FILE_RETENTION_SECONDS", "900")
+
+
+@pytest.fixture(autouse=True)
+def reset_usage_stats(monkeypatch):
+    monkeypatch.setattr(usage_stats, "_since", time.time())
+    monkeypatch.setattr(usage_stats, "_model_stats", {})
 
 
 async def _upload_client(handler):
@@ -385,6 +391,29 @@ async def _close_stores():
     session_store._store_lock = None
 
 
+async def _register_video(tmp_path: Path, thread_id: str):
+    path = tmp_path / f"{thread_id}.mp4"
+    path.write_bytes(b"video")
+    return await media_store.register_media(
+        thread_id,
+        "video",
+        "upload",
+        "video/mp4",
+        "video",
+        path=str(path),
+    )
+
+
+def _tool_config(thread_id: str, turn_id: str):
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "turn_query": "看媒体",
+        }
+    }
+
+
 async def _cache_record(media_id: str, name: str, uploaded_at: float, delete_after: float):
     await media_store.put_gemini_file(
         media_id, name, FILE_URI, "video/mp4", 60.0, uploaded_at, delete_after
@@ -577,6 +606,207 @@ async def test_video_tool_reuses_cached_file_and_extends_idle_expiry(
     finally:
         log_bus.unsubscribe(queue)
         experts.clear_turn_budget("video-cache-turn")
+        await _close_stores()
+
+
+@pytest.mark.asyncio
+async def test_missing_video_does_not_record_usage(tmp_path):
+    await _init_stores(tmp_path / "session.db")
+    turn_id = "missing-video-turn"
+    try:
+        result = await experts.analyze_video.ainvoke(
+            {"media_id": "missing", "question": "描述"},
+            config=_tool_config("missing-video-thread", turn_id),
+        )
+
+        assert result == "找不到这个视频：missing"
+        assert usage_stats.snapshot()["models"] == []
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await _close_stores()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_video_budget_does_not_record_usage(tmp_path, monkeypatch):
+    await _init_stores(tmp_path / "session.db")
+    record = await _register_video(tmp_path, "video-budget-thread")
+    turn_id = "video-budget-exhausted-turn"
+    config = _tool_config("video-budget-thread", turn_id)
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:gemini-test")
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("an exhausted budget must not call Gemini")
+
+    monkeypatch.setattr(gemini_files, "upload_file", forbidden)
+    monkeypatch.setattr(gemini_files, "ask", forbidden)
+    try:
+        for _ in range(experts.MAX_VIDEO_ANALYSES):
+            async with experts._video_analysis_budget(config) as allowed:
+                assert allowed
+
+        result = await experts.analyze_video.ainvoke(
+            {"media_id": record["media_id"], "question": "描述"},
+            config=config,
+        )
+
+        assert result == experts.VIDEO_ANALYSIS_LIMIT_TEXT
+        assert usage_stats.snapshot()["models"] == []
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await _close_stores()
+
+
+@pytest.mark.asyncio
+async def test_document_start_page_over_limit_does_not_record_usage(
+    tmp_path, monkeypatch
+):
+    await _init_stores(tmp_path / "session.db")
+    path = tmp_path / "notes.pdf"
+    path.write_bytes(b"%PDF-test")
+    record = await media_store.register_media(
+        "document-page-limit-thread",
+        "document",
+        "upload",
+        "application/pdf",
+        "notes.pdf",
+        path=str(path),
+    )
+    turn_id = "document-page-limit-turn"
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:gemini-test")
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("an invalid start_page must not call Gemini")
+
+    monkeypatch.setattr(gemini_files, "upload_file", forbidden)
+    monkeypatch.setattr(gemini_files, "ask", forbidden)
+    try:
+        result = await experts.analyze_document.ainvoke(
+            {
+                "media_id": record["media_id"],
+                "question": "总结",
+                "start_page": 1001,
+            },
+            config=_tool_config("document-page-limit-thread", turn_id),
+        )
+
+        assert result == "起始页不能超过 1000（Gemini 单个文档最多 1000 页）。"
+        assert usage_stats.snapshot()["models"] == []
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await _close_stores()
+
+
+@pytest.mark.asyncio
+async def test_video_duration_refusal_does_not_record_usage(tmp_path, monkeypatch):
+    await _init_stores(tmp_path / "session.db")
+    record = await _register_video(tmp_path, "long-video-thread")
+    turn_id = "long-video-refusal-turn"
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:gemini-test")
+    monkeypatch.setenv("VIDEO_MAX_MINUTES", "1")
+
+    async def upload_file(source, mime, display_name, *, poll_timeout=None):
+        return gemini_files.GeminiFile(FILE_NAME, FILE_URI, mime, 61.0)
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("an overlong video must not make an analysis request")
+
+    async def delete_file(name):
+        return True
+
+    monkeypatch.setattr(gemini_files, "upload_file", upload_file)
+    monkeypatch.setattr(gemini_files, "ask", forbidden)
+    monkeypatch.setattr(gemini_files, "delete_file", delete_file)
+    try:
+        result = await experts.analyze_video.ainvoke(
+            {"media_id": record["media_id"], "question": "描述"},
+            config=_tool_config("long-video-thread", turn_id),
+        )
+
+        assert result == "视频时长超过 1 分钟限制，暂时不能分析。"
+        assert usage_stats.snapshot()["models"] == []
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await _close_stores()
+
+
+@pytest.mark.asyncio
+async def test_video_answer_records_success_usage(tmp_path, monkeypatch):
+    await _init_stores(tmp_path / "session.db")
+    record = await _register_video(tmp_path, "video-usage-success")
+    turn_id = "video-usage-success-turn"
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:gemini-test")
+
+    async def upload_file(source, mime, display_name, *, poll_timeout=None):
+        return gemini_files.GeminiFile(FILE_NAME, FILE_URI, mime, 60.0)
+
+    async def ask(file, prompt, model):
+        return gemini_files.GeminiAnswer(
+            "视频答案",
+            "completed",
+            {
+                "total_input_tokens": 40,
+                "total_output_tokens": 12,
+                "total_thought_tokens": 3,
+                "input_tokens_by_modality": [
+                    {"modality": "video", "tokens": 5460}
+                ],
+            },
+        )
+
+    monkeypatch.setattr(gemini_files, "upload_file", upload_file)
+    monkeypatch.setattr(gemini_files, "ask", ask)
+    try:
+        result = await experts.analyze_video.ainvoke(
+            {"media_id": record["media_id"], "question": "描述"},
+            config=_tool_config("video-usage-success", turn_id),
+        )
+
+        rows = usage_stats.snapshot()["models"]
+        assert result.startswith("视频分析结果")
+        assert len(rows) == 1
+        assert rows[0]["role"] == "video"
+        assert rows[0]["provider"] == "gemini"
+        assert rows[0]["model"] == "gemini-test"
+        assert rows[0]["calls"] == 1
+        assert rows[0]["failed_calls"] == 0
+        assert rows[0]["cancelled_calls"] == 0
+        assert rows[0]["input_tokens"] == 40
+        assert rows[0]["output_tokens"] == 15
+        assert rows[0]["reasoning_tokens"] == 3
+    finally:
+        experts.clear_turn_budget(turn_id)
+        await _close_stores()
+
+
+@pytest.mark.asyncio
+async def test_video_ask_error_records_failed_usage(tmp_path, monkeypatch):
+    await _init_stores(tmp_path / "session.db")
+    record = await _register_video(tmp_path, "video-usage-failed")
+    turn_id = "video-usage-failed-turn"
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:gemini-test")
+
+    async def upload_file(source, mime, display_name, *, poll_timeout=None):
+        return gemini_files.GeminiFile(FILE_NAME, FILE_URI, mime, 60.0)
+
+    async def ask(file, prompt, model):
+        raise gemini_files.GeminiError()
+
+    monkeypatch.setattr(gemini_files, "upload_file", upload_file)
+    monkeypatch.setattr(gemini_files, "ask", ask)
+    try:
+        result = await experts.analyze_video.ainvoke(
+            {"media_id": record["media_id"], "question": "描述"},
+            config=_tool_config("video-usage-failed", turn_id),
+        )
+
+        rows = usage_stats.snapshot()["models"]
+        assert "analyze_video 失败" in result
+        assert len(rows) == 1
+        assert rows[0]["calls"] == 0
+        assert rows[0]["failed_calls"] == 1
+        assert rows[0]["cancelled_calls"] == 0
+    finally:
+        experts.clear_turn_budget(turn_id)
         await _close_stores()
 
 
@@ -1307,6 +1537,10 @@ async def test_retention_zero_deletes_after_ask_error_and_cancellation(
             await task
         assert deleted == [FILE_NAME, FILE_NAME]
         assert await media_store.get_gemini_file(record["media_id"]) is None
+        rows = usage_stats.snapshot()["models"]
+        assert len(rows) == 1
+        assert rows[0]["failed_calls"] == 1
+        assert rows[0]["cancelled_calls"] == 1
     finally:
         experts.clear_turn_budget("ask-error-turn")
         experts.clear_turn_budget("cancel-turn")

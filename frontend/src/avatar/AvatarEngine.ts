@@ -13,8 +13,8 @@ export { LIGHTING_PRESETS, type LightingPreset } from "./look";
 export type AvatarState = "idle" | "listening" | "thinking" | "speaking";
 export const AVATAR_STATES: AvatarState[] = ["idle", "listening", "thinking", "speaking"];
 
-export type Quality = "high" | "balanced";
-export const QUALITIES: Quality[] = ["high", "balanced"];
+export type Quality = "low" | "balanced" | "high";
+export const QUALITIES: Quality[] = ["low", "balanced", "high"];
 
 /** face: thumbnail head shot; bust: head + shoulders; upper: waist up; auto picks from container size. */
 export type Framing = "auto" | "face" | "bust" | "upper";
@@ -211,6 +211,7 @@ export class AvatarEngine {
     }
 
     /**
+     * low: direct render, 1x pixel ratio, 30 fps always.
      * balanced (default, tablet-friendly): direct render, <=1.5x pixel ratio, 30 fps unless speaking.
      * high: HalfFloat MSAA target + bloom, <=2x pixel ratio, 60 fps always.
      */
@@ -228,7 +229,7 @@ export class AvatarEngine {
             this.composer = composer;
             this.updateBloom();
         } else {
-            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+            this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality === "low" ? 1 : 1.5));
         }
         this.resize();
     }
@@ -345,7 +346,8 @@ export class AvatarEngine {
     };
 
     private tick = (now: number) => {
-        const target = this.quality === "high" || this.state === "speaking" || this.clock ? 60 : 30;
+        const target = this.quality === "high"
+            || (this.quality === "balanced" && (this.state === "speaking" || this.clock)) ? 60 : 30;
         this.stats.targetFps = target;
         // rAF runs at display rate; skip frames to hit the target (small slack for vsync jitter).
         if (target < 60 && now - this.lastFrame < 1000 / target - 4) return;

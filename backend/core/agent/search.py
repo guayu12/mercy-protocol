@@ -8,12 +8,19 @@ from langchain_tavily import TavilySearch
 from core import media_store
 
 
-web_search = TavilySearch(
-    max_results=3,
-    include_images=True,
-    include_image_descriptions=True,
-    description="Search the web for current events, facts, or any information you do not know.",
-)
+web_search = None
+
+
+def _web_search():
+    global web_search
+    if web_search is None:
+        web_search = TavilySearch(
+            max_results=3,
+            include_images=True,
+            include_image_descriptions=True,
+            description="Search the web for current events, facts, or any information you do not know.",
+        )
+    return web_search
 
 
 def _without_urls(value: str) -> str:
@@ -22,7 +29,7 @@ def _without_urls(value: str) -> str:
 
 async def tavily_raw(query: str, config: RunnableConfig) -> dict:
     try:
-        result = await web_search.ainvoke({"query": query}, config=config)
+        result = await _web_search().ainvoke({"query": query}, config=config)
     except Exception as error:
         return {"error": str(error)}
     if isinstance(result, dict):

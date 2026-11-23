@@ -1,22 +1,20 @@
 import {
-  Activity,
   ArrowDown,
+  ChevronDown,
   FileText,
   Image as ImageIcon,
   Mic,
-  PanelLeftOpen,
   Send,
-  Wifi,
-  WifiOff,
+  Settings,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import ReactMarkdown, {
   type Components,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AnimatePresence } from "framer-motion";
-import { VRMAvatar, type Speech } from "./VRMAvatar";
+import { VRMAvatar, type Quality, type Speech } from "./VRMAvatar";
 import { Stage, type MediaStageData } from "./Stage";
 import { API_BASE } from "./api";
 import {
@@ -28,8 +26,13 @@ import {
 } from "./reportMarkdown.mjs";
 import "./App.css";
 
+const QUALITY_OPTIONS: { value: Quality; label: string }[] = [
+  { value: "low", label: "低" },
+  { value: "balanced", label: "中" },
+  { value: "high", label: "高" },
+];
+
 const ASSISTANT_NAME = "Aura";
-const VOICE_LABEL = "晓伊";
 type DialogueMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -72,6 +75,51 @@ type LogEntry = {
   level: string;
   category: string;
   message: string;
+};
+
+type CurrentConfig = {
+  profile: string;
+  keys: Record<
+    "openai" | "gemini" | "deepseek" | "tavily",
+    { configured: boolean; hint: string | null }
+  >;
+  roles: Array<{
+    role: string;
+    label: string;
+    provider: string | null;
+    model: string | null;
+    effort: string | null;
+    available: boolean;
+    reason: string | null;
+  }>;
+  services: Array<{
+    name: string;
+    label: string;
+    available: boolean;
+    reason?: string | null;
+    detail?: string;
+  }>;
+};
+
+type UsageSnapshot = {
+  since: number;
+  models: Array<{
+    role: string;
+    provider: string;
+    model: string;
+    calls: number;
+    failed_calls: number;
+    cancelled_calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    reasoning_tokens: number;
+    avg_latency_ms: number;
+    last_latency_ms: number;
+    avg_ttft_ms: number | null;
+    last_ttft_ms: number | null;
+    avg_tokens_per_sec: number | null;
+    last_tokens_per_sec: number | null;
+  }>;
 };
 
 type SpeechSentence = {
@@ -139,6 +187,37 @@ function timeLabel(timestamp?: number) {
   const date = new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
   return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
+
+function compactTokenCount(value: number) {
+  if (value < 1000) return String(value);
+  const precision = value >= 100_000 ? 0 : 1;
+  return `${(value / 1000).toFixed(precision).replace(/\.0$/, "")}k`;
+}
+
+function formatMilliseconds(value: number | null) {
+  return value === null ? "—" : `${Math.round(value)} ms`;
+}
+
+function formatTokenRate(value: number | null) {
+  return value === null ? "—" : `${value.toFixed(1)} tok/s`;
+}
+
+const usageRoleLabels: Record<string, string> = {
+  conversation: "对话",
+  report: "写报告",
+  research: "调查",
+  research_max: "深度调查",
+  vision: "看图",
+  video: "视频",
+  document: "文档",
+};
+
+const providerLabels: Record<string, string> = {
+  openai: "OpenAI",
+  gemini: "Gemini",
+  deepseek: "DeepSeek",
+  tavily: "Tavily",
+};
 
 function stripMarkdown(value: string) {
   return value
@@ -245,6 +324,15 @@ export function App() {
   const [maxTierAvailable, setMaxTierAvailable] = useState(false);
   const [deepMode, setDeepMode] = useState(false);
   const [leftExpanded, setLeftExpanded] = useState(false);
+  const [avatarQuality, setAvatarQuality] = useState<Quality>(() => {
+    const saved = localStorage.getItem("mercy.avatarQuality");
+    return saved === "low" || saved === "high" ? saved : "balanced";
+  });
+  const [currentConfig, setCurrentConfig] = useState<CurrentConfig | null>(null);
+  const [configUnavailable, setConfigUnavailable] = useState(false);
+  const [usageSnapshot, setUsageSnapshot] = useState<UsageSnapshot | null>(null);
+  const [statsUnavailable, setStatsUnavailable] = useState(false);
+  const [logsExpanded, setLogsExpanded] = useState(false);
   const [clock, setClock] = useState("");
   const [reports, setReports] = useState<Report[]>([]);
   const [pendingReportHighlight, setPendingReportHighlight] = useState<{
@@ -261,6 +349,8 @@ export function App() {
   const reportListRef = useRef<HTMLDivElement>(null);
   const dialogueListRef = useRef<HTMLDivElement>(null);
   const logFeedRef = useRef<HTMLDivElement>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement>(null);
+  const drawerOpenerRef = useRef<HTMLButtonElement | null>(null);
   const subtitleTextRef = useRef<HTMLDivElement>(null);
   const reportAtBottomRef = useRef(true);
   const shouldFollowReportRef = useRef(false);
@@ -645,6 +735,76 @@ export function App() {
     const feed = logFeedRef.current;
     if (feed) feed.scrollTop = feed.scrollHeight;
   }, [logs]);
+
+  useLayoutEffect(() => {
+    if (leftExpanded) {
+      drawerCloseRef.current?.focus();
+      return;
+    }
+    if (drawerOpenerRef.current?.isConnected) drawerOpenerRef.current.focus();
+    drawerOpenerRef.current = null;
+  }, [leftExpanded]);
+
+  useEffect(() => {
+    if (!leftExpanded) return;
+    let active = true;
+    const configController = new AbortController();
+    let statsController: AbortController | null = null;
+    setConfigUnavailable(false);
+    setStatsUnavailable(false);
+
+    void fetch(`${API_BASE}/api/config`, { signal: configController.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error("Config request failed");
+        return response.json() as Promise<CurrentConfig>;
+      })
+      .then((config) => {
+        if (active) setCurrentConfig(config);
+      })
+      .catch((error: unknown) => {
+        if (active && !isAbortError(error)) setConfigUnavailable(true);
+      });
+
+    const loadStats = async () => {
+      statsController?.abort();
+      const controller = new AbortController();
+      statsController = controller;
+      try {
+        const response = await fetch(`${API_BASE}/api/stats`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Stats request failed");
+        const snapshot = (await response.json()) as UsageSnapshot;
+        if (active) {
+          setUsageSnapshot(snapshot);
+          setStatsUnavailable(false);
+        }
+      } catch (error) {
+        if (active && !isAbortError(error)) setStatsUnavailable(true);
+      }
+    };
+
+    void loadStats();
+    const timer = window.setInterval(() => void loadStats(), 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      configController.abort();
+      statsController?.abort();
+    };
+  }, [leftExpanded]);
+
+  useEffect(() => {
+    if (!leftExpanded) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setLeftExpanded(false);
+      setLogsExpanded(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [leftExpanded]);
 
   useLayoutEffect(() => {
     const list = reportListRef.current;
@@ -1158,12 +1318,18 @@ export function App() {
     : reportNeedsLayout
       ? "report"
       : "conversation";
-  const layoutLabel = {
-    conversation: "对话",
-    report: "报告",
-    evidence: "展示台",
-    focus_evidence: "聚焦看图",
-  }[layout];
+  const closeSettings = () => {
+    setLeftExpanded(false);
+    setLogsExpanded(false);
+  };
+  const toggleSettings = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (leftExpanded) {
+      closeSettings();
+      return;
+    }
+    drawerOpenerRef.current = event.currentTarget;
+    setLeftExpanded(true);
+  };
 
   return (
     <div id="app" data-layout={layout} data-left-expanded={leftExpanded} data-state={status.state}>
@@ -1173,12 +1339,23 @@ export function App() {
             <div className="brand-mark">M</div>
             <span>Mercy</span>
           </div>
-          <div className="topbar-divider" />
-          <button className="sys-pill" type="button" onClick={() => setLeftExpanded((value) => !value)}>
-            <span className={`dot-live ${backendConnected ? "" : "offline"}`} />
-            <span>后端 {backendConnected ? "在线" : "离线"}</span>
+          {!backendConnected && (
+            <button className="sys-pill" type="button" onClick={toggleSettings}>
+              <span className="dot-live offline" />
+              <span>后端离线</span>
+            </button>
+          )}
+          <button
+            className="settings-trigger"
+            type="button"
+            aria-label="设置与状态"
+            aria-controls="left-rail"
+            aria-expanded={leftExpanded}
+            title="设置与状态"
+            onClick={toggleSettings}
+          >
+            <Settings size={16} />
           </button>
-          <span className="session-pill">#{sessionId.slice(-8).toUpperCase()}</span>
         </div>
         <div className="topbar-right">
           {maxTierAvailable && (
@@ -1192,99 +1369,231 @@ export function App() {
               <span>{deepMode ? "深度模式 · 开" : "深度模式"}</span>
             </button>
           )}
-          <div className="layout-pill">
-            布局：<strong>{layoutLabel}</strong>
-          </div>
           <span className="clock-text">{clock}</span>
         </div>
       </header>
 
       <button
         id="left-drawer-backdrop"
-        aria-label="关闭系统状态抽屉"
+        aria-label="关闭设置与状态"
         type="button"
-        onClick={() => setLeftExpanded(false)}
+        onClick={closeSettings}
       />
 
       <main id="workspace">
-        <aside id="left-rail" aria-label="系统状态与实时事件">
-          <div className="left-full">
-            <section className="rail-section">
-              <div className="rail-head">
-                <span className="rail-title">服务连接</span>
-                <span className={`rail-badge ${backendConnected ? "ok" : "err"}`}>
-                  {backendConnected ? "已连接" : "离线"}
-                </span>
+        <aside id="left-rail" aria-label="设置与状态">
+          <div className="left-full settings-drawer" role="dialog" aria-labelledby="settings-drawer-title">
+            <div className="settings-drawer-head">
+              <div>
+                <h2 id="settings-drawer-title">设置与状态</h2>
               </div>
-              <div className="net-row">
-                <span className="net-left">
-                  {backendConnected ? <Wifi size={14} /> : <WifiOff size={14} />}
-                  后端事件流
-                </span>
-                <span className={`service-state ${backendConnected ? "online" : "offline"}`}>
-                  {backendConnected ? "在线" : "离线"}
-                </span>
-              </div>
-              <div className="net-row">
-                <span className="net-left">
-                  <Activity size={14} />
-                  口语合成
-                </span>
-                <span className="service-state">{VOICE_LABEL} · 按需</span>
-              </div>
-            </section>
+              <button
+                className="settings-close"
+                type="button"
+                aria-label="关闭"
+                onClick={closeSettings}
+                ref={drawerCloseRef}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="settings-drawer-body">
+              <section className="rail-section settings-display">
+                <div className="rail-head">
+                  <span className="rail-title">画质</span>
+                </div>
+                <div className="segmented" role="radiogroup" aria-label="画质">
+                  {QUALITY_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={avatarQuality === option.value}
+                      className={avatarQuality === option.value ? "selected" : ""}
+                      onClick={() => {
+                        setAvatarQuality(option.value);
+                        localStorage.setItem("mercy.avatarQuality", option.value);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
 
-            <section className="rail-section grow">
-              <div className="rail-head">
-                <span className="rail-title">后端事件流</span>
-                <span className="rail-badge">SSE</span>
-              </div>
-              <div className="log-feed" ref={logFeedRef}>
-                {logs.length === 0 ? (
-                  <div className="log-empty">等待后端事件…</div>
-                ) : (
-                  logs.map((entry, index) => (
-                    <div className="log-item" key={`${entry.ts}-${index}`}>
-                      <span className={`log-dot ${entry.level === "error" ? "err" : entry.level === "warning" ? "accent" : "ok"}`} />
-                      <span className="log-time">{timeLabel(entry.ts)}</span>
-                      <span className="log-content">
-                        <strong>{entry.category}</strong>
-                        <span>{entry.message}</span>
-                      </span>
+              <section className="rail-section settings-config">
+                <div className="rail-head">
+                  <span className="rail-title">当前配置</span>
+                  {currentConfig && (
+                    <span className="settings-profile">{currentConfig.profile}</span>
+                  )}
+                </div>
+                {currentConfig ? (
+                  <>
+                    <div className="config-role-list">
+                      {currentConfig.roles.map((role) => (
+                        <div
+                          className={`config-role-row ${role.available ? "" : "unavailable"}`}
+                          key={role.role}
+                        >
+                          <span
+                            className={`config-status-dot ${role.available ? "online" : "offline"}`}
+                            aria-label={role.available ? "可用" : "不可用"}
+                          />
+                          <span className="config-role-label">{role.label}</span>
+                          <span className="config-role-model" title={role.model ?? "未配置"}>
+                            {role.model ?? "未配置"}
+                          </span>
+                          {role.effort && <span className="config-effort">{role.effort}</span>}
+                          {!role.available && role.reason && (
+                            <span className="config-reason">{role.reason}</span>
+                          )}
+                        </div>
+                      ))}
                     </div>
-                  ))
+                    <div className="config-services">
+                      <span className="config-services-title">API Key</span>
+                      {Object.entries(currentConfig.keys).map(([provider, key]) => (
+                        <div className="config-service-row" key={provider}>
+                          <span className="config-service-name">
+                            <span
+                              className={`config-status-dot ${key.configured ? "online" : "offline"}`}
+                            />
+                            {providerLabels[provider] ?? provider}
+                          </span>
+                          <span className={`config-service-detail ${key.configured ? "" : "unavailable"}`}>
+                            {key.configured ? key.hint ?? "已配置" : "未配置"}
+                          </span>
+                        </div>
+                      ))}
+                      <span className="config-services-title">服务</span>
+                      {currentConfig.services.map((service) => (
+                        <div className="config-service-row" key={service.name}>
+                          <span className="config-service-name">
+                            <span
+                              className={`config-status-dot ${service.available ? "online" : "offline"}`}
+                            />
+                            {service.label}
+                          </span>
+                          <span className={`config-service-detail ${service.available ? "" : "unavailable"}`}>
+                            {service.available ? service.detail ?? "可用" : service.reason}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="settings-empty">
+                    {configUnavailable ? "暂时无法读取配置" : "读取配置中…"}
+                  </div>
                 )}
-              </div>
-            </section>
+              </section>
 
-            <section className="rail-section rail-foot">
-              <div className="rail-head">
-                <span className="rail-title">当前会话</span>
-                <span className="rail-badge">{reports.length} 份报告</span>
-              </div>
-              <div className="rail-session-id">{sessionId}</div>
-            </section>
-          </div>
-          <div className="left-slim">
-            <button
-              className="slim-btn"
-              title="展开系统状态与日志"
-              aria-label="展开系统状态与日志"
-              type="button"
-              onClick={() => setLeftExpanded(true)}
-            >
-              <PanelLeftOpen size={18} />
-            </button>
-            <span className={`slim-dot ${backendConnected ? "ok" : "err"}`} />
-            <button
-              className="slim-btn"
-              title="查看报告"
-              aria-label="查看报告"
-              type="button"
-              onClick={() => reportListRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
-            >
-              <FileText size={17} />
-            </button>
+              <section className="rail-section settings-usage">
+                <div className="rail-head">
+                  <span className="rail-title">用量统计</span>
+                  <span className="rail-badge">
+                    {usageSnapshot
+                      ? `自启动 ${timeLabel(usageSnapshot.since)} 起`
+                      : statsUnavailable
+                        ? "暂不可用"
+                        : "读取中…"}
+                  </span>
+                </div>
+                <p className="usage-caption">
+                  首 token 延迟包含模型思考时间；embedding 和语音合成不计入
+                </p>
+                {!usageSnapshot ? (
+                  <div className="settings-empty">
+                    {statsUnavailable ? "暂时无法读取统计" : "读取统计中…"}
+                  </div>
+                ) : usageSnapshot.models.length === 0 ? (
+                  <div className="usage-empty">还没有模型调用</div>
+                ) : (
+                  <div className="usage-model-list">
+                    {usageSnapshot.models.map((model) => (
+                      <article className="usage-model-card" key={`${model.role}:${model.provider}:${model.model}`}>
+                        <h3>
+                          {usageRoleLabels[model.role] ?? model.role} · {model.provider} · {model.model}
+                        </h3>
+                        <div className="usage-metrics">
+                          <div className="usage-metric">
+                            <span>调用</span>
+                            <strong>
+                              {model.calls} 次
+                              {(model.failed_calls > 0 || model.cancelled_calls > 0) && (
+                                <small>（失败 {model.failed_calls} / 取消 {model.cancelled_calls}）</small>
+                              )}
+                            </strong>
+                          </div>
+                          <div className="usage-metric">
+                            <span>输入 / 输出</span>
+                            <strong>
+                              {compactTokenCount(model.input_tokens)} / {compactTokenCount(model.output_tokens)}
+                            </strong>
+                          </div>
+                          <div className="usage-metric">
+                            <span>首 token</span>
+                            <strong>
+                              平均 {formatMilliseconds(model.avg_ttft_ms)}
+                              <small>（最近 {formatMilliseconds(model.last_ttft_ms)}）</small>
+                            </strong>
+                          </div>
+                          <div className="usage-metric">
+                            <span>生成</span>
+                            <strong>
+                              平均 {formatTokenRate(model.avg_tokens_per_sec)}
+                              <small>（最近 {formatTokenRate(model.last_tokens_per_sec)}）</small>
+                            </strong>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="rail-section settings-logs">
+                <button
+                  className="settings-log-toggle"
+                  type="button"
+                  aria-expanded={logsExpanded}
+                  aria-controls="settings-log-feed"
+                  onClick={() => setLogsExpanded((expanded) => !expanded)}
+                >
+                  <span>后端日志（{logs.length}）</span>
+                  <ChevronDown
+                    size={15}
+                    className={logsExpanded ? "expanded" : ""}
+                    aria-hidden="true"
+                  />
+                </button>
+                {logsExpanded && (
+                  <div className="log-feed settings-log-feed" id="settings-log-feed" ref={logFeedRef}>
+                    {logs.length === 0 ? (
+                      <div className="log-empty">等待后端事件…</div>
+                    ) : (
+                      logs.map((entry, index) => (
+                        <div className="log-item" key={`${entry.ts}-${index}`}>
+                          <span className={`log-dot ${entry.level === "error" ? "err" : entry.level === "warning" ? "accent" : "ok"}`} />
+                          <span className="log-time">{timeLabel(entry.ts)}</span>
+                          <span className="log-content">
+                            <strong>{entry.category}</strong>
+                            <span>{entry.message}</span>
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </section>
+            </div>
+            <footer className="settings-drawer-footer">
+              <span className="settings-session-id" title={sessionId}>
+                会话 ID <code>{sessionId}</code>
+              </span>
+              <span>{reports.length} 份报告</span>
+            </footer>
           </div>
         </aside>
 
@@ -1311,9 +1620,10 @@ export function App() {
               <div className="panel-header">
                 <div className="panel-title-wrap">
                   <span className="panel-title">报告文档</span>
-                  <span className="panel-subtitle">结构化资料在这里持续累积</span>
                 </div>
-                <span className="report-count-pill">{reports.length} 份报告</span>
+                {reports.length > 0 && (
+                  <span className="report-count-pill">{reports.length} 份报告</span>
+                )}
               </div>
 
               <div id="report-list" ref={reportListRef} onScroll={handleReportScroll}>
@@ -1324,7 +1634,6 @@ export function App() {
                         <FileText size={22} strokeWidth={1.4} />
                       </div>
                       <h2>报告会出现在这里</h2>
-                      <p>日常对话会在右侧以口语呈现；需要表格、代码或详细说明时，Aura 会整理成报告。</p>
                     </div>
                   ) : (
                     reports.map((report) => (
@@ -1455,31 +1764,33 @@ export function App() {
                 onLoaded={() => setIsAvatarLoaded(true)}
                 speech={speech}
                 onAudioEnd={handleAudioEnd}
+                quality={avatarQuality}
               />
             </div>
             <div className="avatar-vignette" />
             <div className="avatar-top-bar">
               <div className="avatar-name-pill">
                 <span>{ASSISTANT_NAME}</span>
-                <span className="avatar-voice-tag">· {VOICE_LABEL}</span>
               </div>
-              <div className="status-pill">
-                <span className="status-dot" />
-                <span>{status.label}</span>
-              </div>
+              {status.state !== "idle" && (
+                <div className="status-pill">
+                  {status.state === "speaking" ? (
+                    <span className="voice-bars active" aria-hidden="true">
+                      <i />
+                      <i />
+                      <i />
+                    </span>
+                  ) : (
+                    <span className="status-dot" />
+                  )}
+                  <span>{status.label}</span>
+                </div>
+              )}
             </div>
             {!isAvatarLoaded && <span className="avatar-loading">角色加载中</span>}
             <div id="subtitle-bar" aria-live="polite">
-              <div className="subtitle-top">
-                <span>实时字幕</span>
-                <span className={`voice-bars ${hasQueuedSpeech ? "active" : ""}`} aria-hidden="true">
-                  <i />
-                  <i />
-                  <i />
-                </span>
-              </div>
               <div id="subtitle-text" ref={subtitleTextRef}>
-                {subtitle || "等待她的第一句话…"}
+                {subtitle}
               </div>
             </div>
           </div>
@@ -1487,10 +1798,8 @@ export function App() {
           <div id="dialogue-panel" className="surface-card">
             <div className="panel-header">
               <div className="panel-title-wrap">
-                <span className="panel-title">口语对话</span>
-                <span className="panel-subtitle">字幕与对话记录</span>
+                <span className="panel-title">对话</span>
               </div>
-              <span className="dialogue-live"><span />实时</span>
             </div>
             <div id="dialogue-list" ref={dialogueListRef}>
               {messages.length === 0 ? (

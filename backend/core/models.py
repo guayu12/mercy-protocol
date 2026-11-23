@@ -6,6 +6,8 @@ from typing import Literal
 import openai
 from langchain_openai import ChatOpenAI
 
+from core.usage_stats import UsageCallback
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -249,6 +251,13 @@ def get_llm(
         "stream_usage": True,
         "max_retries": 1,
         "timeout": ROLE_TIMEOUTS[role],
+        "callbacks": [
+            UsageCallback(
+                "research_max" if role == "research" and tier == "max" else role,
+                spec.provider,
+                spec.model,
+            )
+        ],
     }
     if spec.effort:
         options["reasoning"] = {"effort": spec.effort}

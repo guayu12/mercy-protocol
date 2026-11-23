@@ -24,9 +24,10 @@ from core.agent.graph import (
     process_query,
     tools as graph_tools,
 )
-from core import media_store, session_store, speech_queue
+from core import media_store, session_store, speech_queue, usage_stats
 from core.gemini_file_cache import cleanup_gemini_files, gemini_file_cleanup_loop
 from core.models import role_available
+from core.runtime_config import current_config
 from core.safe_fetch import DownloadTooLarge, SafeFetchError, safe_media_fetcher
 from core.speech import synthesize
 from core.speakable import to_speakable
@@ -150,14 +151,19 @@ async def root():
 
 @app.get("/api/capabilities")
 async def capabilities():
-    max_tier = (
-        bool(os.environ.get("MODEL_RESEARCH_MAX", "").strip())
-        and role_available("research", "max")
-        and any(item.name == "investigate" for item in graph_tools)
-    )
-    video = any(item.name == "analyze_video" for item in graph_tools)
-    document = any(item.name == "analyze_document" for item in graph_tools)
-    return {"max_tier": max_tier, "video": video, "document": document}
+    return current_config({item.name for item in graph_tools})["capabilities"]
+
+
+@app.get("/api/stats")
+async def stats_endpoint():
+    return usage_stats.snapshot()
+
+
+@app.get("/api/config")
+async def config_endpoint():
+    config = current_config({item.name for item in graph_tools})
+    config.pop("capabilities")
+    return config
 
 
 # ─── SSE Log Stream ──────────────────────────────────────────────────
