@@ -46,6 +46,8 @@ from core.runtime import (
     RuntimeSnapshot,
     current_snapshot,
     load_snapshot,
+    mark_memory_unavailable,
+    memory_unavailable_reason,
     runtime_from,
 )
 from core.agent.experts import (
@@ -74,8 +76,10 @@ _memory_manager_lock = threading.Lock()
 _conversation_models: dict[tuple, object] = {}
 
 
-def get_memory_manager() -> MemoryManager:
+def get_memory_manager() -> MemoryManager | None:
     global _memory_manager
+    if memory_unavailable_reason() is not None:
+        return None
     if _memory_manager is None:
         with _memory_manager_lock:
             if _memory_manager is None:
@@ -85,10 +89,36 @@ def get_memory_manager() -> MemoryManager:
     return _memory_manager
 
 
+def _mark_memory_unavailable(error: Exception) -> None:
+    global _memory_manager
+    with _memory_manager_lock:
+        _memory_manager = None
+    mark_memory_unavailable()
+    log_bus.emit(
+        "warn", "MEMORY", f"Long-term memory unavailable ({type(error).__name__})"
+    )
+
+
+def _initialize_memory() -> bool:
+    try:
+        manager = get_memory_manager()
+        return manager.initialize() if manager is not None else False
+    except Exception as error:
+        _mark_memory_unavailable(error)
+        return False
+
+
 async def _memory_context(runtime: RuntimeSnapshot, query: str) -> str:
     if not runtime.available("memory"):
         return ""
-    return await asyncio.to_thread(get_memory_manager().format_context, query)
+    try:
+        manager = get_memory_manager()
+        if manager is None:
+            return ""
+        return await asyncio.to_thread(manager.format_context, query)
+    except Exception as error:
+        _mark_memory_unavailable(error)
+        return ""
 
 # 2. Define the State
 class AgentState(TypedDict):
@@ -114,7 +144,14 @@ def get_current_time() -> str:
 async def save_memory(fact: str) -> str:
     """Save an important fact about the user or instructions to long-term memory. USE EXACTLY when user says 'remember' or explicitly tells you a preference."""
     log_bus.emit("tool", "TOOL", f"save_memory: {fact[:80]}")
-    saved = await asyncio.to_thread(get_memory_manager().add_memory, fact)
+    try:
+        manager = get_memory_manager()
+        if manager is None:
+            return "长期记忆当前不可用。"
+        saved = await asyncio.to_thread(manager.add_memory, fact)
+    except Exception as error:
+        _mark_memory_unavailable(error)
+        return "长期记忆当前不可用。"
     if not saved:
         log_bus.emit("tool", "TOOL", "save_memory skipped — near-duplicate already stored")
         return f"Already in permanent memory (duplicate skipped): {fact}"
@@ -787,6 +824,8 @@ async def init_graph():
     global app_graph, _conn
     if app_graph is not None:
         return app_graph
+    if current_snapshot().available("memory"):
+        await asyncio.to_thread(_initialize_memory)
     _conn = await aiosqlite.connect(os.path.join(BACKEND_DIR, "aura_checkpoints.db"))
     checkpointer = AsyncSqliteSaver(_conn)
     await checkpointer.setup()

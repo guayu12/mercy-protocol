@@ -86,6 +86,8 @@ class RuntimeSnapshot:
         return self.roles.get(role)
 
     def available(self, role: str, tier: str = "normal") -> bool:
+        if role.lower() == "memory" and memory_unavailable_reason() is not None:
+            return False
         spec = self.spec(role, tier)
         if spec is None or models.provider_key(spec.provider) is None:
             return False
@@ -117,7 +119,9 @@ class RuntimeSnapshot:
         if tool_name == "tavily_search":
             return None if self.tavily else "未配置 Tavily key"
         if tool_name == "save_memory":
-            return self._role_reason("memory", "长期记忆已关闭")
+            return memory_unavailable_reason() or self._role_reason(
+                "memory", "长期记忆已关闭"
+            )
         if tool_name == "write_report":
             return self._role_reason("report", "当前配置没有写报告模型")
         if tool_name == "investigate":
@@ -180,6 +184,18 @@ _snapshot_version = 0
 _capability_version = 0
 _capability_cache: dict[str, _CapabilityEntry] = {}
 _startup_profile_logged = False
+_memory_unavailable_reason: str | None = None
+
+
+def mark_memory_unavailable() -> None:
+    global _memory_unavailable_reason
+    with _lock:
+        _memory_unavailable_reason = "长期记忆初始化失败"
+
+
+def memory_unavailable_reason() -> str | None:
+    with _lock:
+        return _memory_unavailable_reason
 
 
 def profiles_path() -> Path:
@@ -763,7 +779,7 @@ def runtime_from(config) -> RuntimeSnapshot:
 def reset_runtime_cache() -> None:
     global _snapshot, _last_valid_snapshot, _snapshot_signature
     global _snapshot_capability_version, _snapshot_version, _capability_version
-    global _startup_profile_logged
+    global _startup_profile_logged, _memory_unavailable_reason
     with _lock:
         _snapshot = None
         _last_valid_snapshot = None
@@ -773,6 +789,7 @@ def reset_runtime_cache() -> None:
         _capability_version = 0
         _capability_cache.clear()
         _startup_profile_logged = False
+        _memory_unavailable_reason = None
 
 
 def clear_capability_cache() -> None:

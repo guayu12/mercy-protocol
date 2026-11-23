@@ -1,8 +1,6 @@
 import hashlib
 import os
 import threading
-import chromadb
-from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from datetime import datetime
 from typing import List, Optional
 
@@ -28,14 +26,21 @@ class MemoryManager:
         self.collection = None
         self._key_fingerprint = None
 
+    def initialize(self) -> bool:
+        return self._ensure_collection() is not None
+
     def _ensure_collection(self):
         key = provider_key("openai")
         if key is None:
             return None
         fingerprint = hashlib.sha256(key[0].encode()).hexdigest()[:12]
         if self.chroma_client is None:
+            import chromadb
+
             self.chroma_client = chromadb.PersistentClient(path=self.db_path)
         if self.collection is None or fingerprint != self._key_fingerprint:
+            from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+
             self.embedding_function = OpenAIEmbeddingFunction(
                 api_key=key[0],
                 model_name=os.environ.get(

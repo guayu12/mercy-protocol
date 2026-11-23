@@ -97,7 +97,10 @@ def current_config(runtime: RuntimeSnapshot | None = None) -> dict:
                 else (
                     "长期记忆已关闭"
                     if runtime.spec("memory") is None
-                    else "缺少 OPENAI_API_KEY"
+                    else (
+                        runtime.unavailable_reason("save_memory")
+                        or "缺少 OPENAI_API_KEY"
+                    )
                 )
             ),
         },
