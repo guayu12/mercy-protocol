@@ -33,6 +33,9 @@ _NON_CHAT_MODEL_PARTS = (
 _MODEL_CACHE_TTL = 600
 _model_cache_lock = threading.Lock()
 _model_cache: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
+_provider_key_locks = {
+    provider: asyncio.Lock() for provider in PROVIDER_VARIABLES
+}
 
 
 class ConfigApiError(Exception):
@@ -269,6 +272,11 @@ def _key_status(provider: str) -> dict:
 
 
 async def save_key(request: KeyRequest) -> dict:
+    async with _provider_key_locks[request.provider]:
+        return await _save_key_locked(request)
+
+
+async def _save_key_locked(request: KeyRequest) -> dict:
     key = request.api_key.get_secret_value()
     if not _valid_key(key):
         raise ConfigApiError(400, "invalid_key", "key 格式不正确")

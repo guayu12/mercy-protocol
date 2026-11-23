@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 
@@ -317,6 +318,55 @@ def test_sourced_env_key_can_be_saved_from_config(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["key"]["source"] == "env_file"
     assert "OPENAI_API_KEY=fake-replacement-openai-key" in path.read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_key_saves_are_serialized(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    path = tmp_path / ".env"
+    path.write_text("OPENAI_API_KEY=fake-original-openai-key\n", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", path)
+    env.load_env()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def validate(_provider, key):
+        if key == "fake-first-openai-key":
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+
+    monkeypatch.setattr(config_service, "_validate_provider_key", validate)
+    first = asyncio.create_task(
+        config_service.save_key(
+            config_service.KeyRequest(
+                provider="openai", api_key="fake-first-openai-key"
+            )
+        )
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    second = asyncio.create_task(
+        config_service.save_key(
+            config_service.KeyRequest(
+                provider="openai", api_key="fake-second-openai-key"
+            )
+        )
+    )
+    try:
+        await asyncio.sleep(0.05)
+        second_entered_before_release = second_started.is_set()
+    finally:
+        release_first.set()
+    await asyncio.gather(first, second)
+
+    assert not second_entered_before_release
+    assert second_started.is_set()
+    assert os.environ["OPENAI_API_KEY"] == "fake-second-openai-key"
+    assert "OPENAI_API_KEY=fake-second-openai-key" in path.read_text(
         encoding="utf-8"
     )
 
