@@ -23,7 +23,6 @@ def clear_model_environment(monkeypatch):
         "VIDEO_MAX_MINUTES",
         "GEMINI_FILE_RETENTION_SECONDS",
         "PDF_MAX_PAGES",
-        "MERCY_PROFILES_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
 
