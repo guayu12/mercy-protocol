@@ -17,6 +17,7 @@ import { AnimatePresence } from "framer-motion";
 import { VRMAvatar, type Quality, type Speech } from "./VRMAvatar";
 import { Stage, type MediaStageData } from "./Stage";
 import { API_BASE } from "./api";
+import { ModelSettings, type EditableConfig } from "./ModelSettings";
 import {
   markdownUrlTransform,
   ReportSources,
@@ -77,21 +78,7 @@ type LogEntry = {
   message: string;
 };
 
-type CurrentConfig = {
-  profile: string;
-  keys: Record<
-    "openai" | "gemini" | "deepseek" | "tavily",
-    { configured: boolean; hint: string | null }
-  >;
-  roles: Array<{
-    role: string;
-    label: string;
-    provider: string | null;
-    model: string | null;
-    effort: string | null;
-    available: boolean;
-    reason: string | null;
-  }>;
+type CurrentConfig = EditableConfig & {
   services: Array<{
     name: string;
     label: string;
@@ -212,13 +199,6 @@ const usageRoleLabels: Record<string, string> = {
   document: "文档",
 };
 
-const providerLabels: Record<string, string> = {
-  openai: "OpenAI",
-  gemini: "Gemini",
-  deepseek: "DeepSeek",
-  tavily: "Tavily",
-};
-
 function stripMarkdown(value: string) {
   return value
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
@@ -330,6 +310,7 @@ export function App() {
     return saved === "low" || saved === "high" ? saved : "balanced";
   });
   const [currentConfig, setCurrentConfig] = useState<CurrentConfig | null>(null);
+  const [configVersion, setConfigVersion] = useState(0);
   const [configUnavailable, setConfigUnavailable] = useState(false);
   const [usageSnapshot, setUsageSnapshot] = useState<UsageSnapshot | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
@@ -675,7 +656,7 @@ export function App() {
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [backendConnected]);
+  }, [backendConnected, configVersion]);
 
   useEffect(() => {
     if (!backendConnected || sessionRestoredRef.current) return;
@@ -1429,49 +1410,20 @@ export function App() {
 
               <section className="rail-section settings-config">
                 <div className="rail-head">
-                  <span className="rail-title">当前配置</span>
-                  {currentConfig && (
-                    <span className="settings-profile">{currentConfig.profile}</span>
-                  )}
+                  <span className="rail-title">模型</span>
                 </div>
                 {currentConfig ? (
                   <>
-                    <div className="config-role-list">
-                      {currentConfig.roles.map((role) => (
-                        <div
-                          className={`config-role-row ${role.available ? "" : "unavailable"}`}
-                          key={role.role}
-                        >
-                          <span
-                            className={`config-status-dot ${role.available ? "online" : "offline"}`}
-                            aria-label={role.available ? "可用" : "不可用"}
-                          />
-                          <span className="config-role-label">{role.label}</span>
-                          <span className="config-role-model" title={role.model ?? "未配置"}>
-                            {role.model ?? "未配置"}
-                          </span>
-                          {role.effort && <span className="config-effort">{role.effort}</span>}
-                          {!role.available && role.reason && (
-                            <span className="config-reason">{role.reason}</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                    <ModelSettings
+                      config={currentConfig}
+                      onConfigChanged={(config) => {
+                        setCurrentConfig((current) =>
+                          current ? { ...current, ...config, services: (config as Partial<CurrentConfig>).services ?? current.services } : current,
+                        );
+                        setConfigVersion((version) => version + 1);
+                      }}
+                    />
                     <div className="config-services">
-                      <span className="config-services-title">API Key</span>
-                      {Object.entries(currentConfig.keys).map(([provider, key]) => (
-                        <div className="config-service-row" key={provider}>
-                          <span className="config-service-name">
-                            <span
-                              className={`config-status-dot ${key.configured ? "online" : "offline"}`}
-                            />
-                            {providerLabels[provider] ?? provider}
-                          </span>
-                          <span className={`config-service-detail ${key.configured ? "" : "unavailable"}`}>
-                            {key.configured ? key.hint ?? "已配置" : "未配置"}
-                          </span>
-                        </div>
-                      ))}
                       <span className="config-services-title">服务</span>
                       {currentConfig.services.map((service) => (
                         <div className="config-service-row" key={service.name}>
