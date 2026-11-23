@@ -377,8 +377,10 @@ def validate_startup_config() -> None:
 
             log_bus.emit("config", "CONFIG", message)
             _startup_profile_logged = True
+        current_snapshot()
         return
     models.validate_environment_models()
+    current_snapshot()
 
 
 def _environment_roles() -> dict[str, models.ModelSpec | None]:

@@ -116,6 +116,22 @@ def test_environment_mode_includes_memory_and_deepseek(profile_path, monkeypatch
     )
 
 
+def test_startup_validation_seeds_snapshot_before_invalid_profile_reload(profile_path):
+    _write(profile_path, _document({"conversation": "openai:startup-model"}))
+    runtime.validate_startup_config()
+
+    profile_path.write_text("{ invalid", encoding="utf-8")
+    stat = profile_path.stat()
+    os.utime(profile_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    snapshot = runtime.current_snapshot()
+
+    assert snapshot.spec("conversation") == models.ModelSpec(
+        "openai", "startup-model", None
+    )
+    assert snapshot.error is not None
+
+
 def test_profile_reload_uses_new_mtime_and_retains_last_valid(profile_path):
     _write(profile_path, _document({"conversation": "openai:first"}))
     first = runtime.current_snapshot()
