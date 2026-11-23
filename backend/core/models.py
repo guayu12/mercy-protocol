@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -20,11 +21,14 @@ CHAT_ROLES = ("conversation", "report", "research", "vision")
 ROLES = CHAT_ROLES + ("video",)
 PROVIDERS = {"openai", "gemini", "deepseek"}
 REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
-PROVIDER_KEYS = {
+DEEPSEEK_EFFORTS = {"none", "low", "high", "max"}
+PROVIDER_KEY_VARIABLES = {
     "openai": ("OPENAI_API_KEY",),
-    "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "deepseek": ("DEEPSEEK_API_KEY",),
+    "tavily": ("TAVILY_API_KEY",),
 }
+PROVIDER_KEYS = PROVIDER_KEY_VARIABLES
 ROLE_TIMEOUTS = {
     "conversation": 45,
     "report": 120,
@@ -43,8 +47,33 @@ class ModelConfigError(ValueError):
 def _validate_effort(var_name: str, effort: str | None) -> None:
     if effort is not None and effort not in REASONING_EFFORTS:
         raise ModelConfigError(
-            f"{var_name}: unsupported reasoning effort {effort!r}"
+            f"{var_name}: unsupported reasoning effort"
         )
+
+
+def provider_key(provider: str) -> tuple[str, str] | None:
+    for variable in PROVIDER_KEY_VARIABLES.get(provider, ()):
+        value = os.environ.get(variable, "").strip()
+        if value:
+            return value, variable
+    return None
+
+
+def provider_key_variable(provider: str) -> str | None:
+    variables = PROVIDER_KEY_VARIABLES.get(provider, ())
+    return variables[0] if variables else None
+
+
+def api_kind(spec: ModelSpec) -> Literal["chat", "responses"]:
+    if spec.provider == "openai":
+        return "responses" if spec.effort is not None else "chat"
+    if spec.provider == "deepseek":
+        return (
+            "responses"
+            if spec.effort in {"low", "high", "max"}
+            else "chat"
+        )
+    return "chat"
 
 
 def is_transient(error: Exception) -> bool:
@@ -72,9 +101,7 @@ def parse_spec(var_name: str, value: str | None) -> ModelSpec | None:
     raw_value = value.strip()
     provider, separator, rest = raw_value.partition(":")
     if not separator:
-        raise ModelConfigError(
-            f"{var_name}: expected provider:model[@effort], got {raw_value!r}"
-        )
+        raise ModelConfigError(f"{var_name}: expected provider:model[@effort]")
 
     provider = provider.strip()
     effort = None
@@ -84,18 +111,22 @@ def parse_spec(var_name: str, value: str | None) -> ModelSpec | None:
         effort = effort.strip()
         if not effort:
             raise ModelConfigError(
-                f"{var_name}: expected provider:model[@effort], got {raw_value!r}"
+                f"{var_name}: expected provider:model[@effort]"
             )
-        _validate_effort(var_name, effort)
+        supported_efforts = (
+            DEEPSEEK_EFFORTS if provider == "deepseek" else REASONING_EFFORTS
+        )
+        if effort not in supported_efforts:
+            raise ModelConfigError(f"{var_name}: unsupported reasoning effort")
     else:
         model = rest.strip()
 
     if not provider or not model:
         raise ModelConfigError(
-            f"{var_name}: expected provider:model[@effort], got {raw_value!r}"
+            f"{var_name}: expected provider:model[@effort]"
         )
     if provider not in PROVIDERS:
-        raise ModelConfigError(f"{var_name}: unknown provider {provider!r}")
+        raise ModelConfigError(f"{var_name}: unknown provider")
     return ModelSpec(provider=provider, model=model, effort=effort)
 
 
@@ -123,7 +154,7 @@ def _legacy_spec(role: str) -> ModelSpec | None:
     return None
 
 
-def get_model_spec(
+def _env_model_spec(
     role: str,
     tier: Literal["normal", "max"] = "normal",
     *,
@@ -155,10 +186,49 @@ def get_model_spec(
     return _legacy_spec(role)
 
 
-def role_available(role: str, tier: str = "normal") -> bool:
-    spec = get_model_spec(role, tier)  # type: ignore[arg-type]
-    return spec is not None and any(
-        os.environ.get(key, "").strip() for key in PROVIDER_KEYS[spec.provider]
+def get_model_spec(
+    role: str,
+    tier: Literal["normal", "max"] = "normal",
+    *,
+    fallback: bool = False,
+    runtime=None,
+) -> ModelSpec | None:
+    if runtime is None:
+        from core.runtime import current_snapshot
+
+        runtime = current_snapshot()
+    return runtime.spec(role, tier, fallback=fallback)
+
+
+def role_available(role: str, tier: str = "normal", runtime=None) -> bool:
+    from core.runtime import current_snapshot
+
+    return (runtime or current_snapshot()).available(role, tier)
+
+
+def model_cache_key(
+    role: str,
+    tier: str,
+    fallback: bool,
+    max_tokens: int | None,
+    spec: ModelSpec,
+    *,
+    tool_names: tuple[str, ...] | None = None,
+) -> tuple | None:
+    key = provider_key(spec.provider)
+    if key is None:
+        return None
+    base_url = _base_url(spec.provider)
+    return (
+        role,
+        tier,
+        fallback,
+        max_tokens,
+        spec,
+        tuple(sorted(tool_names)) if tool_names is not None else None,
+        spec.provider,
+        hashlib.sha256(key[0].encode()).hexdigest()[:12],
+        base_url,
     )
 
 
@@ -188,31 +258,48 @@ def pdf_max_pages() -> int:
     return _integer_setting("PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, minimum=1)
 
 
-def validate_config() -> None:
+def validate_environment_models() -> None:
     for suffix in ("_FALLBACK", "_MAX_FALLBACK"):
         var_name = f"MODEL_VIDEO{suffix}"
         if os.environ.get(var_name, "").strip():
             raise ModelConfigError(f"{var_name}: video models do not support fallbacks")
 
-    for role in ROLES:
+    for role in CHAT_ROLES:
         for suffix in ("", "_MAX", "_FALLBACK", "_MAX_FALLBACK"):
             var_name = f"MODEL_{role.upper()}{suffix}"
             spec = _configured_spec(var_name)
-            if role in CHAT_ROLES and spec and spec.provider != "openai":
+            if spec and spec.provider not in {"openai", "deepseek"}:
                 raise ModelConfigError(
-                    f"{var_name}: provider '{spec.provider}' 1c 未启用（聊天类角色只支持 openai）"
+                    f"{var_name}: chat roles require openai or deepseek"
                 )
-            if role == "video" and spec:
-                if spec.provider != "gemini":
+            if spec and spec.provider == "deepseek":
+                allowed_efforts = (
+                    DEEPSEEK_EFFORTS
+                    if role == "report" and suffix in {"", "_FALLBACK"}
+                    else {"none"}
+                )
+                if spec.effort is not None and spec.effort not in allowed_efforts:
                     raise ModelConfigError(
-                        f"{var_name}: video models must use the gemini provider"
+                        f"{var_name}: unsupported DeepSeek reasoning effort"
                     )
-                if spec.effort is not None:
-                    raise ModelConfigError(
-                        f"{var_name}: reasoning effort is not supported for video"
-                    )
+
+    for suffix in ("", "_MAX"):
+        var_name = f"MODEL_VIDEO{suffix}"
+        spec = _configured_spec(var_name)
+        if spec and spec.provider != "gemini":
+            raise ModelConfigError(f"{var_name}: video models must use gemini")
+        if spec and spec.effort is not None:
+            raise ModelConfigError(
+                f"{var_name}: reasoning effort is not supported for video"
+            )
     if not os.environ.get("MODEL_CONVERSATION", "").strip():
         _legacy_spec("conversation")
+
+
+def validate_config() -> None:
+    from core.runtime import validate_startup_config
+
+    validate_startup_config()
     video_max_minutes()
     gemini_file_retention_seconds()
     pdf_max_pages()
@@ -224,33 +311,39 @@ def get_llm(
     *,
     fallback: bool = False,
     max_tokens: int | None = None,
+    runtime=None,
 ) -> ChatOpenAI | None:
-    role = _role_name(role)
-    if role == "video":
-        raise ModelConfigError("MODEL_VIDEO: video models do not use get_llm")
-    spec = get_model_spec(role, tier, fallback=fallback)  # type: ignore[arg-type]
-    if spec is None or not any(
-        os.environ.get(key, "").strip() for key in PROVIDER_KEYS[spec.provider]
-    ):
+    if role in {"video", "memory"}:
+        raise ModelConfigError(f"MODEL_{role.upper()}: role does not use get_llm")
+    if runtime is None:
+        from core.runtime import current_snapshot
+
+        runtime = current_snapshot()
+    spec = runtime.spec(role, tier, fallback=fallback)
+    if spec is None:
         return None
-    if spec.provider != "openai":
-        suffix = "_MAX_FALLBACK" if fallback and tier == "max" else (
-            "_FALLBACK" if fallback else ("_MAX" if tier == "max" else "")
-        )
+    if role == "vision" and not runtime.image_input.get(spec, False):
+        return None
+    key = provider_key(spec.provider)
+    if key is None:
+        return None
+    if spec.provider not in {"openai", "deepseek"}:
         raise ModelConfigError(
-            f"MODEL_{role.upper()}{suffix}: provider '{spec.provider}' is not supported by get_llm"
+            f"MODEL_{role.upper()}: provider is not supported by get_llm"
         )
-    if role not in ROLE_TIMEOUTS:
+    timeout_role = "research" if role == "research_max" else role
+    if timeout_role not in ROLE_TIMEOUTS:
         raise ModelConfigError(f"MODEL_{role.upper()}: no timeout is configured")
 
+    base_url = _base_url(spec.provider)
     options = {
         "model": spec.model,
-        "api_key": os.environ["OPENAI_API_KEY"],
-        "base_url": os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+        "api_key": key[0],
+        "base_url": base_url,
         "streaming": True,
         "stream_usage": True,
         "max_retries": 1,
-        "timeout": ROLE_TIMEOUTS[role],
+        "timeout": ROLE_TIMEOUTS[timeout_role],
         "callbacks": [
             UsageCallback(
                 "research_max" if role == "research" and tier == "max" else role,
@@ -259,8 +352,19 @@ def get_llm(
             )
         ],
     }
-    if spec.effort:
+    if spec.provider == "deepseek" and api_kind(spec) == "chat":
+        options["extra_body"] = {"thinking": {"type": "disabled"}}
+    elif spec.provider == "deepseek":
+        options["reasoning"] = {"effort": spec.effort}
+        options["use_responses_api"] = True
+    elif spec.effort is not None:
         options["reasoning"] = {"effort": spec.effort}
     if max_tokens is not None:
         options["max_tokens"] = max_tokens
     return ChatOpenAI(**options)
+
+
+def _base_url(provider: str) -> str:
+    if provider == "deepseek":
+        return "https://api.deepseek.com"
+    return os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"

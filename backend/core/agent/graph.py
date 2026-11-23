@@ -3,6 +3,7 @@ import os
 import time
 import asyncio
 import secrets
+import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -32,13 +33,21 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from core.memory.memory_manager import MemoryManager
 from core import log_bus  # ← real-time log broadcaster
 from core import media_store, session_store, speech_queue
+from core.agent.history import prepare_history
 from core.models import (
     ModelConfigError,
+    api_kind,
     get_llm,
-    get_model_spec,
     is_transient,
-    role_available,
+    model_cache_key,
     validate_config,
+)
+from core.provider_errors import classify as classify_provider_error
+from core.runtime import (
+    RuntimeSnapshot,
+    current_snapshot,
+    load_snapshot,
+    runtime_from,
 )
 from core.agent.experts import (
     analyze_document,
@@ -61,8 +70,26 @@ from core.speakable import SpeechRouter
 
 validate_config()
 
-# 1. Initialize Memory
-memory_manager = MemoryManager(os.path.join(BACKEND_DIR, "data", "chroma_db"))
+_memory_manager: MemoryManager | None = None
+_memory_manager_lock = threading.Lock()
+_conversation_models: dict[tuple, object] = {}
+
+
+def get_memory_manager() -> MemoryManager:
+    global _memory_manager
+    if _memory_manager is None:
+        with _memory_manager_lock:
+            if _memory_manager is None:
+                _memory_manager = MemoryManager(
+                    os.path.join(BACKEND_DIR, "data", "chroma_db")
+                )
+    return _memory_manager
+
+
+async def _memory_context(runtime: RuntimeSnapshot, query: str) -> str:
+    if not runtime.available("memory"):
+        return ""
+    return await asyncio.to_thread(get_memory_manager().format_context, query)
 
 # 2. Define the State
 class AgentState(TypedDict):
@@ -88,7 +115,7 @@ def get_current_time() -> str:
 async def save_memory(fact: str) -> str:
     """Save an important fact about the user or instructions to long-term memory. USE EXACTLY when user says 'remember' or explicitly tells you a preference."""
     log_bus.emit("tool", "TOOL", f"save_memory: {fact[:80]}")
-    saved = await asyncio.to_thread(memory_manager.add_memory, fact)
+    saved = await asyncio.to_thread(get_memory_manager().add_memory, fact)
     if not saved:
         log_bus.emit("tool", "TOOL", "save_memory skipped — near-duplicate already stored")
         return f"Already in permanent memory (duplicate skipped): {fact}"
@@ -290,7 +317,7 @@ async def highlight_report(
     return "已在屏幕上高亮。"
 
 
-base_tools = [
+ALL_TOOLS = [
     check_weather,
     get_current_time,
     save_memory,
@@ -301,33 +328,64 @@ base_tools = [
     clear_stage,
     read_report,
     highlight_report,
+    write_report,
+    investigate,
+    inspect_image,
+    analyze_video,
+    analyze_document,
 ]
 
-def build_tools():
-    configured_tools = list(base_tools)
-    if not os.environ.get("TAVILY_API_KEY", "").strip():
-        configured_tools = [
-            item for item in configured_tools if item.name != "tavily_search"
-        ]
-    if role_available("report"):
-        configured_tools.append(write_report)
-    if role_available("research") and os.environ.get("TAVILY_API_KEY", "").strip():
-        configured_tools.append(investigate)
-    if role_available("vision"):
-        configured_tools.append(inspect_image)
-    if role_available("video"):
-        configured_tools.append(analyze_video)
-        configured_tools.append(analyze_document)
-    return configured_tools
+
+def tools_for(runtime: RuntimeSnapshot) -> list:
+    enabled = runtime.tool_names()
+    return [tool for tool in ALL_TOOLS if tool.name in enabled]
 
 
-tools = build_tools()
-conversation_model = get_llm("conversation")
-llm_with_tools = conversation_model.bind_tools(tools) if conversation_model else None
-fallback_model = get_llm("conversation", fallback=True)
-fallback_llm_with_tools = (
-    fallback_model.bind_tools(tools) if fallback_model else None
-)
+def conversation_llm(
+    runtime: RuntimeSnapshot, *, fallback: bool = False
+):
+    spec = runtime.spec("conversation", fallback=fallback)
+    if spec is None:
+        return None
+    bound_tools = tools_for(runtime)
+    tool_names = tuple(tool.name for tool in bound_tools)
+    key = model_cache_key(
+        "conversation",
+        "normal",
+        fallback,
+        None,
+        spec,
+        tool_names=tool_names,
+    )
+    if key is None:
+        return None
+    if key not in _conversation_models:
+        model = get_llm(
+            "conversation",
+            fallback=fallback,
+            runtime=runtime,
+        )
+        _conversation_models[key] = (
+            model.bind_tools(bound_tools) if model is not None else None
+        )
+    return _conversation_models[key]
+
+
+def _safe_tool_error(error: Exception) -> str:
+    return f"工具执行失败：{classify_provider_error(error).message}。请口头告诉用户。"
+
+
+async def _runtime_tool_gate(request, handler):
+    call = request.tool_call
+    name = call["name"]
+    reason = runtime_from(request.runtime.config).unavailable_reason(name)
+    if reason:
+        return ToolMessage(
+            content=f"{name} 在当前配置下不可用：{reason}。请口头告诉用户。",
+            tool_call_id=call["id"],
+            name=name,
+        )
+    return await handler(request)
 
 def _text_of(content) -> str:
     """Extract plain text from str or multimodal content blocks."""
@@ -378,7 +436,9 @@ async def _prepare_user_media(
     thread_id: str,
     attachments: list[str] | None,
     image_base64: str | None,
-) -> tuple[str, list[str]]:
+    runtime: RuntimeSnapshot | None = None,
+) -> tuple[str, list[tuple[str, str]]]:
+    runtime = runtime or current_snapshot()
     image_urls = []
     video_ids = []
     document_ids = []
@@ -393,7 +453,7 @@ async def _prepare_user_media(
             legacy = await media_store.register_legacy_image(thread_id, legacy_data)
             data_url = await asyncio.to_thread(_image_data_url, legacy["path"])
             if data_url:
-                image_urls.append(data_url)
+                image_urls.append((legacy["media_id"], data_url))
         except Exception as error:
             log_bus.emit("warn", "MEDIA", f"ignored legacy image attachment: {error}")
 
@@ -417,14 +477,12 @@ async def _prepare_user_media(
                 _image_data_url, record.get("path") or ""
             )
             if data_url:
-                image_urls.append(data_url)
+                image_urls.append((media_id, data_url))
         except Exception as error:
             log_bus.emit("warn", "MEDIA", f"ignored image attachment {media_id}: {error}")
 
     if video_ids:
-        has_video_analysis = any(
-            item.name == "analyze_video" for item in tools
-        )
+        has_video_analysis = "analyze_video" in runtime.tool_names()
         notices = [
             (
                 f"［用户上传了视频 {media_id}，需要了解内容时用 analyze_video］"
@@ -435,9 +493,7 @@ async def _prepare_user_media(
         ]
         query = "\n".join([query, *notices]).strip()
     if document_ids:
-        has_document_analysis = any(
-            item.name == "analyze_document" for item in tools
-        )
+        has_document_analysis = "analyze_document" in runtime.tool_names()
         notices = [
             (
                 f"［用户上传了文档 {media_id}（{_without_urls(filename)}），需要了解内容时用 analyze_document］"
@@ -454,16 +510,18 @@ async def _prepare_user_media(
 async def agent_node(state: AgentState, config: RunnableConfig):
     """The thinking node of the agent."""
     messages = state["messages"]
-    
+    runtime = runtime_from(config)
+    llm = conversation_llm(runtime)
+    fallback_llm = conversation_llm(runtime, fallback=True)
+    primary_spec = runtime.spec("conversation")
+    if llm is None or primary_spec is None:
+        raise ModelConfigError("MODEL_CONVERSATION: model is unavailable")
+
     user_msgs = [m for m in messages if isinstance(m, HumanMessage)]
     latest = user_msgs[-1] if user_msgs else None
     latest_query = _text_of(latest.content) if latest else ""
-    llm = llm_with_tools
-    if llm is None:
-        raise ModelConfigError("MODEL_CONVERSATION: model is unavailable")
 
-    # Embedding lookup is a blocking HTTP call — keep it off the event loop
-    past_contexts = await asyncio.to_thread(memory_manager.format_context, latest_query)
+    past_contexts = await _memory_context(runtime, latest_query)
     configurable = config.get("configurable", {})
     thread_id = configurable.get("thread_id", "default_user")
     screen_state = configurable.get("screen_state") or {}
@@ -507,8 +565,10 @@ async def agent_node(state: AgentState, config: RunnableConfig):
     media_block = await _media_screen_context(thread_id, screen_state)
     assistant_name = os.environ.get("ASSISTANT_NAME", "Aura")
     local_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-    bound_tool_names = {item.name for item in tools}
+    bound_tool_names = set(runtime.tool_names())
     prompt_additions = []
+    if not runtime.available("memory"):
+        prompt_additions.append("长期记忆已关闭：不要说你会记住什么。")
     if "write_report" in bound_tool_names:
         prompt_additions.append(
             "需要详细、严谨或篇幅较长的文档时，调用 write_report 交给报告专家撰写：title 写标题，brief 写清楚要写什么、给谁看、重点和格式；修订已有报告时传 based_on_report_id。简单的表格或短文档仍可自己用 show_report。"
@@ -565,11 +625,15 @@ async def agent_node(state: AgentState, config: RunnableConfig):
         + document_rule
     )
     if "inspect_image" in bound_tool_names:
-        media_rules += (
-            "搜索图片和之前上传的图片，只有调用 inspect_image 之后才能描述画面；本轮上传的图片可直接分析。"
-        )
+        media_rules += "搜索图片和之前上传的图片，只有调用 inspect_image 之后才能描述画面；"
     else:
-        media_rules += "搜索图片只知道已提供的描述；本轮上传的图片可直接分析。"
+        media_rules += "搜索图片只知道已提供的描述；"
+    primary_image_rule = (
+        "本轮上传的图片可直接分析。"
+        if runtime.image_input.get(primary_spec, False)
+        else "本轮上传的图片当前对话模型看不到内容。"
+    )
+    media_rules += primary_image_rule
     additions_block = "\n".join(prompt_additions)
 
     sys_prompt = SystemMessage(content=f"""
@@ -594,11 +658,29 @@ async def agent_node(state: AgentState, config: RunnableConfig):
 
 {additions_block}
 """)
-    full_messages = [sys_prompt] + list(messages)
-    input_tokens_est = sum(len(_text_of(m.content)) // 4 for m in full_messages)
+    def messages_for(spec):
+        image_input = runtime.image_input.get(spec, False)
+        image_rule = (
+            "本轮上传的图片可直接分析。"
+            if image_input
+            else "本轮上传的图片当前对话模型看不到内容。"
+        )
+        prompt = sys_prompt
+        if image_rule != primary_image_rule:
+            prompt = SystemMessage(
+                content=sys_prompt.content.replace(primary_image_rule, image_rule)
+            )
+        history = prepare_history(
+            messages,
+            spec,
+            image_input=image_input,
+            inspect_image_available=runtime.available("vision"),
+        )
+        return [prompt] + history
 
-    primary_spec = get_model_spec("conversation")
-    model_name = primary_spec.model if primary_spec else "unavailable"
+    full_messages = messages_for(primary_spec)
+    input_tokens_est = sum(len(_text_of(m.content)) // 4 for m in full_messages)
+    model_name = primary_spec.model
     log_bus.emit(
         "flow",
         "FLOW",
@@ -607,32 +689,43 @@ async def agent_node(state: AgentState, config: RunnableConfig):
 
     emitted = False
 
-    async def stream_response(model):
+    async def stream_response(model, spec):
         nonlocal emitted
         combined = None
-        async for chunk in model.astream(full_messages, config):
+        async for chunk in model.astream(messages_for(spec), config):
             if _text_of(chunk.content) or getattr(chunk, "tool_call_chunks", None):
                 emitted = True
             combined = chunk if combined is None else combined + chunk
         if combined is None:
             raise RuntimeError("Conversation model returned an empty stream")
-        return message_chunk_to_message(combined)
+        response = message_chunk_to_message(combined)
+        metadata = dict(response.response_metadata or {})
+        metadata["mercy_source"] = {
+            "provider": spec.provider,
+            "model": spec.model,
+            "api": api_kind(spec),
+        }
+        return response.model_copy(update={"response_metadata": metadata})
 
     started_at = time.time()
     try:
-        response = await stream_response(llm)
+        response = await stream_response(llm, primary_spec)
     except Exception as error:
-        if emitted or not is_transient(error) or fallback_llm_with_tools is None:
+        fallback_spec = runtime.spec("conversation", fallback=True)
+        if (
+            emitted
+            or not is_transient(error)
+            or fallback_llm is None
+            or fallback_spec is None
+        ):
             raise
-        fallback_spec = get_model_spec("conversation", fallback=True)
-        fallback_name = fallback_spec.model if fallback_spec else "fallback"
         log_bus.emit(
             "warn",
             "RETRY",
-            f"primary model failed before output ({type(error).__name__}); trying fallback {fallback_name}",
+            f"primary model failed before output ({type(error).__name__}); trying fallback {fallback_spec.model}",
         )
-        response = await stream_response(fallback_llm_with_tools)
-        model_name = fallback_name
+        response = await stream_response(fallback_llm, fallback_spec)
+        model_name = fallback_spec.model
 
     latency = round((time.time() - started_at) * 1000)
     usage = getattr(response, "usage_metadata", None)
@@ -660,8 +753,14 @@ async def agent_node(state: AgentState, config: RunnableConfig):
 # 6. Build the Graph
 workflow = StateGraph(AgentState)
 workflow.add_node("agent", agent_node)
-# Tool exceptions become ToolMessages so the model sees the error (and the thread stays valid)
-workflow.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+workflow.add_node(
+    "tools",
+    ToolNode(
+        ALL_TOOLS,
+        handle_tool_errors=_safe_tool_error,
+        awrap_tool_call=_runtime_tool_gate,
+    ),
+)
 workflow.add_edge(START, "agent")
 workflow.add_conditional_edges("agent", tools_condition)
 workflow.add_edge("tools", "agent")
@@ -691,24 +790,35 @@ async def close_graph():
 def build_user_message(
     query: str,
     image_base64: Optional[str] = None,
-    image_data_urls: list[str] | None = None,
+    image_data_urls: list[tuple[str, str]] | list[str] | None = None,
 ) -> HumanMessage:
     """Build a HumanMessage with native image_url content blocks."""
-    images = list(image_data_urls or [])
+    images: list[tuple[str | None, str]] = []
+    for item in image_data_urls or []:
+        if isinstance(item, tuple):
+            images.append((item[0], item[1]))
+        else:
+            images.append((None, item))
     if image_base64:
         images.append(
-            image_base64
-            if image_base64.startswith("data:")
-            else f"data:image/jpeg;base64,{image_base64}"
+            (
+                None,
+                image_base64
+                if image_base64.startswith("data:")
+                else f"data:image/jpeg;base64,{image_base64}",
+            )
         )
     if not images:
         return HumanMessage(content=query)
     content = [{"type": "text", "text": query}]
     content.extend(
         {"type": "image_url", "image_url": {"url": image_url}}
-        for image_url in images
+        for _, image_url in images
     )
-    return HumanMessage(content=content)
+    return HumanMessage(
+        content=content,
+        additional_kwargs={"mercy_media_ids": [media_id for media_id, _ in images]},
+    )
 
 _thread_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -742,10 +852,11 @@ async def process_query(
     """Run one turn and stream status, spoken sentences, reports, tools and completion."""
     # Serialize turns per thread so concurrent requests don't overwrite each other's checkpoints
     async with _thread_locks[thread_id]:
+        runtime = await load_snapshot()
         graph = await init_graph()
         original_query = query
         query, image_data_urls = await _prepare_user_media(
-            query, thread_id, attachments, image_base64
+            query, thread_id, attachments, image_base64, runtime
         )
         utterance_attachments = []
         for media_id in attachments or []:
@@ -766,6 +877,7 @@ async def process_query(
                 "turn_id": turn_id,
                 "screen_state": screen_state or {},
                 "model_tier": model_tier,
+                "runtime": runtime,
             }
         }
         await _close_pending_tool_calls(graph, config)
@@ -904,7 +1016,14 @@ async def process_query(
             yield {"type": "turn", "turn_id": turn_id}
             yield {"type": "status", "state": "thinking", "label": "正在思考"}
             event_stream = graph.astream_events(
-                {"messages": [build_user_message(query, image_data_urls=image_data_urls)], "context": ""},
+                {
+                    "messages": [
+                        build_user_message(
+                            query, image_data_urls=image_data_urls
+                        )
+                    ],
+                    "context": "",
+                },
                 config=config,
                 version="v2",
             )

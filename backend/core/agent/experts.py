@@ -32,11 +32,12 @@ from core.models import (
     ModelSpec,
     gemini_file_retention_seconds,
     get_llm,
-    get_model_spec,
     is_transient,
+    model_cache_key,
     pdf_max_pages,
     video_max_minutes,
 )
+from core.runtime import RuntimeSnapshot, current_snapshot, runtime_from
 from core.safe_fetch import safe_media_fetcher
 
 
@@ -66,7 +67,7 @@ SEARCH_TOOL_SCHEMA = {
 }
 
 search_raw = tavily_raw
-_expert_models: dict[tuple[str, str, ModelSpec, bool, int | None], object] = {}
+_expert_models: dict[tuple, object] = {}
 _turn_budgets: dict[str, "TurnBudget"] = {}
 _image_inspection_budgets: dict[str, "TurnBudget"] = {}
 _video_analysis_budgets: dict[str, "TurnBudget"] = {}
@@ -83,17 +84,25 @@ def expert_llm(
     role: str,
     tier: str = "normal",
     max_tokens: int | None = None,
+    runtime: RuntimeSnapshot | None = None,
     *,
     fallback: bool = False,
 ):
-    spec = get_model_spec(role, tier, fallback=fallback)  # type: ignore[arg-type]
+    runtime = runtime or current_snapshot()
+    spec = runtime.spec(role, tier, fallback=fallback)
     if spec is None:
         return None
-    key = (role, tier, spec, fallback, max_tokens)
+    key = model_cache_key(role, tier, fallback, max_tokens, spec)
+    if key is None:
+        return None
     if key not in _expert_models:
         _expert_models[key] = get_llm(
-            role, tier, fallback=fallback, max_tokens=max_tokens
-        )  # type: ignore[arg-type]
+            role,
+            tier,
+            fallback=fallback,
+            max_tokens=max_tokens,
+            runtime=runtime,
+        )
     return _expert_models[key]
 
 
@@ -783,12 +792,13 @@ async def _run_report_tool(
     sources: list[dict] | None = None,
 ) -> str:
     _, thread_id, turn_query = _config_context(config)
+    runtime = runtime_from(config)
     state = ReportStream(strip_external_links=link_policy == "sources_only")
     child = _child_config(config)
 
     async def run():
         context = await _expert_context(task, turn_query, thread_id)
-        model = expert_llm(role, tier, max_tokens)
+        model = expert_llm(role, tier, max_tokens, runtime)
         if model is None:
             raise RuntimeError(f"MODEL_{role.upper()}: model unavailable")
         messages = [
@@ -807,7 +817,7 @@ async def _run_report_tool(
             config,
             suffix,
             fallback_model_factory=lambda: expert_llm(
-                role, tier, max_tokens, fallback=True
+                role, tier, max_tokens, runtime, fallback=True
             ),
             link_policy=link_policy,
             sources=sources,
@@ -896,13 +906,14 @@ async def investigate(question: str, config: RunnableConfig) -> str:
         if not allowed:
             return DELEGATION_LIMIT_TEXT
         configurable, thread_id, turn_query = _config_context(config)
+        runtime = runtime_from(config)
         tier = configurable.get("model_tier", "normal")
         child = _child_config(config)
         sources: list[tuple[int, str, str]] = []
         numbered_results: list[str] = []
         try:
             deadline = asyncio.get_running_loop().time() + 300
-            model = expert_llm("research", tier)
+            model = expert_llm("research", tier, None, runtime)
             if model is None:
                 raise RuntimeError("MODEL_RESEARCH: model unavailable")
             search_model = model.bind_tools([SEARCH_TOOL_SCHEMA])
@@ -925,7 +936,7 @@ async def investigate(question: str, config: RunnableConfig) -> str:
                     if search_fallback_used or not is_transient(error):
                         raise
                     fallback_model = expert_llm(
-                        "research", tier, fallback=True
+                        "research", tier, None, runtime, fallback=True
                     )
                     if fallback_model is None:
                         raise
@@ -1048,7 +1059,8 @@ async def inspect_image(
             )
             if data_url is None:
                 raise FileNotFoundError("Image bytes are unavailable")
-            model = expert_llm("vision", "normal")
+            runtime = runtime_from(config)
+            model = expert_llm("vision", "normal", None, runtime)
             if model is None:
                 raise RuntimeError("MODEL_VISION: model unavailable")
             messages = [
@@ -1073,7 +1085,9 @@ async def inspect_image(
             except Exception as error:
                 if not is_transient(error):
                     raise
-                fallback_model = expert_llm("vision", "normal", fallback=True)
+                fallback_model = expert_llm(
+                    "vision", "normal", None, runtime, fallback=True
+                )
                 if fallback_model is None:
                     raise
                 response = await _invoke_expert(
@@ -1417,7 +1431,8 @@ async def analyze_video(
     """Analyze a registered video and answer a concrete question. media_id: a video id from the media list. question: what to examine in the video."""
     _, thread_id, turn_query = _config_context(config)
     started_at = time.time()
-    spec = get_model_spec("video")
+    runtime = runtime_from(config)
+    spec = runtime.spec("video")
     model_name = spec.model if spec else "unavailable"
     usage = {}
     video_seconds = None
@@ -1517,7 +1532,8 @@ async def analyze_document(
     """Read an uploaded PDF and answer a concrete question. media_id: a document id from the media list. question: what to find in the document. start_page: first page to read, starting at 1."""
     _, thread_id, turn_query = _config_context(config)
     started_at = time.time()
-    spec = get_model_spec("video")
+    runtime = runtime_from(config)
+    spec = runtime.spec("video")
     model_name = spec.model if spec else "unavailable"
     usage = {}
     quota_kind = None

@@ -23,6 +23,7 @@ def clear_model_environment(monkeypatch):
         "VIDEO_MAX_MINUTES",
         "GEMINI_FILE_RETENTION_SECONDS",
         "PDF_MAX_PAGES",
+        "MERCY_PROFILES_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -88,12 +89,67 @@ def test_validate_config_checks_legacy_reasoning_effort(monkeypatch):
         models.validate_config()
 
 
-@pytest.mark.parametrize("provider", ["gemini", "deepseek"])
-def test_validate_config_rejects_disabled_chat_providers(provider, monkeypatch):
+def test_validate_config_rejects_gemini_chat_provider(monkeypatch):
     clear_model_environment(monkeypatch)
-    monkeypatch.setenv("MODEL_CONVERSATION_MAX_FALLBACK", f"{provider}:model")
-    with pytest.raises(models.ModelConfigError, match="1c 未启用"):
+    monkeypatch.setenv("MODEL_CONVERSATION_MAX_FALLBACK", "gemini:model")
+    with pytest.raises(models.ModelConfigError, match="chat roles require"):
         models.validate_config()
+
+
+def test_deepseek_is_allowed_for_chat_roles_and_efforts_are_role_specific(
+    monkeypatch,
+):
+    clear_model_environment(monkeypatch)
+    monkeypatch.setenv("MODEL_CONVERSATION", "deepseek:deepseek-chat@none")
+    monkeypatch.setenv("MODEL_REPORT", "deepseek:deepseek-chat@high")
+    monkeypatch.setenv("MODEL_REPORT_FALLBACK", "deepseek:backup@max")
+    models.validate_config()
+    assert models.get_model_spec("conversation") == models.ModelSpec(
+        "deepseek", "deepseek-chat", "none"
+    )
+    assert models.get_model_spec("report") == models.ModelSpec(
+        "deepseek", "deepseek-chat", "high"
+    )
+
+    monkeypatch.setenv("MODEL_RESEARCH", "deepseek:deepseek-chat@low")
+    with pytest.raises(
+        models.ModelConfigError,
+        match="MODEL_RESEARCH: unsupported DeepSeek reasoning effort",
+    ):
+        models.validate_config()
+
+
+@pytest.mark.parametrize(
+    ("role", "value", "expected_api"),
+    [
+        ("conversation", "deepseek:deepseek-chat", "chat"),
+        ("conversation", "deepseek:deepseek-chat@none", "chat"),
+        ("report", "deepseek:deepseek-reasoner@low", "responses"),
+        ("report", "deepseek:deepseek-reasoner@high", "responses"),
+        ("report", "deepseek:deepseek-reasoner@max", "responses"),
+        ("conversation", "openai:gpt-6-luna", "chat"),
+        ("conversation", "openai:gpt-6-luna@none", "responses"),
+    ],
+)
+def test_api_kind_matches_chat_openai_payload_detection(
+    monkeypatch, role, value, expected_api
+):
+    clear_model_environment(monkeypatch)
+    provider = value.split(":", 1)[0]
+    key_name = "DEEPSEEK_API_KEY" if provider == "deepseek" else "OPENAI_API_KEY"
+    monkeypatch.setenv(key_name, "test-provider-key")
+    monkeypatch.setenv(f"MODEL_{role.upper()}", value)
+    spec = models.get_model_spec(role)
+    llm = models.get_llm(role)
+    payload = llm._get_request_payload([HumanMessage(content="payload check")])
+    assert models.api_kind(spec) == expected_api
+    assert llm._use_responses_api(payload) == (expected_api == "responses")
+    if provider == "deepseek" and expected_api == "chat":
+        assert llm.extra_body == {"thinking": {"type": "disabled"}}
+        assert llm.openai_api_base == "https://api.deepseek.com"
+    if provider == "deepseek" and expected_api == "responses":
+        assert llm.reasoning == {"effort": spec.effort}
+        assert llm.use_responses_api is True
 
 
 def test_video_role_accepts_gemini(monkeypatch):
@@ -228,9 +284,9 @@ def test_get_llm_uses_langchain_token_limit_for_each_api_mode(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypatch):
     import main
-    from core import runtime_config
 
     clear_model_environment(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     seen = []
 
     async def fake_process_query(*args):
@@ -238,13 +294,6 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
         yield {"type": "done", "turn_id": "test", "spoken_text": ""}
 
     monkeypatch.setattr(main, "process_query", fake_process_query)
-    monkeypatch.setattr(
-        main, "graph_tools", [SimpleNamespace(name="investigate")]
-    )
-    monkeypatch.setattr(main, "role_available", lambda role, tier: tier == "max")
-    monkeypatch.setattr(
-        runtime_config, "role_available", lambda role, tier="normal": tier == "max"
-    )
     monkeypatch.setenv("MODEL_RESEARCH_MAX", "openai:configured-max")
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -264,6 +313,7 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
             "max_tier": True,
             "video": False,
             "document": False,
+            "image_input": True,
         }
         monkeypatch.delenv("MODEL_RESEARCH_MAX")
         capabilities = await client.get("/api/capabilities")
@@ -271,18 +321,14 @@ async def test_chat_api_model_tier_validation_routing_and_capabilities(monkeypat
             "max_tier": False,
             "video": False,
             "document": False,
+            "image_input": True,
         }
-        monkeypatch.setattr(
-            main,
-            "graph_tools",
-            [
-                SimpleNamespace(name="analyze_video"),
-                SimpleNamespace(name="analyze_document"),
-            ],
-        )
+        monkeypatch.setenv("MODEL_VIDEO", "gemini:configured-video")
+        monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
         capabilities = await client.get("/api/capabilities")
         assert capabilities.json() == {
             "max_tier": False,
             "video": True,
             "document": True,
+            "image_input": True,
         }

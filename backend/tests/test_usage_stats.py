@@ -246,7 +246,8 @@ def test_graph_imports_without_tavily_key_and_search_is_unbound():
             "-c",
             (
                 "from core.agent import graph, search; "
-                "assert 'tavily_search' not in {tool.name for tool in graph.tools}; "
+                "from core.runtime import current_snapshot; "
+                "assert 'tavily_search' not in {tool.name for tool in graph.tools_for(current_snapshot())}; "
                 "assert search.web_search is None"
             ),
         ],
@@ -293,20 +294,6 @@ async def test_config_key_hints_roles_and_secret_exclusion(monkeypatch):
     for name, value in env_values.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.setattr(
-        main,
-        "graph_tools",
-        [
-            SimpleNamespace(name=name)
-            for name in (
-                "write_report",
-                "investigate",
-                "inspect_image",
-                "analyze_video",
-                "analyze_document",
-            )
-        ],
-    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=main.app), base_url="http://test"
     ) as client:
@@ -322,12 +309,29 @@ async def test_config_key_hints_roles_and_secret_exclusion(monkeypatch):
         "research_max",
         "vision",
         "video",
+        "memory",
     ]
     assert all(row["available"] and row["reason"] is None for row in config["roles"])
-    assert config["keys"]["openai"] == {"configured": True, "hint": "••••1234"}
-    assert config["keys"]["gemini"] == {"configured": True, "hint": "••••5678"}
-    assert config["keys"]["deepseek"] == {"configured": True, "hint": None}
-    assert config["keys"]["tavily"] == {"configured": True, "hint": "••••9012"}
+    assert config["keys"]["openai"] == {
+        "configured": True,
+        "hint": "••••1234",
+        "variable": "OPENAI_API_KEY",
+    }
+    assert config["keys"]["gemini"] == {
+        "configured": True,
+        "hint": "••••5678",
+        "variable": "GEMINI_API_KEY",
+    }
+    assert config["keys"]["deepseek"] == {
+        "configured": True,
+        "hint": None,
+        "variable": "DEEPSEEK_API_KEY",
+    }
+    assert config["keys"]["tavily"] == {
+        "configured": True,
+        "hint": "••••9012",
+        "variable": "TAVILY_API_KEY",
+    }
     assert config["services"][0]["reason"] is None
     assert config["services"][2]["detail"] == "zh-CN-TestVoice"
     for secret in (
@@ -357,7 +361,6 @@ async def test_config_reports_missing_keys_and_capabilities_share_config(monkeyp
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MODEL_VIDEO", "gemini:configured-video")
-    monkeypatch.setattr(main, "graph_tools", [])
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=main.app), base_url="http://test"
@@ -377,4 +380,5 @@ async def test_config_reports_missing_keys_and_capabilities_share_config(monkeyp
         "max_tier": False,
         "video": False,
         "document": False,
+        "image_input": True,
     }

@@ -398,6 +398,8 @@ async def test_pdf_upload_is_magic_sniffed_limited_and_served_as_attachment(
 
 @pytest.mark.asyncio
 async def test_document_attachment_is_not_image_or_stage_media(tmp_path, monkeypatch):
+    from conftest import make_test_runtime
+
     database_path = tmp_path / "session.db"
     await media_store.init_store(str(database_path))
     document = await media_store.register_media(
@@ -409,13 +411,9 @@ async def test_document_attachment_is_not_image_or_stage_media(tmp_path, monkeyp
         path="/tmp/notes.pdf",
     )
     try:
-        monkeypatch.setattr(
-            graph,
-            "tools",
-            graph.base_tools + [SimpleNamespace(name="analyze_document")],
-        )
+        with_tool_runtime = make_test_runtime({"analyze_document"})
         query, image_urls = await graph._prepare_user_media(
-            "请阅读", "document-context", [document["media_id"]], None
+            "请阅读", "document-context", [document["media_id"]], None, with_tool_runtime
         )
         assert query.endswith(
             f"［用户上传了文档 {document['media_id']}（notes.pdf），"
@@ -423,9 +421,9 @@ async def test_document_attachment_is_not_image_or_stage_media(tmp_path, monkeyp
         )
         assert image_urls == []
 
-        monkeypatch.setattr(graph, "tools", graph.base_tools)
+        without_tool_runtime = make_test_runtime(set())
         query, image_urls = await graph._prepare_user_media(
-            "请阅读", "document-context", [document["media_id"]], None
+            "请阅读", "document-context", [document["media_id"]], None, without_tool_runtime
         )
         assert query.endswith(
             f"［用户上传了文档 {document['media_id']}（notes.pdf），你读不到内容］"
@@ -632,10 +630,15 @@ async def test_image_attachments_decode_in_worker_and_encode_opaque_jpeg(
     monkeypatch.setattr(graph.asyncio, "to_thread", tracked_to_thread)
     try:
         _, images = await graph._prepare_user_media(
-            "请看看", "image-worker", [record["media_id"]], None
+            "请看看",
+            "image-worker",
+            [record["media_id"]],
+            None,
+            graph.current_snapshot(),
         )
         assert len(calls) == 1
-        assert images[0].startswith("data:image/jpeg;base64,")
+        assert images[0][0] == record["media_id"]
+        assert images[0][1].startswith("data:image/jpeg;base64,")
     finally:
         await media_store.close_store()
 
@@ -854,8 +857,15 @@ async def test_report_media_rewrite_and_prompt_omit_urls(tmp_path, monkeypatch):
             captured["prompt"] = messages[0].content
             yield AIMessageChunk(content="已收到")
 
-    monkeypatch.setattr(graph.memory_manager, "format_context", lambda query: "")
-    monkeypatch.setattr(graph, "llm_with_tools", CapturingModel())
+    from conftest import make_test_runtime
+
+    runtime = make_test_runtime({"show_media", "show_report"})
+    monkeypatch.setattr(graph, "runtime_from", lambda _config: runtime)
+    monkeypatch.setattr(
+        graph,
+        "conversation_llm",
+        lambda _runtime, *, fallback=False: None if fallback else CapturingModel(),
+    )
     result = await graph.agent_node(
         {"messages": [HumanMessage(content="你好")], "context": ""},
         {

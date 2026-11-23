@@ -12,6 +12,14 @@ from core import media_store, session_store, speech_queue
 from core.agent import graph as agent_graph
 
 
+def _set_conversation_models(monkeypatch, primary, fallback=None):
+    def select_model(_runtime, *, fallback=False):
+        return fallback_model if fallback else primary
+
+    fallback_model = fallback
+    monkeypatch.setattr(agent_graph, "conversation_llm", select_model)
+
+
 class ScriptedChatModel(GenericFakeChatModel):
     def bind_tools(self, tools, **kwargs):
         return self
@@ -54,12 +62,8 @@ async def _install_graph(monkeypatch, tmp_path, responses):
         return agent_graph.app_graph
 
     monkeypatch.setattr(agent_graph, "init_graph", initialized_graph)
-    monkeypatch.setattr(
-        agent_graph.memory_manager, "format_context", lambda query: ""
-    )
     fake = ScriptedChatModel(messages=iter(responses))
-    monkeypatch.setattr(agent_graph, "llm_with_tools", fake)
-    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", None)
+    _set_conversation_models(monkeypatch, fake)
     return connection
 
 
@@ -176,11 +180,8 @@ async def test_process_query_persists_original_text_and_thread_attachments(
         "foreign.pdf",
         path="/not-read-by-this-test.pdf",
     )
-    monkeypatch.setattr(
-        agent_graph,
-        "tools",
-        agent_graph.base_tools + [SimpleNamespace(name="analyze_document")],
-    )
+    monkeypatch.setenv("MODEL_VIDEO", "gemini:video-model")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     try:
         events = [
             event
@@ -392,7 +393,7 @@ async def test_invalid_highlight_anchor_does_not_dispatch_event(monkeypatch, tmp
                 ]
             )
         )
-        monkeypatch.setattr(agent_graph, "llm_with_tools", scripted_model)
+        _set_conversation_models(monkeypatch, scripted_model)
         events = [
             event
             async for event in agent_graph.process_query(
@@ -419,8 +420,7 @@ class FailingChatModel(GenericFakeChatModel):
 async def test_stream_failure_persists_sentences_already_emitted(monkeypatch, tmp_path):
     connection = await _install_graph(monkeypatch, tmp_path, [])
     failing_model = FailingChatModel(messages=iter([]))
-    monkeypatch.setattr(agent_graph, "llm_with_tools", failing_model)
-    monkeypatch.setattr(agent_graph, "fallback_llm_with_tools", None)
+    _set_conversation_models(monkeypatch, failing_model)
     try:
         with pytest.raises(RuntimeError, match="scripted stream failure"):
             async for _ in agent_graph.process_query(
