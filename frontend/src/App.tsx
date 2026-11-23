@@ -1,623 +1,1874 @@
-import { useState, useEffect, useRef } from "react";
 import {
-  Mic, Send, Settings, Camera, Image as ImageIcon,
-  Loader2, X, Activity, Cpu, Database, Eye, Radio, AlertTriangle
+  ArrowDown,
+  ChevronDown,
+  FileText,
+  Image as ImageIcon,
+  Mic,
+  Send,
+  Settings,
+  X,
 } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import ReactMarkdown, {
+  type Components,
+} from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { AnimatePresence } from "framer-motion";
+import { VRMAvatar, type Quality, type Speech } from "./VRMAvatar";
+import { Stage, type MediaStageData } from "./Stage";
+import { API_BASE } from "./api";
+import {
+  markdownUrlTransform,
+  ReportSources,
+  reportImage,
+  reportLink,
+  reportTextLink,
+} from "./reportMarkdown.mjs";
 import "./App.css";
-import { VRMAvatar, type Speech } from "./VRMAvatar";
 
-const API_BASE = "http://127.0.0.1:8000";
+const QUALITY_OPTIONS: { value: Quality; label: string }[] = [
+  { value: "low", label: "低" },
+  { value: "balanced", label: "中" },
+  { value: "high", label: "高" },
+];
 
-interface Message {
-  role: "system" | "user" | "assistant";
+const ASSISTANT_NAME = "Aura";
+type DialogueMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
   content: string;
-  image?: string;
-  id?: number;
-}
-
-// ── Real-time log entry from backend SSE ──────────────────────────────
-interface LogEntry {
-  ts: number;          // ms epoch
-  level: string;       // "info" | "warn" | "tool" | "llm" | "flow" | "error"
-  category: string;    // "LLM" | "TOOL" | "FLOW" | "ERROR" | ...
-  message: string;
-  data: Record<string, unknown>;
-}
-
-// ── Color map per level ───────────────────────────────────────────────
-const LEVEL_COLOR: Record<string, string> = {
-  flow: "#00e5ff",    // cyan
-  llm: "#00ff88",    // green
-  tool: "#ffab00",    // amber
-  warn: "#ff9800",    // orange
-  error: "#ff3d5a",    // red
-  info: "#90a4ae",    // grey
+  createdAt: number;
+  turnId?: string;
+  attachments?: Array<{
+    media_id: string;
+    kind: "image" | "video" | "document";
+    filename: string;
+  }>;
+  interrupted?: boolean;
 };
 
-// ── Live system metrics (fake, just for the hardware display) ────────
-function useLiveMetrics() {
-  const [cpu, setCpu] = useState(34);
-  const [mem, setMem] = useState(61);
-  const [net, setNet] = useState(12);
-  useEffect(() => {
-    const t = setInterval(() => {
-      setCpu(c => Math.min(95, Math.max(15, c + (Math.random() - 0.5) * 10)));
-      setMem(m => Math.min(85, Math.max(50, m + (Math.random() - 0.5) * 4)));
-      setNet(n => Math.min(99, Math.max(2, n + (Math.random() - 0.5) * 20)));
-    }, 1800);
-    return () => clearInterval(t);
-  }, []);
-  return { cpu: Math.round(cpu), mem: Math.round(mem), net: Math.round(net) };
-}
+type UploadedAttachment = {
+  media_id: string;
+  kind: "image" | "video" | "document";
+  mime: string;
+  src: string;
+  caption: string;
+  filename: string;
+  previewUrl: string | null;
+};
 
-// ── Mini metric bar ───────────────────────────────────────────────────
-function MetricBar({ label, value, color }: { label: string; value: number; color: string }) {
-  return (
-    <div className="mb-2">
-      <div className="flex justify-between text-[9px] font-mono mb-1" style={{ color }}>
-        <span>{label}</span><span>{value}%</span>
-      </div>
-      <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${value}%`, background: color, boxShadow: `0 0 6px ${color}` }}
-        />
-      </div>
+type ReportSource = { number: number; title: string; url: string };
+
+type Report = {
+  report_id: string;
+  title: string;
+  query: string;
+  markdown: string;
+  created_at: number;
+  complete?: boolean;
+  link_policy?: "open" | "sources_only";
+  sources?: ReportSource[];
+};
+
+type LogEntry = {
+  ts: number;
+  level: string;
+  category: string;
+  message: string;
+};
+
+type CurrentConfig = {
+  profile: string;
+  keys: Record<
+    "openai" | "gemini" | "deepseek" | "tavily",
+    { configured: boolean; hint: string | null }
+  >;
+  roles: Array<{
+    role: string;
+    label: string;
+    provider: string | null;
+    model: string | null;
+    effort: string | null;
+    available: boolean;
+    reason: string | null;
+  }>;
+  services: Array<{
+    name: string;
+    label: string;
+    available: boolean;
+    reason?: string | null;
+    detail?: string;
+  }>;
+};
+
+type UsageSnapshot = {
+  since: number;
+  models: Array<{
+    role: string;
+    provider: string;
+    model: string;
+    calls: number;
+    failed_calls: number;
+    cancelled_calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    reasoning_tokens: number;
+    avg_latency_ms: number;
+    last_latency_ms: number;
+    avg_ttft_ms: number | null;
+    last_ttft_ms: number | null;
+    avg_tokens_per_sec: number | null;
+    last_tokens_per_sec: number | null;
+  }>;
+};
+
+type SpeechSentence = {
+  turn_id: string;
+  id: string;
+  text: string;
+};
+
+type SpeechFetch = {
+  controller: AbortController;
+  promise: Promise<Speech>;
+};
+
+type ChatEvent =
+  | { type: "turn"; turn_id: string }
+  | { type: "status"; state: string; label?: string }
+  | { type: "tool"; name: string; status: string }
+  | ({ type: "speech.sentence" } & SpeechSentence)
+  | {
+      type: "report.open";
+      report_id: string;
+      title: string;
+      query: string;
+      link_policy?: "open" | "sources_only";
+      sources?: ReportSource[];
+    }
+  | { type: "report.delta"; report_id: string; markdown: string }
+  | { type: "report.done"; report_id: string }
+  | { type: "report.highlight"; report_id: string; anchor: string }
+  | ({ type: "stage.show" } & MediaStageData)
+  | { type: "stage.clear" }
+  | { type: "done"; turn_id: string; spoken_text: string }
+  | { type: "error"; message: string };
+
+type BackendState = "idle" | "thinking" | "working";
+
+const markdownComponents: Components = {
+  a: reportLink,
+  img: reportImage,
+  code: ({ children, className }) =>
+    className ? (
+      <code className={className}>{children}</code>
+    ) : (
+      <code className="inline-code">{children}</code>
+    ),
+  pre: ({ children }) => <pre className="md-code">{children}</pre>,
+  table: ({ children }) => (
+    <div className="table-wrap">
+      <table className="md-table">{children}</table>
     </div>
-  );
+  ),
+};
+
+const sourcesOnlyMarkdownComponents: Components = {
+  a: reportTextLink,
+  img: reportImage,
+};
+
+function makeId(prefix: string) {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// ── Waveform ──────────────────────────────────────────────────────────
-function Waveform({ active }: { active: boolean }) {
-  const bars = [7, 12, 8];
-  return (
-    <div className="flex items-center gap-[2px] h-6 flex-none" style={{ width: '16px' }}>
-      {bars.map((h, i) => (
-        <div
-          key={i}
-          className="waveform-bar"
-          style={{
-            height: active ? `${h * 2}px` : '3px',
-            animationDelay: `${i * 0.06}s`,
-            animationDuration: active ? `${0.5 + (i % 5) * 0.12}s` : '0s',
-            opacity: active ? 1 : 0.2,
-            transition: 'height 0.3s ease',
-          }}
-        />
-      ))}
-    </div>
-  );
+function timeLabel(timestamp?: number) {
+  if (!timestamp) return "";
+  const date = new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
-// ── Format timestamp as HH:MM:SS.mmm ─────────────────────────────────
-function fmtTs(ms: number): string {
-  const d = new Date(ms);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+function compactTokenCount(value: number) {
+  if (value < 1000) return String(value);
+  const precision = value >= 100_000 ? 0 : 1;
+  return `${(value / 1000).toFixed(precision).replace(/\.0$/, "")}k`;
 }
 
-// ── Single log row ────────────────────────────────────────────────────
-function LogRow({ entry }: { entry: LogEntry }) {
-  const color = LEVEL_COLOR[entry.level] ?? "#90a4ae";
-  return (
-    <div className="flex gap-1.5 py-[3px] border-b border-white/[0.04] items-start group hover:bg-white/[0.02] transition-colors">
-      <span className="flex-none text-[8px] font-mono text-white/20 pt-px">{fmtTs(entry.ts)}</span>
-      <span className="flex-none text-[8px] font-mono font-bold px-1 rounded"
-        style={{ color, textShadow: `0 0 6px ${color}40` }}>
-        {entry.category}
-      </span>
-      <span className="text-[9px] font-mono leading-relaxed break-words min-w-0"
-        style={{ color: entry.level === 'error' ? '#ff3d5a' : 'rgba(176,224,240,0.75)' }}>
-        {entry.message}
-      </span>
-    </div>
-  );
+function formatMilliseconds(value: number | null) {
+  return value === null ? "—" : `${Math.round(value)} ms`;
 }
 
-// ═════════════════════════════════════════════════════════════════════
+function formatTokenRate(value: number | null) {
+  return value === null ? "—" : `${value.toFixed(1)} tok/s`;
+}
+
+const usageRoleLabels: Record<string, string> = {
+  conversation: "对话",
+  report: "写报告",
+  research: "调查",
+  research_max: "深度调查",
+  vision: "看图",
+  video: "视频",
+  document: "文档",
+};
+
+const providerLabels: Record<string, string> = {
+  openai: "OpenAI",
+  gemini: "Gemini",
+  deepseek: "DeepSeek",
+  tavily: "Tavily",
+};
+
+function stripMarkdown(value: string) {
+  return value
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`+/g, "")
+    .replace(/\*\*|__|~~|\*|_/g, "")
+    .replace(/^\s{0,3}#{1,6}\s*/, "")
+    .replace(/^\s*>\s?/, "")
+    .replace(/^\s*(?:[-+*]|\d+[.)])\s+/, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function reportSummary(markdown: string, title: string) {
+  const lines = markdown.split(/\r?\n/);
+  const tableLines = new Set<number>();
+  const separator = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!separator.test(lines[index])) continue;
+    tableLines.add(index);
+    for (let row = index - 1; row >= 0 && lines[row].includes("|"); row -= 1) tableLines.add(row);
+    for (let row = index + 1; row < lines.length && lines[row].includes("|"); row += 1) tableLines.add(row);
+  }
+
+  const normalizedTitle = stripMarkdown(title).toLocaleLowerCase();
+  let fence: { character: string; length: number } | null = null;
+  let hasCode = false;
+  let hasTable = tableLines.size > 0;
+  let prose = "";
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      if (
+        fenceMatch &&
+        fenceMatch[1][0] === fence.character &&
+        fenceMatch[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fenceMatch) {
+      fence = { character: fenceMatch[1][0], length: fenceMatch[1].length };
+      hasCode = true;
+      continue;
+    }
+    if (tableLines.has(index)) continue;
+    const cleanLine = stripMarkdown(line);
+    if (!cleanLine) continue;
+    const heading = line.match(/^\s{0,3}#{1,6}\s+/);
+    if (heading && cleanLine.toLocaleLowerCase() === normalizedTitle) continue;
+    prose = cleanLine;
+    break;
+  }
+
+  if (prose) {
+    const characters = Array.from(prose);
+    return characters.length > 64 ? `${characters.slice(0, 63).join("")}…` : prose;
+  }
+  const fallback = [];
+  if (hasTable) fallback.push("含表格");
+  if (hasCode) fallback.push("含代码");
+  return fallback.join(" · ");
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function decodeAudio(audio: string, mime: string, visemes: Speech["visemes"]): Speech {
+  const bytes = Uint8Array.from(atob(audio), (character) => character.charCodeAt(0));
+  return {
+    audioUrl: URL.createObjectURL(new Blob([bytes], { type: mime })),
+    visemes,
+  };
+}
+
 export function App() {
-  const [query, setQuery] = useState("");
-  const [isListening, setIsListening] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isAvatarLoaded, setIsAvatarLoaded] = useState(false);
-  const [speech, setSpeech] = useState<Speech | null>(null);
-  const [currentTime, setCurrentTime] = useState("");
-  const [currentDate, setCurrentDate] = useState("");
-  // Session id doubles as the LangGraph thread_id; persisted so conversation memory survives reloads
   const [sessionId] = useState(() => {
     const saved = localStorage.getItem("mercy.threadId");
     if (saved) return saved;
-    const id = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const id = makeId("mp");
     localStorage.setItem("mercy.threadId", id);
     return id;
   });
-  const [msgCount, setMsgCount] = useState(0);
-  const [messages, setMessages] = useState<Message[]>([
-    { role: "system", content: "MERCY PROTOCOL v2.0 — AI JUDICIAL INTERFACE ONLINE. AWAITING SUBJECT INPUT." }
-  ]);
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const [stage, setStage] = useState<MediaStageData | null>(null);
+  const [stageCurrentMediaId, setStageCurrentMediaId] = useState<string | null>(null);
+  const [isReportExpanded, setIsReportExpanded] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(window.innerWidth < 1100);
+  const [isListening, setIsListening] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [hasQueuedSpeech, setHasQueuedSpeech] = useState(false);
+  const [speech, setSpeech] = useState<Speech | null>(null);
+  const [subtitle, setSubtitle] = useState("");
+  const [backendState, setBackendState] = useState<BackendState>("idle");
+  const [workingLabel, setWorkingLabel] = useState("");
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [maxTierAvailable, setMaxTierAvailable] = useState(false);
+  const [imageInputAvailable, setImageInputAvailable] = useState<boolean | null>(null);
+  const [deepMode, setDeepMode] = useState(false);
+  const [leftExpanded, setLeftExpanded] = useState(false);
+  const [avatarQuality, setAvatarQuality] = useState<Quality>(() => {
+    const saved = localStorage.getItem("mercy.avatarQuality");
+    return saved === "low" || saved === "high" ? saved : "balanced";
+  });
+  const [currentConfig, setCurrentConfig] = useState<CurrentConfig | null>(null);
+  const [configUnavailable, setConfigUnavailable] = useState(false);
+  const [usageSnapshot, setUsageSnapshot] = useState<UsageSnapshot | null>(null);
+  const [statsUnavailable, setStatsUnavailable] = useState(false);
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const [clock, setClock] = useState("");
+  const [reports, setReports] = useState<Report[]>([]);
+  const [pendingReportHighlight, setPendingReportHighlight] = useState<{
+    reportId: string;
+    anchor: string;
+    nonce: number;
+  } | null>(null);
+  const [messages, setMessages] = useState<DialogueMessage[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [hasUnreadReports, setHasUnreadReports] = useState(false);
+  const [isAvatarLoaded, setIsAvatarLoaded] = useState(false);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { cpu, mem, net } = useLiveMetrics();
+  const reportListRef = useRef<HTMLDivElement>(null);
+  const dialogueListRef = useRef<HTMLDivElement>(null);
+  const logFeedRef = useRef<HTMLDivElement>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement>(null);
+  const drawerOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const subtitleTextRef = useRef<HTMLDivElement>(null);
+  const reportAtBottomRef = useRef(true);
+  const shouldFollowReportRef = useRef(false);
+  const viewingReportIdRef = useRef<string | null>(null);
+  const sessionRestoredRef = useRef(false);
+  const requestControllerRef = useRef<AbortController | null>(null);
+  const activeTurnIdRef = useRef<string | null>(null);
+  const pendingInterruptedRef = useRef<{ turn_id: string; spoken_sentence_ids: string[] } | null>(null);
+  const sentenceTextRef = useRef(new Map<string, string>());
+  const spokenSentenceIdsRef = useRef(new Map<string, string[]>());
+  const speechQueueRef = useRef<SpeechSentence[]>([]);
+  const speechCacheRef = useRef(new Map<string, Speech>());
+  const speechFetchesRef = useRef(new Map<string, SpeechFetch>());
+  const speechFailuresRef = useRef(new Set<string>());
+  const currentPlaybackRef = useRef<{ sentence: SpeechSentence; audio: Speech } | null>(null);
+  const speechWatchdogRef = useRef<number | null>(null);
+  const speechMetadataTimeoutRef = useRef<number | null>(null);
+  const speechMetadataProbeRef = useRef<HTMLAudioElement | null>(null);
+  const handleAudioEndRef = useRef<() => void>(() => undefined);
+  const isPumpingRef = useRef(false);
+  const audioEpochRef = useRef(0);
+  const highlightTimersRef = useRef(
+    new Map<string, { timer: number; target: HTMLElement }>(),
+  );
+  const reportHighlightNonceRef = useRef(0);
 
-  // Clock
-  useEffect(() => {
-    const tick = () => {
-      const now = new Date();
-      setCurrentTime(now.toLocaleTimeString('en-US', { hour12: false }));
-      setCurrentDate(now.toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' }));
-    };
-    tick();
-    const t = setInterval(tick, 1000);
-    return () => clearInterval(t);
+  const addSystemNotice = useCallback((content: string) => {
+    setMessages((previous) => [
+      ...previous,
+      { id: makeId("notice"), role: "system", content, createdAt: Date.now() },
+    ]);
   }, []);
 
-  // SSE — real-time backend log stream
+  const getSpeechAudio = useCallback((sentenceId: string) => {
+    const cached = speechCacheRef.current.get(sentenceId);
+    if (cached) return Promise.resolve(cached);
+
+    const activeFetch = speechFetchesRef.current.get(sentenceId);
+    if (activeFetch) return activeFetch.promise;
+
+    const controller = new AbortController();
+    const promise = fetch(`${API_BASE}/api/speech/${encodeURIComponent(sentenceId)}`, {
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Speech request failed: ${response.status}`);
+        const payload = (await response.json()) as {
+          audio: string;
+          mime: string;
+          visemes: Speech["visemes"];
+        };
+        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        const audio = decodeAudio(payload.audio, payload.mime, payload.visemes);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(audio.audioUrl);
+          throw new DOMException("Aborted", "AbortError");
+        }
+        speechCacheRef.current.set(sentenceId, audio);
+        return audio;
+      })
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) speechFailuresRef.current.add(sentenceId);
+        throw error;
+      })
+      .finally(() => {
+        if (speechFetchesRef.current.get(sentenceId)?.controller === controller) {
+          speechFetchesRef.current.delete(sentenceId);
+        }
+      });
+
+    speechFetchesRef.current.set(sentenceId, { controller, promise });
+    return promise;
+  }, []);
+
+  const prefetchNextSentence = useCallback(() => {
+    const next = speechQueueRef.current[0];
+    if (!next || speechFailuresRef.current.has(next.id)) return;
+    void getSpeechAudio(next.id).catch(() => undefined);
+  }, [getSpeechAudio]);
+
+  const clearSpeechMetadataProbe = useCallback(() => {
+    if (speechMetadataTimeoutRef.current !== null) {
+      window.clearTimeout(speechMetadataTimeoutRef.current);
+      speechMetadataTimeoutRef.current = null;
+    }
+    const probe = speechMetadataProbeRef.current;
+    if (probe) {
+      probe.onloadedmetadata = null;
+      probe.onerror = null;
+      probe.pause();
+      probe.removeAttribute("src");
+      probe.load();
+      speechMetadataProbeRef.current = null;
+    }
+  }, []);
+
+  const pumpSpeechQueue = useCallback(async () => {
+    if (isPumpingRef.current || currentPlaybackRef.current) return;
+    const sentence = speechQueueRef.current.shift();
+    if (!sentence) {
+      setHasQueuedSpeech(false);
+      if (!requestControllerRef.current) activeTurnIdRef.current = null;
+      return;
+    }
+
+    const epoch = audioEpochRef.current;
+    isPumpingRef.current = true;
+    setSubtitle(sentence.text);
+    try {
+      if (!speechFailuresRef.current.has(sentence.id)) {
+        const audio = await getSpeechAudio(sentence.id);
+        if (epoch !== audioEpochRef.current) return;
+        speechCacheRef.current.delete(sentence.id);
+        const spoken = spokenSentenceIdsRef.current.get(sentence.turn_id) ?? [];
+        if (!spoken.includes(sentence.id)) {
+          spoken.push(sentence.id);
+          spokenSentenceIdsRef.current.set(sentence.turn_id, spoken);
+        }
+        currentPlaybackRef.current = { sentence, audio };
+        setSubtitle(sentence.text);
+        setIsAudioPlaying(true);
+        setHasQueuedSpeech(true);
+        setSpeech(audio);
+        const lastVisemeEnd = audio.visemes.reduce(
+          (latestEnd, cue) => Math.max(latestEnd, cue.end),
+          0,
+        );
+        const handedAt = performance.now();
+        clearSpeechMetadataProbe();
+        const probe = new Audio(audio.audioUrl);
+        probe.preload = "metadata";
+        speechMetadataProbeRef.current = probe;
+        let metadataHandled = false;
+        const scheduleWatchdog = (audioDuration: number) => {
+          if (metadataHandled) return;
+          metadataHandled = true;
+          clearSpeechMetadataProbe();
+          if (
+            epoch !== audioEpochRef.current ||
+            currentPlaybackRef.current?.sentence.id !== sentence.id
+          ) {
+            return;
+          }
+          if (speechWatchdogRef.current !== null) {
+            window.clearTimeout(speechWatchdogRef.current);
+          }
+          const duration = Number.isFinite(audioDuration)
+            ? audioDuration
+            : lastVisemeEnd;
+          const totalDuration = Math.max(lastVisemeEnd, duration, 0.5) + 3;
+          const delay = Math.max(
+            0,
+            totalDuration * 1000 - (performance.now() - handedAt),
+          );
+          speechWatchdogRef.current = window.setTimeout(() => {
+            speechWatchdogRef.current = null;
+            handleAudioEndRef.current();
+          }, delay);
+        };
+        probe.onloadedmetadata = () => scheduleWatchdog(probe.duration);
+        probe.onerror = () => scheduleWatchdog(lastVisemeEnd);
+        speechMetadataTimeoutRef.current = window.setTimeout(
+          () => scheduleWatchdog(lastVisemeEnd),
+          2000,
+        );
+      }
+    } catch (error) {
+      if (!isAbortError(error)) setSubtitle(sentence.text);
+    } finally {
+      if (epoch === audioEpochRef.current) isPumpingRef.current = false;
+    }
+
+    if (epoch !== audioEpochRef.current) return;
+    if (currentPlaybackRef.current) {
+      prefetchNextSentence();
+      return;
+    }
+    if (speechQueueRef.current.length > 0) {
+      setHasQueuedSpeech(true);
+      requestAnimationFrame(() => void pumpSpeechQueue());
+    } else {
+      setHasQueuedSpeech(false);
+      if (!requestControllerRef.current) activeTurnIdRef.current = null;
+    }
+  }, [clearSpeechMetadataProbe, getSpeechAudio, prefetchNextSentence]);
+
+  const enqueueSentence = useCallback(
+    (sentence: SpeechSentence) => {
+      sentenceTextRef.current.set(sentence.id, sentence.text);
+      speechQueueRef.current.push(sentence);
+      setHasQueuedSpeech(true);
+      if (currentPlaybackRef.current) prefetchNextSentence();
+      else void pumpSpeechQueue();
+    },
+    [prefetchNextSentence, pumpSpeechQueue],
+  );
+
+  const handleAudioEnd = useCallback(() => {
+    if (speechWatchdogRef.current !== null) {
+      window.clearTimeout(speechWatchdogRef.current);
+      speechWatchdogRef.current = null;
+    }
+    clearSpeechMetadataProbe();
+    const playback = currentPlaybackRef.current;
+    if (!playback) return;
+    URL.revokeObjectURL(playback.audio.audioUrl);
+    currentPlaybackRef.current = null;
+    setSpeech(null);
+    setIsAudioPlaying(false);
+    if (speechQueueRef.current.length > 0) {
+      setHasQueuedSpeech(true);
+      requestAnimationFrame(() => void pumpSpeechQueue());
+    } else {
+      setHasQueuedSpeech(false);
+      if (!requestControllerRef.current) activeTurnIdRef.current = null;
+    }
+  }, [clearSpeechMetadataProbe, pumpSpeechQueue]);
+
   useEffect(() => {
-    const es = new EventSource(`${API_BASE}/api/logs`);
-    es.onmessage = (e) => {
+    handleAudioEndRef.current = handleAudioEnd;
+  }, [handleAudioEnd]);
+
+  const interruptActiveTurn = useCallback(() => {
+    const turnId = activeTurnIdRef.current;
+    const hasActiveWork =
+      Boolean(turnId) ||
+      Boolean(requestControllerRef.current) ||
+      Boolean(currentPlaybackRef.current) ||
+      speechQueueRef.current.length > 0 ||
+      isPumpingRef.current;
+    if (!hasActiveWork) return;
+
+    if (turnId) {
+      const spokenIds = [...(spokenSentenceIdsRef.current.get(turnId) ?? [])];
+      pendingInterruptedRef.current = { turn_id: turnId, spoken_sentence_ids: spokenIds };
+      const spokenText = spokenIds.map((id) => sentenceTextRef.current.get(id) ?? "").join("");
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.turnId === turnId
+            ? { ...message, content: spokenText, interrupted: true }
+            : message,
+        ),
+      );
+    }
+
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = null;
+    for (const request of speechFetchesRef.current.values()) request.controller.abort();
+    speechFetchesRef.current.clear();
+    for (const audio of speechCacheRef.current.values()) URL.revokeObjectURL(audio.audioUrl);
+    speechCacheRef.current.clear();
+    speechFailuresRef.current.clear();
+    speechQueueRef.current = [];
+    clearSpeechMetadataProbe();
+    if (speechWatchdogRef.current !== null) {
+      window.clearTimeout(speechWatchdogRef.current);
+      speechWatchdogRef.current = null;
+    }
+    const playback = currentPlaybackRef.current;
+    if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+    currentPlaybackRef.current = null;
+    audioEpochRef.current += 1;
+    isPumpingRef.current = false;
+    activeTurnIdRef.current = null;
+    setSpeech(null);
+    setIsAudioPlaying(false);
+    setHasQueuedSpeech(false);
+    setIsLoading(false);
+    setBackendState("idle");
+  }, [clearSpeechMetadataProbe]);
+
+  useEffect(() => {
+    const updateClock = () =>
+      setClock(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }));
+    updateClock();
+    const timer = window.setInterval(updateClock, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const updateWidth = () => setIsNarrow(window.innerWidth < 1100);
+    window.addEventListener("resize", updateWidth);
+    return () => window.removeEventListener("resize", updateWidth);
+  }, []);
+
+  useEffect(() => {
+    const eventSource = new EventSource(`${API_BASE}/api/logs`);
+    eventSource.onopen = () => setBackendConnected(true);
+    eventSource.onerror = () => setBackendConnected(false);
+    eventSource.onmessage = (event) => {
       try {
-        const entry: LogEntry = JSON.parse(e.data);
-        setLogs(prev => {
-          const next = [...prev, entry];
-          return next.length > 300 ? next.slice(-300) : next; // cap at 300 entries
-        });
-      } catch { }
+        const entry = JSON.parse(event.data) as LogEntry;
+        setLogs((previous) => [...previous, entry].slice(-300));
+      } catch {
+        // Ignore malformed log entries and keep the live connection.
+      }
     };
-    es.onerror = () => { };
-    return () => es.close();
+    return () => eventSource.close();
   }, []);
 
-  // Auto-scroll logs
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!backendConnected) {
+      setMaxTierAvailable(false);
+      setImageInputAvailable(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`${API_BASE}/api/capabilities`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Capabilities request failed: ${response.status}`);
+        return (await response.json()) as {
+          max_tier?: boolean;
+          image_input?: boolean;
+        };
+      })
+      .then((capabilities) => {
+        const available = capabilities.max_tier === true;
+        setMaxTierAvailable(available);
+        setImageInputAvailable(capabilities.image_input === true);
+        if (!available) setDeepMode(false);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [backendConnected]);
+
+  useEffect(() => {
+    if (!backendConnected || sessionRestoredRef.current) return;
+    const controller = new AbortController();
+    fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          addSystemNotice("无法恢复本地会话记录。");
+          return null;
+        }
+        return (await response.json()) as {
+          reports?: Report[];
+          stage?: MediaStageData | null;
+          utterances?: Array<{
+            id: number;
+            turn_id: string;
+            role: "user" | "assistant";
+            text: string;
+            attachments?: Array<{
+              media_id: string;
+              kind: "image" | "video" | "document";
+              filename: string;
+            }>;
+            interrupted?: boolean;
+            created_at: number;
+          }>;
+        };
+      })
+      .then((session) => {
+        if (!session || controller.signal.aborted) return;
+        sessionRestoredRef.current = true;
+        const restoredReports = (session.reports ?? []).map((report) => ({
+          ...report,
+          complete: true,
+          link_policy: report.link_policy ?? "open",
+        }));
+        const restoredMessages = (session.utterances ?? [])
+          .filter((utterance) => utterance.text.trim() || utterance.attachments?.length)
+          .map((utterance) => ({
+            id: `utterance_${utterance.id}`,
+            turnId: utterance.turn_id,
+            role: utterance.role,
+            content: utterance.text,
+            attachments: utterance.attachments ?? [],
+            interrupted: utterance.interrupted,
+            createdAt: utterance.created_at,
+          }));
+        setReports((previous) => (previous.length ? previous : restoredReports));
+        setMessages((previous) => (previous.length ? previous : restoredMessages));
+        if (session.stage) {
+          setStage(session.stage);
+          setStageCurrentMediaId(session.stage.items[0]?.media_id ?? null);
+        }
+        shouldFollowReportRef.current = true;
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) return;
+      });
+    return () => controller.abort();
+  }, [addSystemNotice, backendConnected, sessionId]);
+
+  useEffect(() => {
+    const feed = logFeedRef.current;
+    if (feed) feed.scrollTop = feed.scrollHeight;
   }, [logs]);
 
-  // Auto-scroll chat
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, selectedImage]);
+  useLayoutEffect(() => {
+    if (leftExpanded) {
+      drawerCloseRef.current?.focus();
+      return;
+    }
+    if (drawerOpenerRef.current?.isConnected) drawerOpenerRef.current.focus();
+    drawerOpenerRef.current = null;
+  }, [leftExpanded]);
 
-  // ASR
+  useEffect(() => {
+    if (!leftExpanded) return;
+    let active = true;
+    const configController = new AbortController();
+    let statsController: AbortController | null = null;
+    setConfigUnavailable(false);
+    setStatsUnavailable(false);
+
+    void fetch(`${API_BASE}/api/config`, { signal: configController.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error("Config request failed");
+        return response.json() as Promise<CurrentConfig>;
+      })
+      .then((config) => {
+        if (active) setCurrentConfig(config);
+      })
+      .catch((error: unknown) => {
+        if (active && !isAbortError(error)) setConfigUnavailable(true);
+      });
+
+    const loadStats = async () => {
+      statsController?.abort();
+      const controller = new AbortController();
+      statsController = controller;
+      try {
+        const response = await fetch(`${API_BASE}/api/stats`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Stats request failed");
+        const snapshot = (await response.json()) as UsageSnapshot;
+        if (active) {
+          setUsageSnapshot(snapshot);
+          setStatsUnavailable(false);
+        }
+      } catch (error) {
+        if (active && !isAbortError(error)) setStatsUnavailable(true);
+      }
+    };
+
+    void loadStats();
+    const timer = window.setInterval(() => void loadStats(), 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      configController.abort();
+      statsController?.abort();
+    };
+  }, [leftExpanded]);
+
+  useEffect(() => {
+    if (!leftExpanded) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setLeftExpanded(false);
+      setLogsExpanded(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [leftExpanded]);
+
+  useLayoutEffect(() => {
+    const list = reportListRef.current;
+    if (!list) return;
+    if (shouldFollowReportRef.current) {
+      list.scrollTop = list.scrollHeight;
+      reportAtBottomRef.current = true;
+      shouldFollowReportRef.current = false;
+    } else if (shouldFollowReportRef.current || reportAtBottomRef.current) {
+      list.scrollTop = list.scrollHeight;
+      reportAtBottomRef.current = true;
+    }
+    if (shouldFollowReportRef.current) shouldFollowReportRef.current = false;
+  }, [reports]);
+
+  useEffect(() => {
+    const list = reportListRef.current;
+    if (!list) return;
+    const cards = Array.from(list.querySelectorAll<HTMLElement>(".report-card"));
+    const ratios = new Map<string, number>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const id = (entry.target as HTMLElement).dataset.reportId;
+          if (id) ratios.set(id, entry.isIntersecting ? entry.intersectionRatio : 0);
+        }
+        const visible = [...ratios.entries()].sort((a, b) => b[1] - a[1])[0];
+        if (visible && visible[1] > 0) viewingReportIdRef.current = visible[0];
+      },
+      { root: list, threshold: [0, 0.2, 0.5, 0.8, 1] },
+    );
+    cards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, [reports]);
+
+  useEffect(() => {
+    const panel = dialogueListRef.current;
+    if (panel) panel.scrollTop = panel.scrollHeight;
+  }, [messages]);
+
+  useEffect(() => {
+    const element = subtitleTextRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [subtitle]);
+
   useEffect(() => {
     if (!isListening) return;
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { setIsListening(false); return; }
-    const rec = new SR();
-    rec.lang = "zh-CN";
-    rec.interimResults = false;
-    rec.onresult = (e: any) => {
-      setQuery(prev => prev ? prev + " " + e.results[0][0].transcript : e.results[0][0].transcript);
+    const Recognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!Recognition) {
+      setIsListening(false);
+      return;
+    }
+    const recognition = new Recognition();
+    recognition.lang = "zh-CN";
+    recognition.interimResults = false;
+    recognition.onresult = (event: any) => {
+      const recognized = event.results?.[0]?.[0]?.transcript;
+      if (recognized) setQuery((previous) => (previous ? `${previous} ${recognized}` : recognized));
       setIsListening(false);
     };
-    rec.onerror = () => setIsListening(false);
-    rec.onend = () => setIsListening(false);
-    try { rec.start(); } catch { setIsListening(false); }
-    return () => { try { rec.stop(); } catch { } };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    try {
+      recognition.start();
+    } catch {
+      setIsListening(false);
+    }
+    return () => {
+      try {
+        recognition.stop();
+      } catch {
+        // Recognition may already have stopped.
+      }
+    };
   }, [isListening]);
 
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      if (typeof ev.target?.result === 'string') setSelectedImage(ev.target.result);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  };
+  useEffect(
+    () => () => {
+      requestControllerRef.current?.abort();
+      for (const request of speechFetchesRef.current.values()) request.controller.abort();
+      for (const audio of speechCacheRef.current.values()) URL.revokeObjectURL(audio.audioUrl);
+      const playback = currentPlaybackRef.current;
+      if (playback) URL.revokeObjectURL(playback.audio.audioUrl);
+      clearSpeechMetadataProbe();
+      if (speechWatchdogRef.current !== null) {
+        window.clearTimeout(speechWatchdogRef.current);
+        speechWatchdogRef.current = null;
+      }
+      for (const { timer } of highlightTimersRef.current.values()) window.clearTimeout(timer);
+    },
+    [clearSpeechMetadataProbe],
+  );
 
-  const speak = async (text: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/api/speech`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { audio, mime, visemes } = await res.json();
-      const bytes = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
-      const audioUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
-      setSpeech(prev => { if (prev) URL.revokeObjectURL(prev.audioUrl); return { audioUrl, visemes }; });
-    } catch (e) {
-      console.warn("[TTS] speech failed:", e);
+  const applyReportHighlight = useCallback((reportId: string, anchor: string) => {
+    const list = reportListRef.current;
+    if (!list) return false;
+    const card = Array.from(list.querySelectorAll<HTMLElement>(".report-card")).find(
+      (item) => item.dataset.reportId === reportId,
+    );
+    if (!card) return false;
+    const target = Array.from(card.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6,p,li,td,pre")).find(
+      (item) => item.textContent?.toLocaleLowerCase().includes(anchor.toLocaleLowerCase()),
+    );
+    if (!target) return false;
+    const previous = highlightTimersRef.current.get(reportId);
+    if (previous) {
+      window.clearTimeout(previous.timer);
+      previous.target.classList.remove("report-highlight");
+      highlightTimersRef.current.delete(reportId);
     }
-  };
+    target.classList.add("report-highlight");
+    list.scrollTo({
+      top: list.scrollTop + target.getBoundingClientRect().top - list.getBoundingClientRect().top - 24,
+      behavior: "smooth",
+    });
+    const timer = window.setTimeout(() => {
+      if (highlightTimersRef.current.get(reportId)?.timer !== timer) return;
+      target.classList.remove("report-highlight");
+      highlightTimersRef.current.delete(reportId);
+    }, 4500);
+    highlightTimersRef.current.set(reportId, { timer, target });
+    return true;
+  }, []);
 
-  const handleSend = async () => {
-    if ((!query.trim() && !selectedImage) || isLoading) return;
-    const userMsg = query.trim();
-    const img = selectedImage;
-    setQuery(""); setSelectedImage(null);
-    setMessages(prev => [...prev, { role: "user", content: userMsg, image: img || undefined }]);
-    setMsgCount(c => c + 1);
+  useLayoutEffect(() => {
+    if (!pendingReportHighlight || !isReportExpanded) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (applyReportHighlight(pendingReportHighlight.reportId, pendingReportHighlight.anchor)) {
+        setPendingReportHighlight((pending) =>
+          pending?.nonce === pendingReportHighlight.nonce ? null : pending,
+        );
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [applyReportHighlight, isReportExpanded, pendingReportHighlight, reports, stage]);
+
+  const handleChatEvent = useCallback(
+    (event: ChatEvent) => {
+      switch (event.type) {
+        case "turn":
+          activeTurnIdRef.current = event.turn_id;
+          spokenSentenceIdsRef.current.set(event.turn_id, []);
+          setMessages((previous) => [
+            ...previous,
+            {
+              id: event.turn_id,
+              turnId: event.turn_id,
+              role: "assistant",
+              content: "",
+              createdAt: Date.now(),
+            },
+          ]);
+          break;
+        case "status":
+          if (event.state === "thinking") {
+            setBackendState("thinking");
+            setWorkingLabel("");
+          } else if (event.state === "working") {
+            setBackendState("working");
+            setWorkingLabel(event.label ?? "正在处理");
+          } else if (event.state === "idle") {
+            setBackendState("idle");
+            setWorkingLabel("");
+          }
+          break;
+        case "speech.sentence":
+          setMessages((previous) => {
+            const index = previous.findIndex(
+              (message) => message.role === "assistant" && message.turnId === event.turn_id,
+            );
+            if (index === -1) {
+              return [
+                ...previous,
+                {
+                  id: event.turn_id,
+                  turnId: event.turn_id,
+                  role: "assistant",
+                  content: event.text,
+                  createdAt: Date.now(),
+                },
+              ];
+            }
+            const next = [...previous];
+            next[index] = { ...next[index], content: next[index].content + event.text };
+            return next;
+          });
+          enqueueSentence({ turn_id: event.turn_id, id: event.id, text: event.text });
+          break;
+        case "report.open": {
+          const follow = reportAtBottomRef.current;
+          shouldFollowReportRef.current = follow;
+          if (!follow) setHasUnreadReports(true);
+          setReports((previous) => {
+            if (previous.some((report) => report.report_id === event.report_id)) return previous;
+            return [
+              ...previous,
+              {
+                report_id: event.report_id,
+                title: event.title,
+                query: event.query,
+                markdown: "",
+                created_at: Date.now() / 1000,
+                complete: false,
+                link_policy: event.link_policy ?? "open",
+                sources:
+                  event.sources ??
+                  (event.link_policy === "sources_only" ? [] : undefined),
+              },
+            ];
+          });
+          break;
+        }
+        case "report.delta":
+          setReports((previous) =>
+            previous.map((report) =>
+              report.report_id === event.report_id
+                ? { ...report, markdown: report.markdown + event.markdown }
+                : report,
+            ),
+          );
+          break;
+        case "report.done":
+          setReports((previous) =>
+            previous.map((report) =>
+              report.report_id === event.report_id ? { ...report, complete: true } : report,
+            ),
+          );
+          break;
+        case "report.highlight":
+          setPendingReportHighlight({
+            reportId: event.report_id,
+            anchor: event.anchor,
+            nonce: ++reportHighlightNonceRef.current,
+          });
+          setStage((previous) =>
+            previous?.focus === "primary" ? { ...previous, focus: "normal" } : previous,
+          );
+          setIsReportExpanded(true);
+          break;
+        case "stage.show":
+          setStage({ caption: event.caption, focus: event.focus, items: event.items });
+          setStageCurrentMediaId((current) =>
+            event.items.some((item) => item.media_id === current)
+              ? current
+              : event.items[0]?.media_id ?? null,
+          );
+          setIsReportExpanded(false);
+          break;
+        case "stage.clear":
+          setStage(null);
+          setStageCurrentMediaId(null);
+          break;
+        case "done":
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.role === "assistant" &&
+              message.turnId === event.turn_id &&
+              !message.content &&
+              event.spoken_text
+                ? { ...message, content: event.spoken_text }
+                : message,
+            ),
+          );
+          setBackendState("idle");
+          setWorkingLabel("");
+          break;
+        case "error":
+          addSystemNotice(event.message);
+          setBackendState("idle");
+          setWorkingLabel("");
+          break;
+        case "tool":
+          break;
+      }
+    },
+    [addSystemNotice, enqueueSentence],
+  );
+
+  const handleSend = useCallback(async () => {
+    const message = query.trim();
+    const pendingAttachments = attachments;
+    if (!message && pendingAttachments.length === 0) return;
+    if (
+      activeTurnIdRef.current ||
+      requestControllerRef.current ||
+      currentPlaybackRef.current ||
+      speechQueueRef.current.length > 0 ||
+      isPumpingRef.current
+    ) {
+      interruptActiveTurn();
+    }
+
+    const interrupted = pendingInterruptedRef.current ?? undefined;
+    pendingInterruptedRef.current = null;
+    const text = message || "请帮我看看这份媒体。";
+    setQuery("");
+    setAttachments([]);
+    pendingAttachments.forEach((attachment) => {
+      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    });
+    setMessages((previous) => [
+      ...previous,
+      {
+        id: makeId("user"),
+        role: "user",
+        content: text,
+        attachments: pendingAttachments.map(({ media_id, kind, filename }) => ({
+          media_id,
+          kind,
+          filename,
+        })),
+        createdAt: Date.now(),
+      },
+    ]);
+
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
     setIsLoading(true);
-
-    const replyId = Date.now();
-    const updateReply = (fn: (content: string) => string) => {
-      setMessages(prev => {
-        const idx = prev.findIndex(m => m.id === replyId);
-        if (idx === -1) return [...prev, { role: "assistant", content: fn(""), id: replyId }];
-        const next = [...prev];
-        next[idx] = { ...next[idx], content: fn(next[idx].content) };
-        return next;
-      });
-    };
-    const appendToken = (token: string) => updateReply(c => c + token);
-    const setFinalReply = (reply: string) => updateReply(() => reply);
-
+    setBackendState("thinking");
+    setWorkingLabel("");
     try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
+      const response = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
-          message: userMsg || "Please analyze this image.",
-          image_base64: img || undefined,
+          message: text,
           thread_id: sessionId,
-        })
+          attachments: pendingAttachments.map((attachment) => attachment.media_id),
+          screen_state: {
+            viewing_report_id: viewingReportIdRef.current,
+            stage_media_ids: stage?.items.map((item) => item.media_id) ?? [],
+            stage_current_media_id: stageCurrentMediaId,
+          },
+          model_tier: deepMode ? "max" : "normal",
+          interrupted,
+        }),
       });
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-
-      const reader = res.body.getReader();
+      if (!response.ok) throw new Error(`Chat request failed: ${response.status}`);
+      if (!response.body) throw new Error("Chat response did not include a stream.");
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let finalReply = "";
-      for (; ;) {
+      const dispatch = (chunk: string) => {
+        const data = chunk
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (!data || controller.signal.aborted) return;
+        try {
+          handleChatEvent(JSON.parse(data) as ChatEvent);
+        } catch {
+          addSystemNotice("收到无法识别的后端事件。");
+        }
+      };
+
+      while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        let sep;
-        while ((sep = buffer.indexOf("\n\n")) !== -1) {
-          const raw = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          const data = raw.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart()).join("\n");
-          if (!data) continue;
-          const evt = JSON.parse(data);
-          if (evt.type === "token") appendToken(evt.content);
-          else if (evt.type === "done") { finalReply = evt.reply; setFinalReply(evt.reply); }
-          else if (evt.type === "error") setMessages(prev => [...prev, { role: "system", content: "COMM_FAIL >> " + evt.message }]);
+        let separator = buffer.indexOf("\n\n");
+        while (separator !== -1) {
+          dispatch(buffer.slice(0, separator));
+          buffer = buffer.slice(separator + 2);
+          separator = buffer.indexOf("\n\n");
         }
       }
-
-      if (finalReply) {
-        setMsgCount(c => c + 1);
-        speak(finalReply);
-      }
-    } catch {
-      setMessages(prev => [...prev, { role: "system", content: "NET_ERR >> BACKEND UNREACHABLE" }]);
+      buffer += decoder.decode();
+      if (buffer.trim()) dispatch(buffer);
+    } catch (error) {
+      if (!isAbortError(error)) addSystemNotice(error instanceof Error ? error.message : "对话请求失败。");
     } finally {
-      setIsLoading(false);
+      if (requestControllerRef.current === controller) {
+        requestControllerRef.current = null;
+        setIsLoading(false);
+      }
+      if (
+        !requestControllerRef.current &&
+        !currentPlaybackRef.current &&
+        speechQueueRef.current.length === 0 &&
+        !isPumpingRef.current
+      ) {
+        activeTurnIdRef.current = null;
+      }
+    }
+  }, [addSystemNotice, attachments, deepMode, handleChatEvent, interruptActiveTurn, query, sessionId, stage, stageCurrentMediaId]);
+
+  const handleImageSelect = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    for (const file of files) {
+      try {
+        const form = new FormData();
+        form.append("thread_id", sessionId);
+        form.append("file", file);
+        const response = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: form });
+        if (!response.ok) {
+          const body = await response.json().catch(() => null);
+          throw new Error(body?.detail ?? `上传失败：${response.status}`);
+        }
+        const uploaded = (await response.json()) as {
+          media_id: string;
+          kind: "image" | "video" | "document";
+          mime: string;
+        };
+        setAttachments((previous) => [
+          ...previous,
+          {
+            ...uploaded,
+            src: `/api/media/${uploaded.media_id}`,
+            caption: file.name,
+            filename: file.name,
+            previewUrl:
+              uploaded.kind === "image" ? URL.createObjectURL(file) : null,
+          },
+        ]);
+      } catch (error) {
+        addSystemNotice(error instanceof Error ? error.message : "媒体上传失败。");
+      }
     }
   };
 
+  const handleRemoveAttachment = (mediaId: string) => {
+    setAttachments((previous) => {
+      const removed = previous.find((item) => item.media_id === mediaId);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return previous.filter((item) => item.media_id !== mediaId);
+    });
+  };
+
+  const handleCloseStage = useCallback(async () => {
+    setStage(null);
+    setStageCurrentMediaId(null);
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/session/${encodeURIComponent(sessionId)}/stage`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error(`关闭展示台失败：${response.status}`);
+    } catch (error) {
+      addSystemNotice(error instanceof Error ? error.message : "关闭展示台失败。");
+    }
+  }, [addSystemNotice, sessionId]);
+
+  const handleComposerChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    const next = event.target.value;
+    if (next && !query && (
+      activeTurnIdRef.current ||
+      requestControllerRef.current ||
+      currentPlaybackRef.current ||
+      speechQueueRef.current.length > 0 ||
+      isPumpingRef.current
+    )) {
+      interruptActiveTurn();
+    }
+    setQuery(next);
+  };
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void handleSend();
+    }
+  };
+
+  const handleMicToggle = () => {
+    if (!isListening) interruptActiveTurn();
+    setIsListening((previous) => !previous);
+  };
+
+  const handleReportScroll = () => {
+    const list = reportListRef.current;
+    if (!list) return;
+    const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 36;
+    reportAtBottomRef.current = atBottom;
+    if (atBottom) setHasUnreadReports(false);
+  };
+
+  const scrollToLatestReport = () => {
+    const list = reportListRef.current;
+    if (!list) return;
+    list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+    reportAtBottomRef.current = true;
+    setHasUnreadReports(false);
+  };
+
+  const status =
+    isListening || query.trim()
+      ? { state: "listening", label: "倾听中" }
+      : hasQueuedSpeech || isAudioPlaying
+        ? { state: "speaking", label: "说话中" }
+        : backendState === "thinking"
+          ? { state: "thinking", label: "思考中" }
+          : backendState === "working"
+            ? { state: "thinking", label: workingLabel || "正在处理" }
+            : { state: "idle", label: "空闲" };
+  const latestReport = reports[reports.length - 1];
+  const latestReportSummary = latestReport
+    ? reportSummary(latestReport.markdown, latestReport.title)
+    : "";
+  const reportNeedsLayout = Boolean(
+    latestReport &&
+      (latestReport.markdown.length > 1500 ||
+        /^\s*\|?.+\|\s*\n\s*\|?\s*:?-{3,}/m.test(latestReport.markdown)),
+  );
+  const layout = stage
+    ? stage.focus === "primary" && !isNarrow
+      ? "focus_evidence"
+      : "evidence"
+    : reportNeedsLayout
+      ? "report"
+      : "conversation";
+  const closeSettings = () => {
+    setLeftExpanded(false);
+    setLogsExpanded(false);
+  };
+  const toggleSettings = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (leftExpanded) {
+      closeSettings();
+      return;
+    }
+    drawerOpenerRef.current = event.currentTarget;
+    setLeftExpanded(true);
+  };
+
   return (
-    <div className="w-full h-full tactical-grid scanlines vignette overflow-hidden relative flex flex-col"
-      style={{ fontFamily: "'Rajdhani', sans-serif" }}>
-
-      {/* ══════════ TOP COMMAND BAR ══════════ */}
-      <div
-        data-tauri-drag-region
-        className="flex-none h-10 flex items-center justify-between px-5 z-50 cursor-move relative"
-        style={{ background: 'rgba(0,5,15,0.95)', borderBottom: '1px solid rgba(0,229,255,0.15)' }}
-      >
-        <div className="flex items-center gap-3 pointer-events-none">
-          <div className="w-2 h-2 rounded-full bg-[#00e5ff] pulse-cyan" />
-          <span className="text-[10px] font-mono font-bold neon-cyan tracking-[0.25em] flicker">
-            MERCY PROTOCOL // JUDICIAL AI v2.0
-          </span>
-        </div>
-        <div className="flex items-center gap-6 pointer-events-none text-[9px] font-mono">
-          <span className="text-white/30">SESSION</span>
-          <span className="neon-amber tracking-widest">{sessionId}</span>
-          <div className="w-px h-4 bg-white/10" />
-          <span className="text-white/30">CASE</span>
-          <span className="text-white/60 tracking-wider">2026-MERCY-{String(msgCount).padStart(3, '0')}</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-right pointer-events-none">
-            <div className="text-[11px] font-mono font-bold neon-cyan">{currentTime}</div>
-            <div className="text-[8px] font-mono text-white/30 tracking-wider">{currentDate}</div>
+    <div id="app" data-layout={layout} data-left-expanded={leftExpanded} data-state={status.state}>
+      <header id="topbar" data-tauri-drag-region>
+        <div className="topbar-left" data-tauri-drag-region>
+          <div className="brand" data-tauri-drag-region>
+            <div className="brand-mark">M</div>
+            <span>Mercy</span>
           </div>
-          <button className="btn-holo p-1.5 rounded text-[10px] pointer-events-auto"><Settings size={12} /></button>
+          {!backendConnected && (
+            <button className="sys-pill" type="button" onClick={toggleSettings}>
+              <span className="dot-live offline" />
+              <span>后端离线</span>
+            </button>
+          )}
+          <button
+            className="settings-trigger"
+            type="button"
+            aria-label="设置与状态"
+            aria-controls="left-rail"
+            aria-expanded={leftExpanded}
+            title="设置与状态"
+            onClick={toggleSettings}
+          >
+            <Settings size={16} />
+          </button>
         </div>
-        <div className="top-bar-line absolute bottom-0 left-0 right-0" />
-      </div>
+        <div className="topbar-right">
+          {maxTierAvailable && (
+            <button
+              className={`deep-mode-toggle ${deepMode ? "active" : ""}`}
+              type="button"
+              aria-pressed={deepMode}
+              onClick={() => setDeepMode((value) => !value)}
+            >
+              {deepMode && <span className="deep-mode-dot" />}
+              <span>{deepMode ? "深度模式 · 开" : "深度模式"}</span>
+            </button>
+          )}
+          <span className="clock-text">{clock}</span>
+        </div>
+      </header>
 
-      {/* ══════════ MAIN LAYOUT ══════════ */}
-      <div className="flex-1 flex flex-row overflow-hidden p-3 gap-3 min-h-0">
+      <button
+        id="left-drawer-backdrop"
+        aria-label="关闭设置与状态"
+        type="button"
+        onClick={closeSettings}
+      />
 
-        {/* ── LEFT SIDEBAR ─────────────────────────────────────── */}
-        <div className="flex-none w-56 flex flex-col gap-3">
-
-          {/* System Metrics */}
-          <div className="holo-panel rounded-lg p-3 corner-cut flex-none">
-            <div className="flex items-center gap-2 mb-3">
-              <Cpu size={10} className="neon-cyan" />
-              <span className="text-[9px] font-mono font-bold neon-cyan tracking-widest">SYS.RESOURCES</span>
+      <main id="workspace">
+        <aside id="left-rail" aria-label="设置与状态">
+          <div className="left-full settings-drawer" role="dialog" aria-labelledby="settings-drawer-title">
+            <div className="settings-drawer-head">
+              <div>
+                <h2 id="settings-drawer-title">设置与状态</h2>
+              </div>
+              <button
+                className="settings-close"
+                type="button"
+                aria-label="关闭"
+                onClick={closeSettings}
+                ref={drawerCloseRef}
+              >
+                <X size={16} />
+              </button>
             </div>
-            <MetricBar label="CPU" value={cpu} color="#00e5ff" />
-            <MetricBar label="MEM" value={mem} color="#ffab00" />
-            <MetricBar label="NET" value={net} color="#00ff88" />
-          </div>
-
-          {/* Real-time Backend Log Panel */}
-          <div className="holo-panel rounded-lg flex-1 flex flex-col overflow-hidden corner-cut" style={{ minHeight: 0 }}>
-            <div className="flex-none px-3 pt-3 pb-2 flex items-center gap-2 border-b border-white/5">
-              <Activity size={10} className="neon-amber" />
-              <span className="text-[9px] font-mono font-bold neon-amber tracking-widest">BACKEND.LOG</span>
-              <div className="flex-1" />
-              <span className="text-[7px] font-mono text-white/20">{logs.length} events</span>
-              <div className="w-1.5 h-1.5 rounded-full"
-                style={{
-                  background: logs.length > 0 ? '#00ff88' : '#ff3d5a',
-                  boxShadow: logs.length > 0 ? '0 0 6px #00ff88' : '0 0 6px #ff3d5a'
-                }} />
-            </div>
-            <div className="flex-1 overflow-y-auto mercy-scroll px-2 py-1 min-h-0">
-              {logs.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-white/15 text-[8px] font-mono gap-2">
-                  <Activity size={16} strokeWidth={1} />
-                  <span>Waiting for backend events...</span>
+            <div className="settings-drawer-body">
+              <section className="rail-section settings-display">
+                <div className="rail-head">
+                  <span className="rail-title">画质</span>
                 </div>
-              ) : (
-                logs.map((entry, i) => <LogRow key={i} entry={entry} />)
-              )}
-              <div ref={logsEndRef} />
+                <div className="segmented" role="radiogroup" aria-label="画质">
+                  {QUALITY_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={avatarQuality === option.value}
+                      className={avatarQuality === option.value ? "selected" : ""}
+                      onClick={() => {
+                        setAvatarQuality(option.value);
+                        localStorage.setItem("mercy.avatarQuality", option.value);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="rail-section settings-config">
+                <div className="rail-head">
+                  <span className="rail-title">当前配置</span>
+                  {currentConfig && (
+                    <span className="settings-profile">{currentConfig.profile}</span>
+                  )}
+                </div>
+                {currentConfig ? (
+                  <>
+                    <div className="config-role-list">
+                      {currentConfig.roles.map((role) => (
+                        <div
+                          className={`config-role-row ${role.available ? "" : "unavailable"}`}
+                          key={role.role}
+                        >
+                          <span
+                            className={`config-status-dot ${role.available ? "online" : "offline"}`}
+                            aria-label={role.available ? "可用" : "不可用"}
+                          />
+                          <span className="config-role-label">{role.label}</span>
+                          <span className="config-role-model" title={role.model ?? "未配置"}>
+                            {role.model ?? "未配置"}
+                          </span>
+                          {role.effort && <span className="config-effort">{role.effort}</span>}
+                          {!role.available && role.reason && (
+                            <span className="config-reason">{role.reason}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="config-services">
+                      <span className="config-services-title">API Key</span>
+                      {Object.entries(currentConfig.keys).map(([provider, key]) => (
+                        <div className="config-service-row" key={provider}>
+                          <span className="config-service-name">
+                            <span
+                              className={`config-status-dot ${key.configured ? "online" : "offline"}`}
+                            />
+                            {providerLabels[provider] ?? provider}
+                          </span>
+                          <span className={`config-service-detail ${key.configured ? "" : "unavailable"}`}>
+                            {key.configured ? key.hint ?? "已配置" : "未配置"}
+                          </span>
+                        </div>
+                      ))}
+                      <span className="config-services-title">服务</span>
+                      {currentConfig.services.map((service) => (
+                        <div className="config-service-row" key={service.name}>
+                          <span className="config-service-name">
+                            <span
+                              className={`config-status-dot ${service.available ? "online" : "offline"}`}
+                            />
+                            {service.label}
+                          </span>
+                          <span className={`config-service-detail ${service.available ? "" : "unavailable"}`}>
+                            {service.available ? service.detail ?? "可用" : service.reason}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="settings-empty">
+                    {configUnavailable ? "暂时无法读取配置" : "读取配置中…"}
+                  </div>
+                )}
+              </section>
+
+              <section className="rail-section settings-usage">
+                <div className="rail-head">
+                  <span className="rail-title">用量统计</span>
+                  <span className="rail-badge">
+                    {usageSnapshot
+                      ? `自启动 ${timeLabel(usageSnapshot.since)} 起`
+                      : statsUnavailable
+                        ? "暂不可用"
+                        : "读取中…"}
+                  </span>
+                </div>
+                <p className="usage-caption">
+                  首 token 延迟包含模型思考时间；embedding 和语音合成不计入
+                </p>
+                {!usageSnapshot ? (
+                  <div className="settings-empty">
+                    {statsUnavailable ? "暂时无法读取统计" : "读取统计中…"}
+                  </div>
+                ) : usageSnapshot.models.length === 0 ? (
+                  <div className="usage-empty">还没有模型调用</div>
+                ) : (
+                  <div className="usage-model-list">
+                    {usageSnapshot.models.map((model) => (
+                      <article className="usage-model-card" key={`${model.role}:${model.provider}:${model.model}`}>
+                        <h3>
+                          {usageRoleLabels[model.role] ?? model.role} · {model.provider} · {model.model}
+                        </h3>
+                        <div className="usage-metrics">
+                          <div className="usage-metric">
+                            <span>调用</span>
+                            <strong>
+                              {model.calls} 次
+                              {(model.failed_calls > 0 || model.cancelled_calls > 0) && (
+                                <small>（失败 {model.failed_calls} / 取消 {model.cancelled_calls}）</small>
+                              )}
+                            </strong>
+                          </div>
+                          <div className="usage-metric">
+                            <span>输入 / 输出</span>
+                            <strong>
+                              {compactTokenCount(model.input_tokens)} / {compactTokenCount(model.output_tokens)}
+                            </strong>
+                          </div>
+                          <div className="usage-metric">
+                            <span>首 token</span>
+                            <strong>
+                              平均 {formatMilliseconds(model.avg_ttft_ms)}
+                              <small>（最近 {formatMilliseconds(model.last_ttft_ms)}）</small>
+                            </strong>
+                          </div>
+                          <div className="usage-metric">
+                            <span>生成</span>
+                            <strong>
+                              平均 {formatTokenRate(model.avg_tokens_per_sec)}
+                              <small>（最近 {formatTokenRate(model.last_tokens_per_sec)}）</small>
+                            </strong>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="rail-section settings-logs">
+                <button
+                  className="settings-log-toggle"
+                  type="button"
+                  aria-expanded={logsExpanded}
+                  aria-controls="settings-log-feed"
+                  onClick={() => setLogsExpanded((expanded) => !expanded)}
+                >
+                  <span>后端日志（{logs.length}）</span>
+                  <ChevronDown
+                    size={15}
+                    className={logsExpanded ? "expanded" : ""}
+                    aria-hidden="true"
+                  />
+                </button>
+                {logsExpanded && (
+                  <div className="log-feed settings-log-feed" id="settings-log-feed" ref={logFeedRef}>
+                    {logs.length === 0 ? (
+                      <div className="log-empty">等待后端事件…</div>
+                    ) : (
+                      logs.map((entry, index) => (
+                        <div className="log-item" key={`${entry.ts}-${index}`}>
+                          <span className={`log-dot ${entry.level === "error" ? "err" : entry.level === "warning" ? "accent" : "ok"}`} />
+                          <span className="log-time">{timeLabel(entry.ts)}</span>
+                          <span className="log-content">
+                            <strong>{entry.category}</strong>
+                            <span>{entry.message}</span>
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </section>
+            </div>
+            <footer className="settings-drawer-footer">
+              <span className="settings-session-id" title={sessionId}>
+                会话 ID <code>{sessionId}</code>
+              </span>
+              <span>{reports.length} 份报告</span>
+            </footer>
+          </div>
+        </aside>
+
+        <section id="center-col">
+          <AnimatePresence initial={false}>
+            {stage && (
+              <Stage
+                stage={stage}
+                currentMediaId={stageCurrentMediaId}
+                onCurrentChange={setStageCurrentMediaId}
+                onClose={() => void handleCloseStage()}
+              />
+            )}
+          </AnimatePresence>
+          {layout === "focus_evidence" && latestReport && !isReportExpanded ? (
+            <div className="stage-report-summary">
+              <strong>{latestReport.title}</strong>
+              <span>{latestReportSummary}</span>
+              <button type="button" onClick={() => setIsReportExpanded(true)}>展开</button>
+            </div>
+          ) : (
+          <div id="log-panel" className="surface-card" aria-label="报告文档区">
+            <div id="log-full-view">
+              <div className="panel-header">
+                <div className="panel-title-wrap">
+                  <span className="panel-title">报告文档</span>
+                </div>
+                {reports.length > 0 && (
+                  <span className="report-count-pill">{reports.length} 份报告</span>
+                )}
+              </div>
+
+              <div id="report-list" ref={reportListRef} onScroll={handleReportScroll}>
+                <div className="report-inner">
+                  {reports.length === 0 ? (
+                    <div className="report-empty">
+                      <div className="empty-icon">
+                        <FileText size={22} strokeWidth={1.4} />
+                      </div>
+                      <h2>报告会出现在这里</h2>
+                    </div>
+                  ) : (
+                    reports.map((report) => (
+                      <article className="report-card" data-report-id={report.report_id} key={report.report_id}>
+                        <div className="report-meta">
+                          <div className="report-meta-left">
+                            <span className="report-id">#{report.report_id}</span>
+                            <span>{timeLabel(report.created_at)}</span>
+                          </div>
+                          {!report.complete && <span className="report-progress">正在整理</span>}
+                        </div>
+                        {report.query && <div className="report-source-q">来源问题：{report.query}</div>}
+                        {report.title && <h2 className="report-title">{report.title}</h2>}
+                        {report.markdown ? (
+                          <div className="report-markdown">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={
+                                report.link_policy === "sources_only"
+                                  ? sourcesOnlyMarkdownComponents
+                                  : markdownComponents
+                              }
+                              urlTransform={markdownUrlTransform}
+                            >
+                              {report.markdown}
+                            </ReactMarkdown>
+                          </div>
+                        ) : (
+                          <div className="report-loading">正在整理内容…</div>
+                        )}
+                        {report.link_policy === "sources_only" && (
+                          <ReportSources sources={report.sources} />
+                        )}
+                      </article>
+                    ))
+                  )}
+                </div>
+                {hasUnreadReports && (
+                  <button className="unread-pill" type="button" onClick={scrollToLatestReport}>
+                    <ArrowDown size={15} />
+                    有新报告到达，点击查看
+                  </button>
+                )}
+              </div>
             </div>
           </div>
+          )}
 
-          {/* Network Status */}
-          <div className="holo-panel holo-panel-amber rounded-lg p-3 corner-cut flex-none">
-            <div className="flex items-center gap-2 mb-2">
-              <Radio size={10} className="neon-amber" />
-              <span className="text-[9px] font-mono font-bold neon-amber tracking-widest">NETWORK</span>
-            </div>
-            <div className="space-y-1.5">
-              {[
-                { label: 'LANGGRAPH', status: 'LINKED', ok: true },
-                { label: 'CHROMADB', status: 'READY', ok: true },
-                { label: 'TTS API', status: 'STANDBY', ok: true },
-                { label: 'ASR', status: isListening ? 'LISTENING' : 'IDLE', ok: isListening },
-                { label: 'LOG STREAM', status: logs.length > 0 ? 'LIVE' : 'OFFLINE', ok: logs.length > 0 },
-              ].map(item => (
-                <div key={item.label} className="flex justify-between items-center">
-                  <span className="text-[8px] font-mono text-white/40">{item.label}</span>
-                  <span className={`text-[8px] font-mono font-bold ${item.ok ? 'neon-green' : 'text-white/30'}`}>
-                    {item.status}
-                  </span>
+          {attachments.length > 0 && (
+            <div className="attachment-list" aria-label="待发送附件">
+              {attachments.map((attachment) => (
+                <div className="image-preview-chip" key={attachment.media_id}>
+                  {attachment.kind === "image" && attachment.previewUrl ? (
+                    <img src={attachment.previewUrl} alt="" />
+                  ) : attachment.kind === "document" ? (
+                    <span className="document-chip-icon">
+                      <FileText size={14} />
+                      文档
+                    </span>
+                  ) : (
+                    <span className="video-chip-icon">视频</span>
+                  )}
+                  <span>{attachment.filename}</span>
+                  <button type="button" aria-label={`移除${attachment.filename}`} onClick={() => handleRemoveAttachment(attachment.media_id)}>
+                    <X size={14} />
+                  </button>
                 </div>
               ))}
             </div>
-          </div>
-        </div>
-
-        {/* ── CENTER: Chat / Evidence Panel ─────────────────────── */}
-        <div className="flex-1 flex flex-col gap-3 min-w-0">
-
-          {/* Visual Evidence Port */}
-          <div className="holo-panel rounded-lg flex-none h-[30%] relative overflow-hidden corner-cut">
-            <div className="scan-bar" style={{ animationDuration: '6s', animationDelay: '2s' }} />
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <div className="flex flex-col items-center gap-3 opacity-35">
-                <Eye size={36} strokeWidth={1} className="neon-cyan" />
-                <span className="text-[9px] font-mono tracking-[0.3em] text-white/40">[ VISUAL EVIDENCE PORT ]</span>
-                <span className="text-[8px] font-mono text-white/20 tracking-wider">READY FOR IMAGE / SCREEN CAPTURE</span>
-              </div>
-            </div>
-            <div className="absolute top-2 left-3 text-[8px] font-mono text-white/20">REC.00</div>
-            <div className="absolute top-2 right-3 text-[8px] font-mono text-white/20">●REC</div>
-            <div className="absolute bottom-2 left-3 text-[8px] font-mono text-white/20">CHAN.A</div>
-            <div className="absolute bottom-2 right-3 text-[8px] font-mono text-white/20">4K.HDR</div>
-          </div>
-
-          {/* ── Chat Transcript — more spacious ── */}
-          <div className="holo-panel rounded-lg flex-1 overflow-y-auto mercy-scroll flex flex-col gap-4 corner-cut"
-            style={{ minHeight: 0, padding: '16px 20px' }}>
-            <div className="flex items-center gap-2 mb-1 flex-none">
-              <Database size={10} className="neon-cyan" />
-              <span className="text-[9px] font-mono font-bold neon-cyan tracking-widest">INTERROGATION.LOG</span>
-              <div className="flex-1 h-px bg-white/10 mx-2" />
-              <span className="text-[8px] font-mono text-white/30">{msgCount} ENTRIES</span>
-            </div>
-
-            {messages.map((msg, idx) => (
-              <div key={idx} className={`flex flex-col gap-1.5 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                <div className="text-[9px] font-mono text-white/30 px-1">
-                  {msg.role === 'user' ? '◎ SUBJECT' : msg.role === 'assistant' ? '◈ JUDICIAL.AI' : '⚠ SYS'}
-                  <span className="ml-2 text-white/15">{new Date().toLocaleTimeString('en-US', { hour12: false })}</span>
-                </div>
-                <div className={`max-w-[88%] rounded-md corner-cut leading-relaxed
-                  ${msg.role === 'user' ? 'msg-user' : msg.role === 'system' ? 'msg-system' : 'msg-assistant'}`}
-                  style={{ padding: '10px 14px', fontSize: '12px', fontFamily: "'Share Tech Mono', monospace" }}>
-                  {msg.role === 'system' && (
-                    <span className="neon-amber mr-2 text-[9px] font-bold">⚠ SYS:</span>
-                  )}
-                  {msg.role === 'assistant' && (
-                    <span className="neon-cyan mr-2 text-[9px] font-bold">◈ AI:</span>
-                  )}
-                  {msg.content}
-                  {msg.image && (
-                    <img src={msg.image} alt="evidence" className="mt-3 rounded max-h-40 object-contain border border-white/10" />
-                  )}
-                </div>
-              </div>
-            ))}
-
-            {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
-              <div className="flex items-start gap-2">
-                <div className="msg-assistant rounded-md corner-cut flex items-center gap-2"
-                  style={{ padding: '10px 14px', fontSize: '12px', fontFamily: "'Share Tech Mono', monospace" }}>
-                  <Loader2 size={12} className="animate-spin neon-cyan" />
-                  <span className="neon-cyan/60">PROCESSING EVIDENCE...</span>
-                </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Image Preview */}
-          {selectedImage && (
-            <div className="relative inline-flex items-start self-end holo-panel rounded p-2 corner-cut flex-none">
-              <button onClick={() => setSelectedImage(null)} className="absolute -top-2 -right-2 btn-holo rounded-full p-0.5 z-10">
-                <X size={10} />
-              </button>
-              <img src={selectedImage} alt="Evidence" className="h-16 rounded object-contain" />
-              <span className="text-[7px] font-mono text-white/30 absolute bottom-0 left-0 right-0 text-center pb-0.5">EVIDENCE.QUEUED</span>
-            </div>
           )}
 
-          {/* ── Input Area — more spacious ── */}
-          <div className={`flex-none holo-panel rounded-lg corner-cut flex items-end gap-2 ${isListening ? 'border-[#ff3d5a]/50' : ''}`}
-            style={{ padding: '10px 12px', transition: 'border-color 0.3s ease' }}>
-
-            <input type="file" accept="image/*" ref={fileInputRef} onChange={handleImageSelect} className="hidden" />
-
-            <div className="flex items-center gap-1.5 flex-none pb-0.5">
-              <button className="btn-holo p-2 rounded" title="Camera" onClick={() => { }}>
-                <Camera size={14} />
-              </button>
-              <button className="btn-holo p-2 rounded" title="Upload" onClick={() => fileInputRef.current?.click()}>
-                <ImageIcon size={14} />
-              </button>
-              <div className="w-px h-6 bg-white/10" />
-              <button onClick={() => setIsListening(!isListening)}
-                className={`p-2 rounded transition-all duration-300 ${isListening ? 'btn-mic-active btn-holo' : 'btn-holo'}`}>
-                <Mic size={14} className={isListening ? "animate-pulse" : ""} />
-              </button>
-              <Waveform active={isListening} />
-            </div>
-
-            <textarea
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              disabled={isLoading}
-              rows={1}
-              placeholder={
-                isListening ? "LISTENING..."
-                  : isLoading ? "DELIBERATING..."
-                    : selectedImage ? "ANNOTATE..."
-                      : "ENTER STATEMENT..."
-              }
-              className="flex-1 mercy-input tracking-wide px-3 py-2 resize-none min-h-[36px] max-h-[120px]"
-              style={{ fontSize: '13px', lineHeight: '1.5', overflowY: 'auto' }}
-              onInput={e => {
-                const t = e.currentTarget;
-                t.style.height = 'auto';
-                t.style.height = Math.min(t.scrollHeight, 120) + 'px';
-              }}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
-              }}
-            />
-
-            <button
-              onClick={handleSend}
-              disabled={isLoading || (!query.trim() && !selectedImage)}
-              className="btn-send px-3 py-2 rounded flex items-center gap-1.5 font-mono font-bold tracking-wider flex-none"
-              style={{ fontSize: '10px' }}>
-              <Send size={13} />
-              <span>SUBMIT</span>
-            </button>
-          </div>
-        </div>
-
-        {/* ── RIGHT: AI Avatar Terminal ─────────────────────────── */}
-        <div className="flex-none w-[36%] flex flex-col gap-3">
-
-          {/* Header row */}
-          <div className="holo-panel rounded-lg p-2.5 flex items-center justify-between corner-cut flex-none">
-            <div className="flex items-center gap-2">
-              <AlertTriangle size={10} className="neon-red" />
-              <span className="text-[9px] font-mono font-bold neon-red tracking-widest">JUDICIAL.AI // ACTIVE</span>
-            </div>
-            <div className="flex gap-2 items-center">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#00ff88] pulse-cyan" />
-              <span className="text-[8px] font-mono text-white/30">ONLINE</span>
-            </div>
-          </div>
-
-          {/* VRM Avatar Frame */}
-          <div className="avatar-frame rounded-lg flex-1 relative overflow-hidden" style={{ minHeight: 0 }}>
-            <div className="corner-tl" /><div className="corner-tr" />
-            <div className="corner-bl" /><div className="corner-br" />
-            <div className="scan-bar" style={{ animationDuration: '5s', opacity: 0.4 }} />
-            <div className="absolute inset-0 bg-gradient-to-b from-[#000a1e] via-[#000510] to-[#000a1e] pointer-events-none" />
-            <div className="absolute inset-0 pointer-events-none"
-              style={{ background: 'radial-gradient(ellipse at 50% 80%, rgba(0,229,255,0.06) 0%, transparent 70%)' }} />
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 w-8 h-8 pointer-events-none z-20 opacity-20">
-              <div className="absolute top-0 left-1/2 w-px h-3 bg-[#00e5ff]" style={{ transform: 'translateX(-50%)' }} />
-              <div className="absolute bottom-0 left-1/2 w-px h-3 bg-[#00e5ff]" style={{ transform: 'translateX(-50%)' }} />
-              <div className="absolute left-0 top-1/2 h-px w-3 bg-[#00e5ff]" style={{ transform: 'translateY(-50%)' }} />
-              <div className="absolute right-0 top-1/2 h-px w-3 bg-[#00e5ff]" style={{ transform: 'translateY(-50%)' }} />
-              <div className="absolute inset-2 rounded-full border border-[#00e5ff]/40" />
-            </div>
-            {!isAvatarLoaded && (
-              <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-4">
-                <div className="w-12 h-12 rounded-full border border-[#00e5ff]/30 flex items-center justify-center">
-                  <div className="w-8 h-8 rounded-full border-t border-[#00e5ff] animate-spin" />
-                </div>
-                <span className="text-[9px] font-mono neon-cyan tracking-[0.3em]">LOADING NEURAL AVATAR...</span>
+          {imageInputAvailable === false &&
+            attachments.some((attachment) => attachment.kind === "image") && (
+              <div className="composer-capability-hint">
+                当前对话模型看不到图片内容
               </div>
             )}
-            <VRMAvatar
-              onLoaded={() => setIsAvatarLoaded(true)}
-              speech={speech}
-              onAudioEnd={() => setSpeech(prev => { if (prev) URL.revokeObjectURL(prev.audioUrl); return null; })}
+          <div id="input-bar">
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.pdf,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,application/pdf"
+              multiple
+              ref={fileInputRef}
+              onChange={handleImageSelect}
+              hidden
             />
-            <div className="absolute bottom-0 left-0 right-0 p-3 z-10 pointer-events-none"
-              style={{ background: 'linear-gradient(to top, rgba(0,5,15,0.9), transparent)' }}>
-              <div className="flex justify-between items-end">
-                <div>
-                  <div className="text-[8px] font-mono text-white/25 tracking-wider">SUBJECT.ID</div>
-                  <div className="text-[10px] font-mono neon-cyan">JUDICIAL.AI // MX-7</div>
+            <button
+              className="composer-icon-btn"
+              type="button"
+              aria-label="上传图片、视频或文档"
+              title="上传图片、视频或文档"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <ImageIcon size={19} />
+            </button>
+            <textarea
+              id="chat-input"
+              value={query}
+              rows={1}
+              placeholder={isListening ? "正在倾听…" : `和 ${ASSISTANT_NAME} 说点什么…`}
+              onChange={handleComposerChange}
+              onKeyDown={handleComposerKeyDown}
+              onInput={(event) => {
+                const element = event.currentTarget;
+                element.style.height = "auto";
+                element.style.height = `${Math.min(element.scrollHeight, 120)}px`;
+              }}
+            />
+            <button
+              className={`composer-icon-btn mic-btn ${isListening ? "active" : ""}`}
+              type="button"
+              aria-label={isListening ? "停止语音输入" : "语音输入"}
+              title={isListening ? "停止语音输入" : "语音输入"}
+              onClick={handleMicToggle}
+            >
+              <Mic size={19} />
+            </button>
+            <button
+              id="send-btn"
+              type="button"
+              disabled={!query.trim() && attachments.length === 0}
+              onClick={() => void handleSend()}
+            >
+              <span>{isLoading ? "发送" : "发送"}</span>
+              <Send size={15} />
+            </button>
+          </div>
+        </section>
+
+        <aside id="right-col" aria-label={`${ASSISTANT_NAME} 角色与口语对话`}>
+          <div id="avatar-card" data-state={status.state} data-avatar-loaded={isAvatarLoaded}>
+            <div className="avatar-scene">
+              <VRMAvatar
+                onLoaded={() => setIsAvatarLoaded(true)}
+                speech={speech}
+                onAudioEnd={handleAudioEnd}
+                quality={avatarQuality}
+              />
+            </div>
+            <div className="avatar-vignette" />
+            <div className="avatar-top-bar">
+              <div className="avatar-name-pill">
+                <span>{ASSISTANT_NAME}</span>
+              </div>
+              {status.state !== "idle" && (
+                <div className="status-pill">
+                  {status.state === "speaking" ? (
+                    <span className="voice-bars active" aria-hidden="true">
+                      <i />
+                      <i />
+                      <i />
+                    </span>
+                  ) : (
+                    <span className="status-dot" />
+                  )}
+                  <span>{status.label}</span>
                 </div>
-                <Waveform active={isLoading || isListening} />
-                <div className="text-right">
-                  <div className="text-[8px] font-mono text-white/25 tracking-wider">VERDICT</div>
-                  <div className={`text-[10px] font-mono font-bold ${isLoading ? 'neon-amber' : 'neon-green'}`}>
-                    {isLoading ? 'DELIBERATING' : 'AWAITING'}
+              )}
+            </div>
+            {!isAvatarLoaded && <span className="avatar-loading">角色加载中</span>}
+            <div id="subtitle-bar" aria-live="polite">
+              <div id="subtitle-text" ref={subtitleTextRef}>
+                {subtitle}
+              </div>
+            </div>
+          </div>
+
+          <div id="dialogue-panel" className="surface-card">
+            <div className="panel-header">
+              <div className="panel-title-wrap">
+                <span className="panel-title">对话</span>
+              </div>
+            </div>
+            <div id="dialogue-list" ref={dialogueListRef}>
+              {messages.length === 0 ? (
+                <div className="dialogue-empty">对话内容会显示在这里。</div>
+              ) : (
+                messages.map((message) => (
+                  <div
+                    className={`dialogue-message ${message.role} ${message.interrupted ? "interrupted" : ""}`}
+                    key={message.id}
+                  >
+                    <div className="dialogue-meta">
+                      <span>
+                        {message.role === "user"
+                          ? "你"
+                          : message.role === "assistant"
+                            ? ASSISTANT_NAME
+                            : "系统"}
+                      </span>
+                      <time>{timeLabel(message.createdAt)}</time>
+                      {message.interrupted ? (
+                        <span className="interrupted-tag">已打断</span>
+                      ) : null}
+                    </div>
+                    {(message.content || message.attachments?.length) ? (
+                      <div className="dialogue-bubble">
+                        {message.content && <p>{message.content}</p>}
+                        {message.attachments?.map((attachment) =>
+                          attachment.kind === "image" ? (
+                            <img
+                              className="dialogue-image"
+                              key={attachment.media_id}
+                              src={`${API_BASE}/api/media/${attachment.media_id}`}
+                              alt={attachment.filename}
+                            />
+                          ) : attachment.kind === "video" ? (
+                            <div className="dialogue-video" key={attachment.media_id}>
+                              视频 · {attachment.filename}
+                            </div>
+                          ) : (
+                            <div className="dialogue-document" key={attachment.media_id}>
+                              <FileText size={14} />
+                              <span>{attachment.filename}</span>
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    ) : null}
+                    {message.role === "assistant" && !message.content && isLoading && (
+                      <div className="dialogue-bubble thinking-bubble">正在思考…</div>
+                    )}
                   </div>
-                </div>
-              </div>
+                ))
+              )}
             </div>
           </div>
-
-          {/* Stats panel */}
-          <div className="holo-panel holo-panel-amber rounded-lg p-3 flex-none corner-cut">
-            <div className="grid grid-cols-3 gap-3 text-center">
-              <div>
-                <div className="text-[9px] font-mono text-white/25 tracking-wider">QUERIES</div>
-                <div className="text-[18px] font-bold neon-cyan font-mono">{msgCount}</div>
-              </div>
-              <div>
-                <div className="text-[9px] font-mono text-white/25 tracking-wider">STATUS</div>
-                <div className={`text-[11px] font-bold font-mono ${isAvatarLoaded ? 'neon-green' : 'neon-amber'}`}>
-                  {isAvatarLoaded ? 'ACTIVE' : 'INIT'}
-                </div>
-              </div>
-              <div>
-                <div className="text-[9px] font-mono text-white/25 tracking-wider">THREAT</div>
-                <div className="text-[11px] font-bold font-mono neon-green">LOW</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ══════════ BOTTOM STATUS BAR ══════════ */}
-      <div className="flex-none h-7 flex items-center justify-between px-5 text-[8px] font-mono"
-        style={{ background: 'rgba(0,5,15,0.95)', borderTop: '1px solid rgba(0,229,255,0.1)' }}>
-        <div className="flex items-center gap-4 text-white/25">
-          <span>MERCY.OS // BUILD 2026.02</span>
-          <span>THREE.JS // VRM 1.0</span>
-          <span>LANGGRAPH v0.3 // CHROMADB</span>
-        </div>
-        <div className="flex items-center gap-3 text-white/25">
-          <span className="neon-green">● ALL SYSTEMS NOMINAL</span>
-        </div>
-      </div>
+        </aside>
+      </main>
     </div>
   );
 }

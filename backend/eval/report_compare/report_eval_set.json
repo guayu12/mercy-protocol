@@ -1,0 +1,76 @@
+{
+  "rubric": {
+    "chains": {
+      "luna": "MODEL_REPORT empty: Luna writes the report herself with show_report",
+      "terra": "MODEL_REPORT=openai:gpt-6.1-terra: Luna decides and calls write_report with her own brief"
+    },
+    "judge": "openai gpt-6.2-sol reasoning=high; blind, per-pair random A/B order",
+    "runs_per_chain": 2,
+    "criteria": [
+      "correctness",
+      "completeness",
+      "structure",
+      "specificity",
+      "language"
+    ],
+    "scale": "1-5",
+    "decision": "Keep Terra (MODEL_REPORT set) if ANY: (a) Terra mean-of-criteria >= Luna + 0.5 on >= 6 of 10 prompts; (b) Terra correctness mean over all prompts >= Luna + 0.5; (c) on >= 2 prompts Luna has judged factual/calculation errors while Terra has none. Otherwise default MODEL_REPORT empty. The user has the final say after reading raw outputs."
+  },
+  "prompts": [
+    {
+      "id": "r01",
+      "type": "comparison_table",
+      "prompt": "用表格对比 SQLite、PostgreSQL、DuckDB 在嵌入式个人应用里的适用场景、并发能力、部署复杂度和备份方式，最后给出推荐。",
+      "reference": "要点：SQLite 嵌入式单文件，WAL 下多读单写；PostgreSQL 是客户端/服务端，MVCC 支持多写并发，部署需要独立服务；DuckDB 嵌入式列存 OLAP，适合分析查询，同一时间只允许一个进程写。备份：SQLite 用 .backup / VACUUM INTO 或在无写入时复制文件；PostgreSQL 用 pg_dump / pg_basebackup；DuckDB 用 EXPORT DATABASE 或关闭后复制文件。个人嵌入式应用的合理推荐通常是 SQLite（分析场景可加 DuckDB）。"
+    },
+    {
+      "id": "r02",
+      "type": "deployment_steps",
+      "prompt": "写一份在 Windows 11 Surface 平板上从零运行本项目（FastAPI 后端 + Vite 前端）的部署步骤文档，分步骤写清楚，包括 Python 虚拟环境、Node 20、环境变量和常见报错处理。"
+    },
+    {
+      "id": "r03",
+      "type": "code_explanation",
+      "prompt": "写一份报告解释 Python asyncio 中 CancelledError 与 GeneratorExit 的区别，配一段可运行的示例代码，说明在 SSE 流式接口里应该如何正确清理。",
+      "reference": "要点：任务被 cancel() 时在任务里抛 CancelledError（Python 3.8 起继承 BaseException），应在 finally 中清理并重新抛出，不要吞掉；GeneratorExit 是生成器（含异步生成器 aclose()）被关闭时在 yield 处抛出的，收到后不能再 yield。Starlette/FastAPI 的 StreamingResponse 在客户端断开时会取消生成任务或关闭生成器；清理应放在 try/finally，必要时用 asyncio.shield 保护落库。"
+    },
+    {
+      "id": "r04",
+      "type": "plan",
+      "prompt": "帮我制定一份为期四周的英语口语提升计划，每周目标、每天练习内容和检验方式都要写清楚，用表格呈现。"
+    },
+    {
+      "id": "r05",
+      "type": "tradeoff_analysis",
+      "prompt": "分析在平板上做实时 3D 虚拟角色渲染时，降低功耗的主要手段及各自对画质的影响，按优先级排列。"
+    },
+    {
+      "id": "r06",
+      "type": "summary_of_concept",
+      "prompt": "写一份通俗的报告，解释 SSRF 攻击是什么、常见绕过手段，以及服务端取远程图片时应如何防御。",
+      "reference": "要点：SSRF 是让服务端代为请求攻击者指定的地址，访问内网、云元数据（169.254.169.254）等。常见绕过：重定向到内网、DNS 重绑定、十进制/十六进制/八进制 IP 写法、IPv6 和 IPv4 映射地址、URL 解析差异（@、#）。防御：只允许 http/https，解析后校验所有 IP 并连接已校验的 IP，逐跳校验重定向并限制跳数，拒绝私网/回环/link-local 等，超时和大小上限，不返回原始错误。"
+    },
+    {
+      "id": "r07",
+      "type": "math_reasoning",
+      "prompt": "一个服务每天 2000 次对话，每次平均输入 3000 token、输出 400 token。分别按每百万 token 输入 0.1 美元/输出 0.5 美元，以及输入 1 美元/输出 5 美元计算月成本（30 天），列出计算过程并用表格对比。",
+      "reference": "参考答案：每月输入 2000×3000×30 = 180,000,000 token（180M），输出 2000×400×30 = 24,000,000 token（24M）。价格一：180×0.1 + 24×0.5 = 18 + 12 = 30 美元/月。价格二：180×1 + 24×5 = 180 + 120 = 300 美元/月。"
+    },
+    {
+      "id": "r08",
+      "type": "troubleshooting",
+      "prompt": "写一份排查指南：前端页面里 WebGL canvas 显示为空白，可能的原因有哪些，每种原因怎么确认、怎么修。",
+      "reference": "要点（至少覆盖多数）：canvas 尺寸为 0（父容器高度为 0、CSS 问题）；WebGL 上下文创建失败或丢失（webglcontextlost、驱动/硬件加速被禁用）；模型或贴图加载失败（404、CORS、路径错误，看网络面板和控制台）；相机位置/朝向或 near/far 不对，模型在视野外或缩放异常；没有灯光或材质不显示；渲染循环未启动或被暂停（页面隐藏、IntersectionObserver）；清屏颜色/alpha 与背景相同；devicePixelRatio 或 resize 未处理。每条应给出确认方法和修法。"
+    },
+    {
+      "id": "r09",
+      "type": "writing",
+      "prompt": "以产品说明的形式写一份 Mercy Protocol 个人助理的功能介绍，面向普通用户，包含语音对话、报告区和展示台三部分，配一个功能对照表。"
+    },
+    {
+      "id": "r10",
+      "type": "decision_memo",
+      "prompt": "我在考虑把个人笔记从 Notion 迁移到本地 Markdown + Git。写一份决策备忘录：利弊、迁移步骤、风险和回退方案。"
+    }
+  ]
+}

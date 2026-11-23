@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:media": "node scripts/check-media.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -18,6 +19,8 @@
     "lucide-react": "^0.575.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
     "tailwindcss": "^4.2.1",
     "three": "^0.187.0"
   },

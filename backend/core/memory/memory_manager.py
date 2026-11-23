@@ -1,9 +1,12 @@
+import hashlib
 import os
 import threading
 import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from datetime import datetime
 from typing import List, Optional
+
+from core.models import provider_key
 
 # Separate collection name: the previous collection was built with Chroma's
 # local ONNX embedder (384-dim), which is incompatible with OpenAI vectors.
@@ -20,25 +23,42 @@ class MemoryManager:
         self.db_path = db_path
         self.dedup_threshold = dedup_threshold
         self._write_lock = threading.Lock()  # makes duplicate check + insert atomic
-        os.makedirs(db_path, exist_ok=True)
+        self.chroma_client = None
+        self.embedding_function = None
+        self.collection = None
+        self._key_fingerprint = None
 
-        self.embedding_function = OpenAIEmbeddingFunction(
-            api_key_env_var="OPENAI_API_KEY",
-            model_name=os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
-            api_base=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        )
-        self.chroma_client = chromadb.PersistentClient(path=self.db_path)
-        self.collection = self.chroma_client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            embedding_function=self.embedding_function,
-            metadata={"hnsw:space": "cosine"},
-        )
+    def _ensure_collection(self):
+        key = provider_key("openai")
+        if key is None:
+            return None
+        fingerprint = hashlib.sha256(key[0].encode()).hexdigest()[:12]
+        if self.chroma_client is None:
+            self.chroma_client = chromadb.PersistentClient(path=self.db_path)
+        if self.collection is None or fingerprint != self._key_fingerprint:
+            self.embedding_function = OpenAIEmbeddingFunction(
+                api_key=key[0],
+                model_name=os.environ.get(
+                    "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
+                ),
+                api_base=os.environ.get(
+                    "OPENAI_BASE_URL", "https://api.openai.com/v1"
+                ),
+            )
+            self.collection = self.chroma_client.get_or_create_collection(
+                name=COLLECTION_NAME,
+                embedding_function=self.embedding_function,
+                metadata={"hnsw:space": "cosine"},
+            )
+            self._key_fingerprint = fingerprint
+        return self.collection
 
     def find_duplicate(self, memory_text: str) -> Optional[str]:
         """Return an existing memory whose cosine similarity exceeds the threshold."""
-        if self.collection.count() == 0:
+        collection = self._ensure_collection()
+        if collection is None or collection.count() == 0:
             return None
-        results = self.collection.query(
+        results = collection.query(
             query_texts=[memory_text],
             n_results=1,
             include=["documents", "distances"],
@@ -57,6 +77,9 @@ class MemoryManager:
             return self._add_memory_unlocked(memory_text, source, tags)
 
     def _add_memory_unlocked(self, memory_text: str, source: str, tags: Optional[List[str]]) -> bool:
+        collection = self._ensure_collection()
+        if collection is None:
+            return False
         if self.find_duplicate(memory_text) is not None:
             return False
 
@@ -70,7 +93,7 @@ class MemoryManager:
 
         doc_id = f"mem_{datetime.now().timestamp()}"
 
-        self.collection.add(
+        collection.add(
             documents=[memory_text],
             metadatas=[metadata],
             ids=[doc_id]
@@ -79,11 +102,14 @@ class MemoryManager:
 
     def retrieve_memories(self, query: str, n_results: int = 3) -> List[str]:
         """Retrieve relevant long-term semantic memories."""
-        count = self.collection.count()
+        collection = self._ensure_collection()
+        if collection is None:
+            return []
+        count = collection.count()
         if count == 0 or not query.strip():
             return []
 
-        results = self.collection.query(
+        results = collection.query(
             query_texts=[query],
             n_results=min(n_results, count)
         )

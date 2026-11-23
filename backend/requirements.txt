@@ -12,3 +12,6 @@ openai==3.57.0
 chromadb==1.5.9
 edge-tts==7.3.1
 pypinyin==0.55.0
+httpx==0.28.1
+python-multipart==0.0.32
+Pillow==12.3.0
