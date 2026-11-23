@@ -78,7 +78,7 @@ def test_key_save_when_env_read_fails_returns_config_write(tmp_path, monkeypatch
         assert response.status_code == 400
         assert response.json() == {
             "category": "config_write",
-            "message": "无法写入配置文件（可能被占用或只读）",
+            "message": "无法读取 backend/.env（可能被占用），请关闭占用它的程序后重启",
         }
         assert read_bytes(path) == before
 

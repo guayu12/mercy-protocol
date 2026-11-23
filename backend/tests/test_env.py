@@ -123,7 +123,9 @@ def test_env_read_permission_error_uses_system_keys_only(tmp_path, monkeypatch):
         patch.setattr(Path, "read_bytes", locked_read)
         env.load_env()
 
-        assert env.env_error() == "无法读取 backend/.env（可能被占用）"
+        assert env.env_error() == (
+            "无法读取 backend/.env（可能被占用），请关闭占用它的程序后重启"
+        )
         assert os.environ["OPENAI_API_KEY"] == "system-fake-key"
         assert "DEEPSEEK_API_KEY" not in os.environ
 

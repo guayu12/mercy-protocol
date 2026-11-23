@@ -19,7 +19,7 @@ KEY_VARS = frozenset(
     for variable in variables
 )
 _ENCODING_ERROR = "backend/.env 不是 UTF-8 编码，请另存为 UTF-8 后重启"
-ENV_READ_ERROR = "无法读取 backend/.env（可能被占用）"
+ENV_READ_ERROR = "无法读取 backend/.env（可能被占用），请关闭占用它的程序后重启"
 _logger = logging.getLogger(__name__)
 _env_error: str | None = None
 _encoding_error_logged = False

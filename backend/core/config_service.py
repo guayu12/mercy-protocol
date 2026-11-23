@@ -284,9 +284,7 @@ async def _save_key_locked(request: KeyRequest) -> dict:
     env_error = env.env_error()
     if env_error:
         if env_error == env.ENV_READ_ERROR:
-            raise ConfigApiError(
-                400, "config_write", "无法写入配置文件（可能被占用或只读）"
-            )
+            raise ConfigApiError(400, "config_write", env_error)
         raise ConfigApiError(400, "env_error", env_error)
     provider = request.provider
     if env.provider_key_source(provider) == "system":
