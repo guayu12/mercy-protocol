@@ -304,6 +304,8 @@ async def _save_key_locked(request: KeyRequest) -> dict:
         raise ConfigApiError(400, "config_write", error.message) from None
     os.environ[variable] = key
     clear_model_cache(provider)
+    if provider == "openai":
+        runtime.clear_memory_unavailable()
     if provider == "deepseek":
         runtime.clear_capability_cache()
     if provider == "tavily":

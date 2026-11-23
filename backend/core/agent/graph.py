@@ -29,7 +29,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from core.memory.memory_manager import MemoryManager
+from core.memory.memory_manager import MemoryInitError, MemoryManager
 from core import log_bus  # ← real-time log broadcaster
 from core import media_store, session_store, speech_queue
 from core.agent.history import prepare_history
@@ -83,9 +83,12 @@ def get_memory_manager() -> MemoryManager | None:
     if _memory_manager is None:
         with _memory_manager_lock:
             if _memory_manager is None:
-                _memory_manager = MemoryManager(
-                    os.path.join(BACKEND_DIR, "data", "chroma_db")
-                )
+                try:
+                    _memory_manager = MemoryManager(
+                        os.path.join(BACKEND_DIR, "data", "chroma_db")
+                    )
+                except Exception as error:
+                    raise MemoryInitError from error
     return _memory_manager
 
 
@@ -96,6 +99,12 @@ def _mark_memory_unavailable(error: Exception) -> None:
     mark_memory_unavailable()
     log_bus.emit(
         "warn", "MEMORY", f"Long-term memory unavailable ({type(error).__name__})"
+    )
+
+
+def _log_memory_request_failure(error: Exception) -> None:
+    log_bus.emit(
+        "warn", "MEMORY", f"Long-term memory request failed ({type(error).__name__})"
     )
 
 
@@ -116,8 +125,11 @@ async def _memory_context(runtime: RuntimeSnapshot, query: str) -> str:
         if manager is None:
             return ""
         return await asyncio.to_thread(manager.format_context, query)
-    except Exception as error:
+    except MemoryInitError as error:
         _mark_memory_unavailable(error)
+        return ""
+    except Exception as error:
+        _log_memory_request_failure(error)
         return ""
 
 # 2. Define the State
@@ -149,8 +161,11 @@ async def save_memory(fact: str) -> str:
         if manager is None:
             return "长期记忆当前不可用。"
         saved = await asyncio.to_thread(manager.add_memory, fact)
-    except Exception as error:
+    except MemoryInitError as error:
         _mark_memory_unavailable(error)
+        return "长期记忆当前不可用。"
+    except Exception as error:
+        _log_memory_request_failure(error)
         return "长期记忆当前不可用。"
     if not saved:
         log_bus.emit("tool", "TOOL", "save_memory skipped — near-duplicate already stored")

@@ -193,6 +193,12 @@ def mark_memory_unavailable() -> None:
         _memory_unavailable_reason = "长期记忆初始化失败"
 
 
+def clear_memory_unavailable() -> None:
+    global _memory_unavailable_reason
+    with _lock:
+        _memory_unavailable_reason = None
+
+
 def memory_unavailable_reason() -> str | None:
     with _lock:
         return _memory_unavailable_reason
