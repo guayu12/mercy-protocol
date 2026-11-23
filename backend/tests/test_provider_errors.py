@@ -27,6 +27,42 @@ def test_provider_error_classification_never_uses_exception_text():
     assert "boom" not in classified.message
 
 
+def test_model_not_found_uses_clear_message():
+    response = httpx.Response(
+        404, request=httpx.Request("POST", "https://example.invalid")
+    )
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        response.raise_for_status()
+
+    classified = provider_errors.classify(error.value)
+
+    assert classified.category == "model_access"
+    assert classified.message == "模型不存在或无权使用"
+
+
+def test_model_not_found_code_uses_clear_message():
+    class ModelNotFoundError(Exception):
+        code = "model_not_found"
+
+    classified = provider_errors.classify(ModelNotFoundError())
+
+    assert classified.category == "model_access"
+    assert classified.message == "模型不存在或无权使用"
+
+
+def test_forbidden_model_access_message_is_unchanged():
+    response = httpx.Response(
+        403, request=httpx.Request("POST", "https://example.invalid")
+    )
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        response.raise_for_status()
+
+    classified = provider_errors.classify(error.value)
+
+    assert classified.category == "model_access"
+    assert classified.message == "无权使用该模型"
+
+
 @pytest.mark.asyncio
 async def test_chat_sse_and_log_redact_provider_error(monkeypatch):
     import main

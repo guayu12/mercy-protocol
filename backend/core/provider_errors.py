@@ -76,13 +76,15 @@ def _has_invalid_api_key(error: Exception) -> bool:
 def classify(error: Exception) -> ProviderError:
     status = _status(error)
     code = _code(error)
+    if status == 404 or code == "model_not_found":
+        return ProviderError("model_access", "模型不存在或无权使用")
     if status == 400:
         if _has_invalid_api_key(error):
             return ProviderError("invalid_key", "key 无效")
         return ProviderError("bad_request", "模型不接受这个设置")
     if status == 401:
         return ProviderError("invalid_key", "key 无效")
-    if status in {403, 404} or code == "model_not_found":
+    if status == 403:
         return ProviderError("model_access", "无权使用该模型")
     if status == 402 or (status == 429 and code == "insufficient_quota"):
         return ProviderError("quota", "额度不足")
