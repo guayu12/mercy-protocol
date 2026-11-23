@@ -147,6 +147,7 @@ def test_api_kind_matches_chat_openai_payload_detection(
     if provider == "deepseek" and expected_api == "chat":
         assert llm.extra_body == {"thinking": {"type": "disabled"}}
         assert llm.openai_api_base == "https://api.deepseek.com"
+        assert llm.use_responses_api is False
     if provider == "deepseek" and expected_api == "responses":
         assert llm.reasoning == {"effort": spec.effort}
         assert llm.use_responses_api is True

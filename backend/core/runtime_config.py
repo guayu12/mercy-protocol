@@ -26,9 +26,16 @@ def _key_status(provider: str) -> dict:
     }
 
 
-def _role_config(runtime: RuntimeSnapshot, role: str, label: str) -> dict:
+def _role_config(
+    runtime: RuntimeSnapshot,
+    role: str,
+    label: str,
+    tool_names: frozenset[str],
+) -> dict:
     spec = runtime.spec(role)
     available = runtime.available(role)
+    if role in {"research", "research_max"}:
+        available = available and "investigate" in tool_names
     reason = None
     if spec is None:
         if role == "memory":
@@ -66,7 +73,11 @@ def _role_config(runtime: RuntimeSnapshot, role: str, label: str) -> dict:
 
 def current_config(runtime: RuntimeSnapshot | None = None) -> dict:
     runtime = runtime or current_snapshot()
-    roles = [_role_config(runtime, role, label) for role, label in ROLE_LABELS]
+    tool_names = runtime.tool_names()
+    roles = [
+        _role_config(runtime, role, label, tool_names)
+        for role, label in ROLE_LABELS
+    ]
     services = [
         {
             "name": "search",
@@ -95,7 +106,6 @@ def current_config(runtime: RuntimeSnapshot | None = None) -> dict:
             "detail": os.environ.get("TTS_VOICE", "zh-CN-XiaoyiNeural"),
         },
     ]
-    tool_names = runtime.tool_names()
     capabilities = {
         "max_tier": runtime.available("research_max") and "investigate" in tool_names,
         "video": "analyze_video" in tool_names,

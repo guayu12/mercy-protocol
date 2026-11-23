@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from core import models, runtime
+from core import models, runtime, runtime_config
 
 
 def _document(roles, *, active="full", profiles=None):
@@ -24,6 +24,24 @@ def _document(roles, *, active="full", profiles=None):
 
 def _write(path, document):
     path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _clear_model_environment(monkeypatch):
+    for role in models.ROLES:
+        for suffix in ("", "_MAX", "_FALLBACK", "_MAX_FALLBACK"):
+            monkeypatch.delenv(f"MODEL_{role.upper()}{suffix}", raising=False)
+    for name in (
+        "DEFAULT_MODEL",
+        "DEFAULT_REASONING_EFFORT",
+        "OPENAI_VISION_MODEL",
+        "OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "TAVILY_API_KEY",
+        "OPENAI_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -161,6 +179,78 @@ def test_profile_reload_uses_new_mtime_and_retains_last_valid(profile_path):
     assert invalid.spec("conversation").model == "second-model"
     assert invalid.version == second.version
     assert "profiles.json.unexpected" in invalid.error
+
+
+@pytest.mark.parametrize(
+    (
+        "max_configured",
+        "tavily_configured",
+        "expected_max_tier",
+        "expected_research_reason",
+        "expected_research_max_reason",
+    ),
+    [
+        (False, False, False, "未配置 Tavily key", "未配置 MODEL_RESEARCH_MAX"),
+        (False, True, False, None, "未配置 MODEL_RESEARCH_MAX"),
+        (True, False, False, "未配置 Tavily key", "未配置 Tavily key"),
+        (True, True, True, None, None),
+    ],
+)
+def test_environment_config_research_rows_follow_investigate_availability(
+    profile_path,
+    monkeypatch,
+    max_configured,
+    tavily_configured,
+    expected_max_tier,
+    expected_research_reason,
+    expected_research_max_reason,
+):
+    profile_path.unlink(missing_ok=True)
+    _clear_model_environment(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("MODEL_RESEARCH", "openai:research-model")
+    if max_configured:
+        monkeypatch.setenv("MODEL_RESEARCH_MAX", "openai:research-max-model")
+    if tavily_configured:
+        monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
+
+    config = runtime_config.current_config()
+
+    research = next(row for row in config["roles"] if row["role"] == "research")
+    research_max = next(
+        row for row in config["roles"] if row["role"] == "research_max"
+    )
+    assert config["capabilities"]["max_tier"] is expected_max_tier
+    assert research["available"] is tavily_configured
+    assert research["reason"] == expected_research_reason
+    assert research_max["available"] is (max_configured and tavily_configured)
+    assert research_max["reason"] == expected_research_max_reason
+
+
+def test_profile_config_research_rows_require_tavily(profile_path, monkeypatch):
+    _clear_model_environment(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    _write(
+        profile_path,
+        _document(
+            {
+                "conversation": "openai:conversation-model",
+                "research": "openai:research-model",
+                "research_max": "openai:research-max-model",
+            }
+        ),
+    )
+
+    config = runtime_config.current_config()
+
+    research = next(row for row in config["roles"] if row["role"] == "research")
+    research_max = next(
+        row for row in config["roles"] if row["role"] == "research_max"
+    )
+    assert config["capabilities"]["max_tier"] is False
+    for row in (research, research_max):
+        assert row["available"] is False
+        assert row["reason"] == "未配置 Tavily key"
 
 
 @pytest.mark.asyncio

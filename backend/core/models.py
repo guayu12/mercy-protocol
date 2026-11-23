@@ -354,6 +354,7 @@ def get_llm(
     }
     if spec.provider == "deepseek" and api_kind(spec) == "chat":
         options["extra_body"] = {"thinking": {"type": "disabled"}}
+        options["use_responses_api"] = False
     elif spec.provider == "deepseek":
         options["reasoning"] = {"effort": spec.effort}
         options["use_responses_api"] = True
