@@ -340,13 +340,14 @@ async def _ping_role(snapshot, role: str) -> None:
 
 
 async def _test_role(snapshot, profile: str, role: str) -> None:
-    spec = snapshot.spec(*_role_parts(role)[:2], fallback=_role_parts(role)[2])
+    role_name, tier, fallback = _role_parts(role)
+    spec = snapshot.spec(role_name, tier, fallback=fallback)
     if spec is None:
         return
     key = models.provider_key(spec.provider)
     if key is None:
         raise ConfigApiError(400, "missing_key", "缺少 key")
-    if role == "vision":
+    if role_name == "vision":
         if spec.provider == "deepseek":
             found = await list_models("deepseek", key[0])
             runtime.cache_deepseek_capabilities(
@@ -365,7 +366,7 @@ async def _test_role(snapshot, profile: str, role: str) -> None:
             )
         elif spec.provider != "openai":
             raise models.ModelConfigError("image capability missing")
-    if role == "video":
+    if role_name == "video":
         found = await list_models("gemini", key[0])
         if not any(item["id"] == spec.model for item in found):
             raise models.ModelConfigError("video model unavailable")
@@ -413,7 +414,8 @@ async def _run_role_test(snapshot, profile: str, role: str):
             "category": provider_error.category,
             "message": (
                 "当前配置的看图模型不支持图片输入"
-                if role == "vision" and isinstance(error, models.ModelConfigError)
+                if _role_parts(role)[0] == "vision"
+                and isinstance(error, models.ModelConfigError)
                 else provider_error.message
             ),
         }

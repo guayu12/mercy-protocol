@@ -440,6 +440,50 @@ def test_save_profiles_allows_inactive_profile_without_conversation(
     runtime.reset_runtime_cache()
 
 
+@pytest.mark.asyncio
+async def test_deepseek_vision_fallback_checks_image_capability(monkeypatch):
+    _clear_keys(monkeypatch)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek-capability-key")
+    document = {
+        "version": 1,
+        "active": "full",
+        "profiles": {
+            "full": {
+                "roles": {
+                    "conversation": "deepseek:deepseek-chat@none",
+                    "vision_fallback": "deepseek:deepseek-vision@none",
+                }
+            }
+        },
+    }
+    snapshot = runtime.candidate_snapshot(document, "full")
+    model_requests = []
+    llm_requests = []
+
+    async def listed(provider, key):
+        model_requests.append((provider, key))
+        return [{"id": "deepseek-vision", "image_input": True}]
+
+    class FakeLLM:
+        async def ainvoke(self, _prompt):
+            return None
+
+    def get_llm(role, tier, *, fallback, runtime, **_kwargs):
+        spec = runtime.spec(role, tier, fallback=fallback)
+        llm_requests.append((role, tier, fallback, runtime.image_input.get(spec)))
+        return FakeLLM() if runtime.image_input.get(spec) else None
+
+    monkeypatch.setattr(config_service, "list_models", listed)
+    monkeypatch.setattr(models, "get_llm", get_llm)
+
+    await config_service._test_role(snapshot, "full", "vision_fallback")
+
+    assert model_requests == [
+        ("deepseek", "fake-deepseek-capability-key")
+    ]
+    assert llm_requests == [("vision", "normal", True, True)]
+
+
 def test_profiles_without_keys_are_saved_as_untested(tmp_path, monkeypatch):
     _clear_keys(monkeypatch)
     env_path = tmp_path / ".env"
