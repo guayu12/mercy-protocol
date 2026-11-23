@@ -490,6 +490,34 @@ def test_save_profiles_allows_inactive_profile_without_conversation(
     runtime.reset_runtime_cache()
 
 
+def test_invalid_profile_format_returns_fixed_message(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env, "ENV_PATH", env_path)
+    env.load_env()
+    monkeypatch.setenv("MERCY_PROFILES_PATH", str(tmp_path / "profiles.json"))
+    runtime.reset_runtime_cache()
+    profiles = {
+        "full": {"roles": {"conversation": "not-a-model-spec"}},
+        "lite": {"roles": {"conversation": "deepseek:deepseek-flash@none"}},
+    }
+
+    response = _client().post(
+        "/api/config/profiles",
+        headers=_headers(),
+        json={"profiles": profiles},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "category": "invalid_profiles",
+        "message": "配置格式不正确",
+    }
+    assert "expected provider:model" not in response.text
+    runtime.reset_runtime_cache()
+
+
 @pytest.mark.asyncio
 async def test_deepseek_vision_fallback_checks_image_capability(monkeypatch):
     _clear_keys(monkeypatch)

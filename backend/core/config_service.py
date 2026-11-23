@@ -467,8 +467,10 @@ async def _save_profile_configuration_locked(
     }
     try:
         runtime._parse_profiles_document(document)
-    except models.ModelConfigError as error:
-        raise ConfigApiError(400, "invalid_profiles", str(error)) from None
+    except models.ModelConfigError:
+        raise ConfigApiError(
+            400, "invalid_profiles", "配置格式不正确"
+        ) from None
     old_profiles = valid_previous.get("profiles", {}) if valid_previous else {}
     tests = []
     untested = []
@@ -512,9 +514,12 @@ async def _save_profile_configuration_locked(
         raise ConfigApiError(400, "role_test_failed", errors=errors)
     try:
         await asyncio.to_thread(runtime.save_profiles, profiles)
-    except (models.ModelConfigError, ConfigWriteError) as error:
-        message = error.message if isinstance(error, ConfigWriteError) else str(error)
-        raise ConfigApiError(400, "invalid_profiles", message) from None
+    except models.ModelConfigError:
+        raise ConfigApiError(
+            400, "invalid_profiles", "配置格式不正确"
+        ) from None
+    except ConfigWriteError as error:
+        raise ConfigApiError(400, "invalid_profiles", error.message) from None
     return {
         "ok": True,
         "untested": untested,
@@ -564,9 +569,12 @@ async def _switch_active_profile_locked(
         )
     try:
         await asyncio.to_thread(runtime.set_active, request.active)
-    except (models.ModelConfigError, ConfigWriteError) as error:
-        message = error.message if isinstance(error, ConfigWriteError) else str(error)
-        raise ConfigApiError(400, "invalid_profiles", message) from None
+    except models.ModelConfigError:
+        raise ConfigApiError(
+            400, "invalid_profiles", "配置格式不正确"
+        ) from None
+    except ConfigWriteError as error:
+        raise ConfigApiError(400, "invalid_profiles", error.message) from None
     return {
         "ok": True,
         "config": config_view(runtime.current_snapshot(), editable=editable),
