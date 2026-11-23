@@ -19,9 +19,11 @@ KEY_VARS = frozenset(
     for variable in variables
 )
 _ENCODING_ERROR = "backend/.env 不是 UTF-8 编码，请另存为 UTF-8 后重启"
+ENV_READ_ERROR = "无法读取 backend/.env（可能被占用）"
 _logger = logging.getLogger(__name__)
 _env_error: str | None = None
 _encoding_error_logged = False
+_read_error_logged = False
 
 
 def _system_baseline(values: dict | None = None) -> frozenset[str]:
@@ -56,7 +58,7 @@ def _system_baseline(values: dict | None = None) -> frozenset[str]:
 
 
 def _read_values() -> dict:
-    global _env_error, _encoding_error_logged
+    global _env_error, _encoding_error_logged, _read_error_logged
     try:
         with config_lock(ENV_PATH):
             data = Path(ENV_PATH).read_bytes()
@@ -68,15 +70,25 @@ def _read_values() -> dict:
     except FileNotFoundError:
         _env_error = None
         _encoding_error_logged = False
+        _read_error_logged = False
         return {}
     except UnicodeDecodeError:
         _env_error = _ENCODING_ERROR
+        _read_error_logged = False
         if not _encoding_error_logged:
             _logger.error(_ENCODING_ERROR)
             _encoding_error_logged = True
         return {}
+    except OSError:
+        _env_error = ENV_READ_ERROR
+        _encoding_error_logged = False
+        if not _read_error_logged:
+            _logger.error(ENV_READ_ERROR)
+            _read_error_logged = True
+        return {}
     _env_error = None
     _encoding_error_logged = False
+    _read_error_logged = False
     return dotenv_values(stream=io.StringIO(text))
 
 

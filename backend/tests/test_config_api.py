@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 
 import httpx
 from fastapi.testclient import TestClient
@@ -50,6 +51,38 @@ def _clear_keys(monkeypatch):
         "OPENAI_EMBEDDING_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_key_save_when_env_read_fails_returns_config_write(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    path = tmp_path / ".env"
+    path.write_bytes(b"OTHER=unchanged\n")
+    monkeypatch.setattr(env, "ENV_PATH", path)
+    read_bytes = Path.read_bytes
+    before = read_bytes(path)
+
+    def locked_read(file_path):
+        if file_path == path:
+            raise PermissionError("locked")
+        return read_bytes(file_path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", locked_read)
+        env.load_env()
+        response = _client().post(
+            "/api/config/key",
+            headers=_headers(),
+            json={"provider": "openai", "api_key": "fake-valid-openai-key"},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "category": "config_write",
+            "message": "无法写入配置文件（可能被占用或只读）",
+        }
+        assert read_bytes(path) == before
+
+    env.load_env()
 
 
 def test_local_config_request_rejects_remote_client_and_bad_payload():

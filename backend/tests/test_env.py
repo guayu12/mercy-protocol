@@ -106,6 +106,30 @@ def test_utf16_env_sets_error_and_continues(tmp_path, monkeypatch, caplog):
     assert caplog.text.count(env.env_error()) == 1
 
 
+def test_env_read_permission_error_uses_system_keys_only(tmp_path, monkeypatch):
+    _clear_keys(monkeypatch)
+    path = tmp_path / ".env"
+    path.write_text("DEEPSEEK_API_KEY=file-fake-key\n", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "system-fake-key")
+    monkeypatch.setattr(env, "ENV_PATH", path)
+    read_bytes = Path.read_bytes
+
+    def locked_read(file_path):
+        if file_path == path:
+            raise PermissionError("locked")
+        return read_bytes(file_path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", locked_read)
+        env.load_env()
+
+        assert env.env_error() == "无法读取 backend/.env（可能被占用）"
+        assert os.environ["OPENAI_API_KEY"] == "system-fake-key"
+        assert "DEEPSEEK_API_KEY" not in os.environ
+
+    env.load_env()
+
+
 @pytest.mark.parametrize(
     ("source", "name", "value"),
     [
