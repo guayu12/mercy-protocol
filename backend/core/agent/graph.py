@@ -5,6 +5,7 @@ import asyncio
 import secrets
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables FIRST — before any module reads them
@@ -742,6 +743,17 @@ async def process_query(
         query, image_data_urls = await _prepare_user_media(
             query, thread_id, attachments, image_base64
         )
+        utterance_attachments = []
+        for media_id in attachments or []:
+            record = await media_store.get_media(media_id, thread_id)
+            if record is not None:
+                utterance_attachments.append(
+                    {
+                        "media_id": record["media_id"],
+                        "kind": record["kind"],
+                        "filename": record["caption"],
+                    }
+                )
         turn_id = f"t_{secrets.token_hex(4)}"
         config = {
             "configurable": {
@@ -834,7 +846,12 @@ async def process_query(
                         thread_id, previous_turn_id, interruption_text
                     )
         await session_store.add_utterance(
-            thread_id, turn_id, "user", query, interrupted=False
+            thread_id,
+            turn_id,
+            "user",
+            original_query,
+            interrupted=False,
+            attachments=utterance_attachments,
         )
         router = SpeechRouter(turn_id)
         speaking_started = False
@@ -878,14 +895,16 @@ async def process_query(
         log_bus.emit("flow", "FLOW",
                      f"◈ new query → thread={thread_id!r}, len={len(query)} chars{', +image' if image_data_urls else ''}")
 
+        event_stream = None
         try:
             yield {"type": "turn", "turn_id": turn_id}
             yield {"type": "status", "state": "thinking", "label": "正在思考"}
-            async for event in graph.astream_events(
+            event_stream = graph.astream_events(
                 {"messages": [build_user_message(query, image_data_urls=image_data_urls)], "context": ""},
                 config=config,
                 version="v2",
-            ):
+            )
+            async for event in event_stream:
                 kind = event["event"]
                 if kind in {
                     "on_tool_start",
@@ -1039,6 +1058,10 @@ async def process_query(
             await save_assistant_utterance(interrupted=False)
             raise
         finally:
-            clear_turn_budget(turn_id)
-            if not assistant_utterance_saved:
-                await save_assistant_utterance(interrupted=True)
+            try:
+                if event_stream is not None:
+                    await event_stream.aclose()
+            finally:
+                clear_turn_budget(turn_id)
+                if not assistant_utterance_saved:
+                    await save_assistant_utterance(interrupted=True)

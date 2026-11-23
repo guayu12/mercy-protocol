@@ -15,6 +15,7 @@ venv/
 *.db.bak
 data/
 backend/~/
+frontend/public/live2d/
 
 # Local AI tool configs
 .agents/

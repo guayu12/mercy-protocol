@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -152,6 +153,70 @@ async def test_process_query_splits_reports_from_speech(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_process_query_persists_original_text_and_thread_attachments(
+    monkeypatch, tmp_path
+):
+    connection = await _install_graph(
+        monkeypatch, tmp_path, [AIMessage(content="我会读这份文档。")]
+    )
+    thread_id = "protocol-attachments"
+    document = await media_store.register_media(
+        thread_id,
+        "document",
+        "upload",
+        "application/pdf",
+        "notes.pdf",
+        path="/not-read-by-this-test.pdf",
+    )
+    foreign = await media_store.register_media(
+        "other-thread",
+        "document",
+        "upload",
+        "application/pdf",
+        "foreign.pdf",
+        path="/not-read-by-this-test.pdf",
+    )
+    monkeypatch.setattr(
+        agent_graph,
+        "tools",
+        agent_graph.base_tools + [SimpleNamespace(name="analyze_document")],
+    )
+    try:
+        events = [
+            event
+            async for event in agent_graph.process_query(
+                "请读这份资料",
+                thread_id,
+                attachments=[document["media_id"], foreign["media_id"]],
+            )
+        ]
+        assert events[-1]["type"] == "done"
+        utterance = next(
+            item
+            for item in await session_store.recent_utterances(thread_id)
+            if item["role"] == "user"
+        )
+        assert utterance["text"] == "请读这份资料"
+        assert utterance["attachments"] == [
+            {
+                "media_id": document["media_id"],
+                "kind": "document",
+                "filename": "notes.pdf",
+            }
+        ]
+        state = await agent_graph.app_graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        human_message = next(
+            message for message in state.values["messages"] if message.type == "human"
+        )
+        assert "用户上传了文档" in human_message.content
+        assert document["media_id"] in human_message.content
+    finally:
+        await _close_graph(connection)
+
+
+@pytest.mark.asyncio
 async def test_process_query_moves_overflow_to_a_report(monkeypatch, tmp_path):
     markdown = "|语言|说明|\n|---|---|\n|Rust|高性能|"
     connection = await _install_graph(
@@ -218,7 +283,7 @@ async def test_wrong_interruption_turn_is_ignored(monkeypatch, tmp_path):
                 "spoken_sentence_ids": ["t_wrong.1"],
             },
         )
-        assert (await anext(generator))["type"] == "turn"
+        assert (await generator.__anext__())["type"] == "turn"
         await generator.aclose()
 
         state = await agent_graph.app_graph.aget_state(
@@ -274,7 +339,7 @@ async def test_missing_interruption_sentence_preserves_checkpoint_and_utterance(
                 "spoken_sentence_ids": [first_sentence["id"]],
             },
         )
-        assert (await anext(generator))["type"] == "turn"
+        assert (await generator.__anext__())["type"] == "turn"
         await generator.aclose()
 
         state = await agent_graph.app_graph.aget_state(
@@ -431,7 +496,7 @@ async def test_next_turn_rewrites_checkpoint_to_spoken_interruption(
                 "spoken_sentence_ids": [first_sentence["id"]],
             },
         )
-        await anext(generator)
+        await generator.__anext__()
         await generator.aclose()
         state = await agent_graph.app_graph.aget_state(
             {"configurable": {"thread_id": "protocol-interrupt"}}
@@ -618,7 +683,7 @@ async def test_tool_start_advances_interruption_segment_before_tool_finishes(
                 "spoken_sentence_ids": [first_sentence["id"]],
             },
         )
-        assert (await anext(interruption))["type"] == "turn"
+        assert (await interruption.__anext__())["type"] == "turn"
         await interruption.aclose()
 
         state = await agent_graph.app_graph.aget_state(
@@ -646,7 +711,7 @@ async def test_disconnect_before_speech_does_not_persist_empty_assistant(
         "稍后", "protocol-empty-disconnect"
     )
     try:
-        assert (await anext(generator))["type"] == "turn"
+        assert (await generator.__anext__())["type"] == "turn"
         await generator.aclose()
         utterances = await session_store.recent_utterances(
             "protocol-empty-disconnect"
