@@ -7,7 +7,7 @@ const API_BASE = "http://127.0.0.1:8000";
 const TEST_SENTENCE = "你好，我是你的私人助理。今天想聊点什么呢？我会认真听你说的每一句话。";
 
 /** Dev-only overlay for exercising the avatar without the LLM. */
-export function DebugPanel({ engine }: { engine: AvatarEngine }) {
+export function DebugPanel({ engine, onClose }: { engine: AvatarEngine; onClose?: () => void }) {
     const [open, setOpen] = useState(true);
     const [, refresh] = useReducer(x => x + 1, 0);
     const [overrides, setOverrides] = useState<Record<string, number>>({});
@@ -62,23 +62,26 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
     };
 
     const s = engine.stats;
-    const btn = "px-2 py-0.5 rounded border border-[#e5a96d]/40 hover:bg-[#e5a96d]/20 disabled:opacity-40";
-    const active = "bg-[#e5a96d]/30";
+    const btn = "avatar-debug-button";
+    const active = "is-active";
 
     return createPortal(
-        <div className="fixed bottom-3 left-3 z-[1000] w-64 max-h-[70vh] overflow-y-auto rounded-md bg-black/80 border border-[#e5a96d]/40 text-[10px] font-mono text-amber-100 backdrop-blur pointer-events-auto"
+        <div className="avatar-debug-panel" role="region" aria-label="角色调试面板"
             data-testid="avatar-debug-panel">
-            <button className="w-full flex justify-between px-2 py-1 border-b border-[#e5a96d]/30" onClick={() => setOpen(!open)}>
-                <span>AVATAR DEBUG</span>
-                <span>{s.fps}/{s.targetFps} FPS · {s.drawCalls} DC {open ? "▾" : "▸"}</span>
-            </button>
+            <div className="avatar-debug-header">
+                <button className="avatar-debug-heading" aria-expanded={open} onClick={() => setOpen(!open)}>
+                    <span>AVATAR DEBUG</span>
+                    <span>{s.fps}/{s.targetFps} FPS · {s.drawCalls} DC {open ? "▾" : "▸"}</span>
+                </button>
+                {onClose && <button className="avatar-debug-close" aria-label="关闭角色调试面板" onClick={onClose}>×</button>}
+            </div>
             {open && (
-                <div className="p-2 space-y-2">
-                    <div className="text-white/60">tris {s.triangles.toLocaleString()} · tex {s.textures} · geo {s.geometries}</div>
+                <div className="avatar-debug-body">
+                    <div className="avatar-debug-muted">tris {s.triangles.toLocaleString()} · tex {s.textures} · geo {s.geometries}</div>
 
                     <section>
-                        <div className="text-white/50 mb-1">STATE</div>
-                        <div className="flex flex-wrap gap-1">
+                        <div className="avatar-debug-label">STATE</div>
+                        <div className="avatar-debug-actions">
                             {AVATAR_STATES.map((st: AvatarState) => (
                                 <button key={st} className={`${btn} ${engine.getState() === st ? active : ""}`} onClick={() => engine.setState(st)}>{st}</button>
                             ))}
@@ -87,8 +90,8 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
                     </section>
 
                     <section>
-                        <div className="text-white/50 mb-1">LIP-SYNC</div>
-                        <div className="flex flex-wrap gap-1">
+                        <div className="avatar-debug-label">LIP-SYNC</div>
+                        <div className="avatar-debug-actions">
                             <button className={btn} onClick={() => {
                                 const { cues, duration } = syntheticVisemes();
                                 engine.setState("speaking");
@@ -100,17 +103,17 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
                     </section>
 
                     <section>
-                        <div className="text-white/50 mb-1">LOOK · QUALITY · FRAMING</div>
-                        <div className="grid grid-cols-3 gap-1">
-                            <select className="bg-black border border-[#e5a96d]/40 rounded px-1" value={lighting}
+                        <div className="avatar-debug-label">LOOK · QUALITY · FRAMING</div>
+                        <div className="avatar-debug-selects">
+                            <select className="avatar-debug-select" aria-label="调试灯光" value={lighting}
                                 onChange={e => { const p = e.target.value as LightingPreset; setLighting(p); engine.setLighting(p); }}>
                                 {LIGHTING_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
                             </select>
-                            <select className="bg-black border border-[#e5a96d]/40 rounded px-1" value={quality}
+                            <select className="avatar-debug-select" aria-label="调试画质" value={quality}
                                 onChange={e => { const q = e.target.value as Quality; setQuality(q); engine.setQuality(q); }}>
                                 {QUALITIES.map(q => <option key={q} value={q}>{q}</option>)}
                             </select>
-                            <select className="bg-black border border-[#e5a96d]/40 rounded px-1" value={framing}
+                            <select className="avatar-debug-select" aria-label="调试构图" value={framing}
                                 onChange={e => { const f = e.target.value as Framing; setFraming(f); engine.setFraming(f); }}>
                                 {FRAMINGS.map(f => <option key={f} value={f}>{f}</option>)}
                             </select>
@@ -118,16 +121,16 @@ export function DebugPanel({ engine }: { engine: AvatarEngine }) {
                     </section>
 
                     <section>
-                        <div className="flex justify-between text-white/50 mb-1">
+                        <div className="avatar-debug-expression-heading">
                             <span>EXPRESSIONS</span>
-                            <button className="underline" onClick={() => Object.keys(overrides).forEach(n => setOverride(n, null))}>reset</button>
+                            <button className="avatar-debug-reset" onClick={() => Object.keys(overrides).forEach(n => setOverride(n, null))}>reset</button>
                         </div>
                         {engine.expressionNames.map(name => (
-                            <label key={name} className="flex items-center gap-1">
+                            <label key={name} className="avatar-debug-expression">
                                 <input type="checkbox" checked={name in overrides}
                                     onChange={e => setOverride(name, e.target.checked ? 1 : null)} />
-                                <span className="w-16 truncate">{name}</span>
-                                <input type="range" min={0} max={1} step={0.05} className="flex-1"
+                                <span className="avatar-debug-expression-name">{name}</span>
+                                <input type="range" min={0} max={1} step={0.05} className="avatar-debug-slider"
                                     value={overrides[name] ?? 0} disabled={!(name in overrides)}
                                     onChange={e => setOverride(name, Number(e.target.value))} />
                             </label>

@@ -1530,10 +1530,11 @@ textarea:focus-visible {
 
 .avatar-scene > div > button[data-testid="avatar-debug-toggle"] {
   position: absolute;
-  top: 2.5rem;
-  left: 0.75rem;
+  top: 13px;
+  right: 13px;
   z-index: 40;
-  padding: 0.125rem 0.375rem;
+  min-height: 30px;
+  padding: 3px 8px;
   border: 1px solid rgba(0, 229, 255, 0.4);
   border-radius: 0.25rem;
   background: rgba(0, 0, 0, 0.6);
@@ -1542,6 +1543,106 @@ textarea:focus-visible {
   font-size: 9px;
   cursor: pointer;
 }
+
+#avatar-card:has(.avatar-debug-toggle) .avatar-top-bar {
+  right: 64px;
+}
+
+/* The debug portal lives under body, outside the avatar scene. */
+.avatar-debug-panel {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  z-index: 1000;
+  width: min(340px, calc(100vw - 24px));
+  max-height: min(70vh, calc(100dvh - 24px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-accent);
+  border-radius: 12px;
+  background: rgba(18, 20, 26, 0.96);
+  color: var(--text-primary);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+  font: 11px/1.5 var(--font-mono);
+}
+
+.avatar-debug-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.avatar-debug-heading,
+.avatar-debug-close,
+.avatar-debug-reset {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.avatar-debug-heading {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 10px;
+  color: var(--accent);
+  text-align: left;
+}
+
+.avatar-debug-close {
+  width: 32px;
+  min-height: 32px;
+  margin-right: 4px;
+  color: var(--text-secondary);
+  font-size: 20px;
+}
+
+.avatar-debug-body {
+  min-height: 0;
+  padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.avatar-debug-body section { margin-top: 12px; }
+.avatar-debug-muted, .avatar-debug-label { color: var(--text-secondary); }
+.avatar-debug-label { margin-bottom: 5px; }
+.avatar-debug-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.avatar-debug-button {
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid var(--border-accent);
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.avatar-debug-button:hover,
+.avatar-debug-button.is-active { background: var(--accent-soft); }
+.avatar-debug-button:disabled { opacity: 0.4; cursor: default; }
+.avatar-debug-selects { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.avatar-debug-select {
+  min-width: 0;
+  min-height: 28px;
+  padding: 2px;
+  border: 1px solid var(--border-accent);
+  border-radius: 5px;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.avatar-debug-expression-heading { display: flex; justify-content: space-between; align-items: center; color: var(--text-secondary); }
+.avatar-debug-reset { color: var(--accent); text-decoration: underline; }
+.avatar-debug-expression { display: flex; align-items: center; gap: 6px; min-height: 28px; }
+.avatar-debug-expression-name { width: 68px; overflow: hidden; text-overflow: ellipsis; }
+.avatar-debug-slider { flex: 1; min-width: 0; accent-color: var(--accent); }
 
 .avatar-vignette {
   position: absolute;

@@ -89,8 +89,8 @@ export function VRMAvatar({ onLoaded, speech, onAudioEnd, state = "idle", qualit
             )}
             {DEBUG_ENABLED && engine && (
                 showDebug
-                    ? <DebugPanel engine={engine} />
-                    : <button className="absolute top-10 left-3 z-40 px-1.5 py-0.5 rounded bg-black/60 border border-[#00e5ff]/40 text-[9px] font-mono text-cyan-200"
+                    ? <DebugPanel engine={engine} onClose={() => setShowDebug(false)} />
+                    : <button className="avatar-debug-toggle" aria-label="打开角色调试面板" title="角色调试"
                         onClick={() => setShowDebug(true)} data-testid="avatar-debug-toggle">DBG</button>
             )}
         </div>
