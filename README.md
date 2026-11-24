@@ -14,21 +14,24 @@ statistics, and backend logs; the top-right control selects deep research mode.
 - **LangGraph agent** — multi-turn reasoning, autonomous tool calls, exponential-backoff retries
 - **Hybrid memory** — async SQLite checkpointer (short-term) + ChromaDB vector store with OpenAI `text-embedding-3-small` (long-term RAG)
 - **Multimodal vision** — attached images go natively to the agent model as `image_url` content blocks
-- **Streaming replies** — `/api/chat` streams tokens over SSE; LLM, vision and embeddings all use the OpenAI API (no local inference)
+- **Streaming replies** — `/api/chat` streams speech sentences, report updates, tool events, and status over SSE; chat and vision use configured OpenAI or DeepSeek models, while video/PDF analysis uses Gemini (no local model inference)
 - **VRM avatar** — three.js rendering, idle motion, eye tracking, viseme lip-sync timed from TTS word boundaries
-- **Voice I/O** — browser speech recognition + `edge-tts` streaming TTS
+- **Voice I/O** — browser speech recognition + sentence-based `edge-tts` audio and timed avatar lip-sync
 - **Live telemetry** — every backend step streamed to the UI over SSE (`/api/logs`)
 - **Model settings** — configure provider keys and full/convenient profiles in the settings drawer, with usage statistics and live backend logs
 - **Desktop or web** — run in a browser via Vite, or as a transparent always-on-top Tauri v2 window
 
-See [docs/feature-overview.md](docs/feature-overview.md) for the full walkthrough, architecture diagram, and assessment.
+The screenshots and instructions here describe the current interface.
+[docs/feature-overview.md](docs/feature-overview.md) is a historical design and
+feature overview: its three-column HUD, screenshots, and some API/model
+examples predate the current report workspace and configuration system.
 
 ## Project Structure
 
 ```
 .
 ├── backend/                 # FastAPI + LangGraph service (:8000)
-│   ├── main.py              # API: /api/chat, /api/logs (SSE), /api/tts
+│   ├── main.py              # API: /api/chat, /api/logs (SSE), /api/speech
 │   ├── core/
 │   │   ├── agent/graph.py   # LangGraph state graph, tools, LLM setup
 │   │   ├── memory/          # ChromaDB long-term memory
@@ -36,7 +39,7 @@ See [docs/feature-overview.md](docs/feature-overview.md) for the full walkthroug
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/                # React 19 + Vite + Tailwind v4 + Tauri v2 (:1420)
-│   ├── src/                 # App.tsx (HUD), VRMAvatar.tsx
+│   ├── src/                 # App.tsx (workspace), ModelSettings.tsx, VRMAvatar.tsx
 │   ├── src-tauri/           # Rust desktop shell
 │   └── public/vrm/          # avatar.vrm (pixiv sample, redistributable)
 └── docs/
@@ -49,8 +52,8 @@ See [docs/feature-overview.md](docs/feature-overview.md) for the full walkthroug
 
 ### Prerequisites
 
-- Python 3.12
-- Node.js 20+
+- Python 3.12 recommended (backend CI also tests Python 3.10)
+- Node.js 20.19+ on the 20.x release line, or 22.12+ (Vite 7 requirement)
 - Rust toolchain (only for the Tauri desktop build)
 
 ### 1. Backend
@@ -59,14 +62,38 @@ See [docs/feature-overview.md](docs/feature-overview.md) for the full walkthroug
 cd backend
 python3.12 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-cp .env.example .env        # then fill in your API keys / model names
+cp .env.example .env        # first setup only; preserve an existing .env
+# Replace placeholder keys and select models available to your provider account.
 ./venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 --timeout-graceful-shutdown 3
 ```
 
-This bounds the wait for open streams, such as the log panel, on Ctrl+C or reload.
-Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_BASE_URL`.
-The backend binds to `127.0.0.1` by default; pass `--host` explicitly to override it,
-or run `./venv/bin/python main.py` to use `BACKEND_HOST` from `.env`.
+The command above starts the backend without automatic reload. For development,
+run the built-in entry point from `backend/` instead:
+
+```bash
+./venv/bin/python main.py
+```
+
+`main.py` enables reload, listens on port **8000**, and reads `BACKEND_HOST`
+from `.env` (default `127.0.0.1`). For the direct uvicorn command, pass `--host`
+explicitly to change the bind address. Both examples bound the graceful wait
+for open streams, such as `/api/logs`, to **3 seconds**. Application cleanup and
+worker startup can add time beyond that wait. Reload/Ctrl+C may log
+`timeout graceful shutdown exceeded` and a `CancelledError` traceback; if
+cleanup completes and the process exits or the new worker starts, those
+messages alone do not indicate failure.
+
+If file edits are not detected on macOS/Linux, try polling in that process:
+
+```bash
+WATCHFILES_FORCE_POLLING=true ./venv/bin/python main.py
+```
+
+Polling was needed during local macOS verification; it is a workaround for
+file-change detection, not a required setting on every machine. Keep the page
+open during reload: its log SSE connection should reconnect automatically.
+If Vite serves stale frontend code, restart `npm run dev` and refresh the page.
+
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
 When `backend/data/profiles.json` exists, it takes precedence over the `.env`
 `MODEL_*` settings; set `MERCY_PROFILES_PATH` to use a different profile file.
@@ -91,31 +118,63 @@ System environment API keys override `.env` keys and cannot be changed in the
 configuration UI (the API returns HTTP 409); update those keys in the operating
 system environment instead. The `.env` file must be UTF-8 encoded.
 
-The first configuration UI save creates `backend/data/profiles.json`. After
-that, `MODEL_*` environment selections no longer apply; settings listed as
-`seed_dropped` cannot be represented by profiles and are lost when saving.
-Tavily keys are validated through its `/usage` endpoint, which does not consume
-search credit.
+Saving model profiles through **测试并保存** creates
+`backend/data/profiles.json` on the first successful profile save. This is
+separate from saving an API key: **key saves write `backend/.env` and do not
+create the profile file**. Once profiles exist, `MODEL_*` environment selections
+no longer apply; review any settings listed as `seed_dropped` before saving,
+because they cannot be represented by profiles.
 
-Gemini video and PDF analysis is optional (`GEMINI_API_KEY` or `GOOGLE_API_KEY`
-plus `MODEL_VIDEO=gemini:gemini-3.8-flash`). PDFs are upload-only, limited to
-50 MB and Google's 1,000-page limit. Each call reads a window of up to
-`PDF_MAX_PAGES=300` pages (about 520 image tokens per page, or 156,000 tokens
-for a full window); use `start_page` to continue through a longer document.
-The model's reported total page count is only trustworthy when pages were
-actually read; an out-of-range page window returns no content, and the app
-refuses to answer in that case.
-On the Gemini free tier, Google may use uploaded videos and files to improve
-its products, and people may review them; the paid tier does not use this
-content for product improvement or human review. Mercy does not change behavior
-based on tier: quota exhaustion is reported to the user and is never retried.
-Gemini's Files API free-tier limit is 2 GB per file, and Google automatically
-deletes files after 48 hours. Mercy deletes analyzed videos and documents after
-15 minutes without another question by default (`GEMINI_FILE_RETENTION_SECONDS`,
-set it to `0` to delete immediately); files left by an abnormal exit are cleaned
-on the next startup. The paid-tier Gemini 3.8 Flash input price reference is
-$0.75 per 1 million tokens through 2026-12-31 and $1.50 per 1 million tokens
-starting 2027-01-01.
+Key saves validate against the configured provider: OpenAI, DeepSeek, and Gemini
+use model discovery; Tavily uses `/usage`. A placeholder or invalid key normally
+fails validation. After a successful save, the provider row shows the green
+**已保存，key 有效** notice for about **4 seconds**. This confirms that the save-time
+validation succeeded; it does not guarantee access to every model or operation.
+For offline UI testing, use a local provider stub rather than treating a fake
+key as a valid production credential.
+
+#### Providers and API compatibility
+
+| Capability | Provider / configuration |
+| :--- | :--- |
+| Conversation, reports, research, and image analysis | OpenAI (`OPENAI_API_KEY`) or DeepSeek (`DEEPSEEK_API_KEY`); configure each role with `provider:model[@effort]` or in the settings drawer. Image support depends on the selected model. |
+| Long-term memory embeddings | OpenAI-compatible embeddings endpoint, `OPENAI_API_KEY`, and `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`). |
+| Video and PDF analysis | Gemini, using `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and the configured video role. |
+| Web search | Tavily, using `TAVILY_API_KEY`. |
+
+`OPENAI_BASE_URL` applies to the OpenAI provider and memory embeddings; it does
+not redirect the dedicated DeepSeek or Gemini providers. Compatibility depends
+on the operations used, rather than the endpoint's name: the backend uses Chat
+Completions or Responses API behavior according to the provider/model effort
+configuration, streaming and tool calls for the agent, `/models` for key/model
+discovery, and embeddings when long-term memory is enabled. Check those
+capabilities for your chosen gateway and models; support for a simple text
+completion alone is insufficient.
+
+#### Video/PDF limits and retention
+
+Video and PDF analysis is optional. Configure an available Gemini model for the
+video role; `.env.example` supplies a model example, not an access guarantee.
+Mercy accepts uploaded PDFs up to **50 MiB** and videos up to **200 MiB**. Its
+PDF analysis reads at most `PDF_MAX_PAGES=300` pages per call by default; use
+`start_page` to continue through a longer document. The model's reported total
+page count is only trustworthy when pages were actually read; an out-of-range
+page window returns no content, and the app refuses to answer in that case.
+
+Mercy deletes analyzed Gemini files after **15 minutes without another question**
+by default (`GEMINI_FILE_RETENTION_SECONDS=900`; set `0` to delete immediately).
+Files left by an abnormal exit are cleaned on the next startup. These are app
+policies; provider-side limits and retention are separate. Quota exhaustion is
+reported to the user without retry, and the app does not choose behavior based
+on the account's free/paid tier.
+
+For current provider details, consult Google's official
+[Files API documentation](https://aistudio.google.com/docs/files),
+[document processing documentation](https://aistudio.google.com/docs/document-processing),
+[pricing](https://aistudio.google.com/docs/pricing), and
+[data-use terms](https://aistudio.google.com/docs/terms).
+External links checked **2026-11-24**. Model availability, quotas, token accounting,
+pricing, and data-use terms can change; this README does not freeze those values.
 
 ### 2. Avatar model
 
@@ -144,10 +203,41 @@ Captured on **2026-11-24**, using the same running app as the main screenshot.
 
 ```bash
 cd frontend
-npm install
+npm ci                      # install the locked dependency versions
 npm run dev                 # web: http://localhost:1420
 npm run tauri dev           # or: native desktop window
 ```
+
+## Local validation
+
+From the repository root, with the backend virtual environment already created:
+
+```bash
+cd backend
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/python -m ruff check --select F821,F811,F822,F823 .
+./venv/bin/python -m pytest -q
+```
+
+In a second terminal, from the repository root:
+
+```bash
+cd frontend
+npm ci
+npm run build
+npm run check:media
+```
+
+On Windows, use `venv\Scripts\python` in place of `./venv/bin/python`.
+CI runs backend checks on Ubuntu with Python 3.10 and 3.12, on Windows with
+Python 3.12, and runs the frontend build/media checks with Node.js 20.
+
+For a manual smoke test, start both services and open `http://localhost:1420`.
+Open **设置与状态 → 后端日志**, keep the page open while triggering a backend
+reload, and confirm the log stream reconnects. Check that Ctrl+C releases port
+8000. With a valid provider key (or a local stub for UI-only testing), verify
+the green save notice clears after about four seconds. In the development
+server, check that DBG opens, folds, closes, and reopens the avatar debug panel.
 
 ## Tech Stack
 
