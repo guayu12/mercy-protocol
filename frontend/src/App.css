@@ -2502,6 +2502,10 @@ textarea:focus-visible {
   color: var(--text-muted);
 }
 
+.config-reason.ok {
+  color: var(--emerald);
+}
+
 .model-editor {
   display: flex;
   flex-wrap: wrap;
@@ -2595,6 +2599,10 @@ textarea:focus-visible {
 
 .model-key-form .config-reason {
   flex-basis: 100%;
+}
+
+.model-key > .config-reason.ok {
+  width: 100%;
 }
 
 .config-status-dot.unset {
