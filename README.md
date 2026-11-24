@@ -1,8 +1,13 @@
 # Mercy Protocol
 
-> A local-first, multimodal personal AI assistant with a holographic HUD, an interactive VRM avatar, a LangGraph agent engine, and real-time backend telemetry.
+> A local-first, multimodal personal AI assistant with a report workspace, an interactive VRM avatar, a LangGraph agent engine, and real-time backend telemetry.
 
-![Main Console](docs/screenshots/1_main_dashboard.png)
+![Current runtime: report workspace, Aura avatar, and conversation panel](docs/screenshots/runtime-dashboard-2026-11-24.png)
+
+Captured from the local web app on **2026-11-24** (commit `927b5ee`). Reports
+occupy the main workspace, with Aura and the spoken conversation on the right.
+The top-left settings button opens model configuration, API keys, usage
+statistics, and backend logs; the top-right control selects deep research mode.
 
 ## Features
 
@@ -13,6 +18,7 @@
 - **VRM avatar** — three.js rendering, idle motion, eye tracking, viseme lip-sync timed from TTS word boundaries
 - **Voice I/O** — browser speech recognition + `edge-tts` streaming TTS
 - **Live telemetry** — every backend step streamed to the UI over SSE (`/api/logs`)
+- **Model settings** — configure provider keys and full/convenient profiles in the settings drawer, with usage statistics and live backend logs
 - **Desktop or web** — run in a browser via Vite, or as a transparent always-on-top Tauri v2 window
 
 See [docs/feature-overview.md](docs/feature-overview.md) for the full walkthrough, architecture diagram, and assessment.
@@ -116,6 +122,23 @@ starting 2027-01-01.
 The frontend loads `frontend/public/vrm/avatar.vrm`, pixiv's VRM 1.0 sample model, which is licensed for redistribution, modification and commercial use (see `frontend/public/vrm/LICENSE.md`). To use your own character, export a VRM 1.0 file (e.g. from [VRoid Studio](https://vroid.com/en/studio)) and replace that file.
 
 Lip-sync: `POST /api/speech` returns the edge-tts audio plus a viseme track (`aa/ih/ou/ee/oh` with start/end times), built from edge-tts word boundaries and pypinyin finals.
+
+#### Avatar debugging
+
+In the Vite development server, **DBG** appears at the top-right of the avatar
+card, aligned with the **Aura** name at the top-left. It also appears in a
+production build when the URL includes `?debug`.
+
+Click **DBG** to open the floating **AVATAR DEBUG** panel at the bottom-left
+of the page. Use it to inspect FPS and rendering statistics, exercise avatar
+states and lip-sync, and adjust lighting, quality, framing, or expressions.
+The panel scrolls when needed; click its heading to collapse it, or **×** to
+close it and restore the DBG button. The silent vowel test needs no LLM call;
+**TTS sentence** calls the backend speech endpoint.
+
+![Avatar debug panel running locally after the visibility fix](docs/screenshots/avatar-debug-2026-11-24.png)
+
+Captured on **2026-11-24**, using the same running app as the main screenshot.
 
 ### 3. Frontend
 
