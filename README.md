@@ -62,6 +62,7 @@ Any OpenAI-compatible endpoint works (OpenAI, Volcengine Ark, etc.) via `OPENAI_
 The backend binds to `127.0.0.1` by default; pass `--host` explicitly to override it,
 or run `./venv/bin/python main.py` to use `BACKEND_HOST` from `.env`.
 Runtime data (`aura_checkpoints.db`, `data/chroma_db/`) is created inside `backend/`.
+Legacy memories in the `personal_assistant_memory` collection are not automatically carried over to `personal_assistant_memory_openai`, which uses OpenAI embeddings.
 When `backend/data/profiles.json` exists, it takes precedence over the `.env`
 `MODEL_*` settings; set `MERCY_PROFILES_PATH` to use a different profile file.
 In profile mode, `.env` model selections are ignored, while API keys remain
